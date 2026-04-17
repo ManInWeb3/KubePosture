@@ -73,12 +73,6 @@ python manage.py create_service_token cluster-name-1
 
 ### Import from a cluster
 
-Requires the `kubernetes` Python package:
-
-```bash
-pip install kubernetes
-```
-
 Import everything (Trivy + Kyverno):
 
 ```bash
@@ -152,7 +146,6 @@ python manage.py recalculate_priorities
 | `cleanup_ingest_queue` | Delete old processed queue items |
 | `backfill_compliance` | Reprocess raw compliance reports into structured models |
 | `backfill_sbom` | Reprocess raw SBOM reports into component models |
-| `sync_cluster_meta` | Re-apply cluster name parsing overrides to existing DB records |
 
 ## Build & Release
 
@@ -249,7 +242,6 @@ Note: Tests marked with `@pytest.mark.django_db` require PostgreSQL running via 
 | `DEBUG` | No | `False` | Enable debug mode |
 | `ALLOWED_HOSTS` | No | `[]` | Comma-separated list of allowed hosts |
 | `LOG_LEVEL` | No | `INFO` | Logging level |
-| `CLUSTER_NAME_PARSING_OVERRIDES_JSON` | No | `{}` | JSON object mapping cluster names to `{provider, environment, region, project}` for clusters whose names don't follow auto-parse conventions. See `core/parsers/metadata.py` for examples. |
 
 ## Tech Stack
 

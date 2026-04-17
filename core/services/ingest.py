@@ -30,21 +30,23 @@ class IngestError(Exception):
 
 
 def get_or_create_cluster(name: str):
-    """Auto-register cluster on first ingest (Convention D2)."""
+    """Auto-register cluster on first ingest (Convention D2).
+
+    Only environment is auto-parsed from the cluster name. All other
+    metadata (provider, region, project) defaults to empty and is set
+    in Django admin when needed.
+    """
     from core.models import Cluster
 
     meta = parse_cluster_meta(name)
     cluster, created = Cluster.objects.get_or_create(
         name=name,
-        defaults={
-            "provider": meta.get("provider", "unknown"),
-            "environment": meta.get("environment", "unknown"),
-            "region": meta.get("region", ""),
-            "project": meta.get("project", ""),
-        },
+        defaults={"environment": meta["environment"]},
     )
     if created:
-        logger.info("Auto-registered cluster: %s (%s)", name, meta)
+        logger.info(
+            "Auto-registered cluster: %s (environment=%s)", name, meta["environment"]
+        )
     return cluster
 
 

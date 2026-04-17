@@ -192,6 +192,8 @@ class ClusterAdmin(admin.ModelAdmin):
                 "fields": ["internet_exposed", "contains_sensitive_data", "namespace_overrides"],
                 "description": (
                     "These flags feed the effective priority decision tree. "
+                    "Saving any of these fields automatically recalculates priorities for all "
+                    "active findings in this cluster. "
                     "Namespace overrides inherit cluster defaults when not set. "
                     'Format: {"namespace": {"internet_exposed": true/false, "contains_sensitive_data": true/false}}'
                 ),
@@ -199,6 +201,20 @@ class ClusterAdmin(admin.ModelAdmin):
         ),
     ]
     actions = ["recalculate_priorities"]
+
+    # Fields whose changes require a priority recalculation.
+    _PRIORITY_FIELDS = {"environment", "internet_exposed", "contains_sensitive_data", "namespace_overrides"}
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        if change and self._PRIORITY_FIELDS & set(form.changed_data):
+            from core.services.priority import recalculate_cluster_priorities
+
+            count = recalculate_cluster_priorities(obj)
+            self.message_user(
+                request,
+                f"Priorities recalculated: {count} finding(s) updated for cluster '{obj.name}'.",
+            )
 
     @admin.action(description="Recalculate effective priorities for selected clusters")
     def recalculate_priorities(self, request, queryset):

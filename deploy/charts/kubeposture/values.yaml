@@ -5,51 +5,6 @@
 # -- Secret containing DATABASE_URL and SECRET_KEY
 secretName: kubeposture-secret
 
-# -- Cluster name parsing overrides for clusters whose names don't follow conventions.
-#
-# Standard naming conventions are auto-parsed with no config needed:
-#   myapp-prd-usw2-eks   → provider=eks, environment=prod, region=us-west-2, project=myapp
-#   azure-prod-eastus-01 → provider=aks, environment=prod, region=eastus
-#   myapps-fra1-do       → provider=do, region=fra1
-#
-# Only add entries here for non-standard exception clusters.
-# Keys are exact cluster names as reported by the Trivy/Kyverno scanner.
-#
-# Fields per entry:
-#   provider    – ovh | eks | aks | do | gke | unknown
-#   environment – prod | staging | dev | unknown
-#   region      – cloud region string
-#   project     – logical grouping / team name
-#
-# After changing this, run:
-#   manage.py sync_cluster_meta [--cluster NAME] [--dry-run]
-# to apply updated parsing to already-registered clusters without waiting
-# for the next ingest.
-#
-# Examples (uncomment and adjust):
-#
-# clusterNameParsingOverrides:
-#   central-cluster:
-#     provider: ovh
-#     environment: prod
-#     region: eu-west-par
-#     project: central
-#
-#   legacy-payments:
-#     provider: eks
-#     environment: prod
-#     region: us-east-1
-#     project: payments
-#
-#   dev-sandbox-do:
-#     provider: do
-#     environment: dev
-#     region: fra1
-#     project: sandbox
-#
-# When empty, no ConfigMap or env var is created — purely additive.
-clusterNameParsingOverrides: {}
-
 # -- Application environment variables (non-sensitive)
 app:
   env:

@@ -79,13 +79,6 @@ Common environment variables shared across web, worker, cronjobs.
 - name: {{ $key }}
   value: {{ $value | quote }}
 {{- end }}
-{{- if .Values.clusterNameParsingOverrides }}
-- name: CLUSTER_NAME_PARSING_OVERRIDES_JSON
-  valueFrom:
-    configMapKeyRef:
-      name: {{ include "kubeposture.fullname" . }}-overrides
-      key: CLUSTER_NAME_PARSING_OVERRIDES_JSON
-{{- end }}
 {{- end }}
 
 {{/*

@@ -7,8 +7,11 @@ class Cluster(models.Model):
     """
     K8s cluster auto-registered on first ingest (Convention D2).
 
-    Metadata (provider, environment, region) resolved from cluster name
-    via parse_cluster_meta() — convention-based parsing with overrides dict.
+    environment is auto-parsed from the cluster name on first ingest.
+    All other metadata (provider, region, project) defaults to empty
+    and is set in Django admin. Changing environment, internet_exposed,
+    contains_sensitive_data, or namespace_overrides in the admin
+    automatically recalculates effective priorities for the cluster.
     """
 
     name = models.CharField(max_length=253, unique=True)

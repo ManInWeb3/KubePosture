@@ -6,35 +6,47 @@ from core.parsers.metadata import (
 
 
 class TestParseClusterMeta:
-    def test_aws_eks(self):
-        meta = parse_cluster_meta("someapp-prd-usw2-eks")
-        assert meta["provider"] == "eks"
-        assert meta["environment"] == "prod"
-        assert meta["region"] == "us-west-2"
-        assert meta["project"] == "someapp"
+    def test_prd_abbreviation(self):
+        assert parse_cluster_meta("someapp-prd-usw2-eks")["environment"] == "prod"
 
-    def test_azure_aks(self):
-        meta = parse_cluster_meta("azure-prod-japaneast-001")
-        assert meta["provider"] == "aks"
-        assert meta["environment"] == "prod"
-        assert meta["region"] == "japaneast"
+    def test_prod_full(self):
+        assert parse_cluster_meta("azure-prod-eastus-01")["environment"] == "prod"
 
-    def test_digitalocean(self):
-        meta = parse_cluster_meta("someapps-fra1-do")
-        assert meta["provider"] == "do"
-        assert meta["region"] == "fra1"
+    def test_production_full(self):
+        assert parse_cluster_meta("production-cluster")["environment"] == "prod"
 
-    def test_override(self):
-        meta = parse_cluster_meta("central-someorg")
-        assert meta["provider"] == "ovh"
-        assert meta["environment"] == "prod"
-        assert meta["region"] == "eu-west-par"
-        assert meta["project"] == "central"
+    def test_staging(self):
+        assert parse_cluster_meta("myapp-staging-cluster")["environment"] == "staging"
+
+    def test_stg_abbreviation(self):
+        assert parse_cluster_meta("payments-stg-do")["environment"] == "staging"
+
+    def test_stage(self):
+        assert parse_cluster_meta("stage-eu-west")["environment"] == "staging"
+
+    def test_uat(self):
+        assert parse_cluster_meta("uat-payments-cluster")["environment"] == "staging"
+
+    def test_preprod(self):
+        assert parse_cluster_meta("preprod-apps")["environment"] == "staging"
+
+    def test_dev(self):
+        assert parse_cluster_meta("dev-sandbox-do")["environment"] == "dev"
+
+    def test_development(self):
+        assert parse_cluster_meta("development-cluster")["environment"] == "dev"
+
+    def test_env_anywhere_in_name(self):
+        # keyword can appear in any segment position
+        assert parse_cluster_meta("apps-fra1-do-prod")["environment"] == "prod"
 
     def test_unknown(self):
-        meta = parse_cluster_meta("something-random")
-        assert meta["provider"] == "unknown"
-        assert meta["environment"] == "unknown"
+        assert parse_cluster_meta("something-random")["environment"] == "unknown"
+
+    def test_only_returns_environment(self):
+        # no provider/region/project guessing
+        meta = parse_cluster_meta("someapp-prd-usw2-eks")
+        assert set(meta.keys()) == {"environment"}
 
 
 class TestParseNamespaceMeta:
