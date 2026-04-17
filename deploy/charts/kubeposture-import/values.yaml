@@ -10,9 +10,13 @@ clusterName: ""
 # -- KubePosture API base URL
 kubepostureUrl: "https://kubeposture.central.someorg.xyz"
 
-# -- Name of the K8s secret containing the KubePosture API token
-# The secret must have a key named "token"
-secretName: kubeposture-import-token
+# -- KubePosture API token — provide either a plaintext value or a secret reference.
+# If secretRef.name is set it takes precedence over value.
+token:
+  value: "SomeStrongSecret"               # plaintext value (default)
+  secretRef:
+    name: null                            # if set, takes precedence over value
+    key: null
 
 # -- What to import
 import:

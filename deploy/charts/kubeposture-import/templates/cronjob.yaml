@@ -49,10 +49,14 @@ spec:
                 - name: KUBEPOSTURE_URL
                   value: {{ .Values.kubepostureUrl | quote }}
                 - name: KUBEPOSTURE_TOKEN
+                {{- if .Values.token.secretRef.name }}
                   valueFrom:
                     secretKeyRef:
-                      name: {{ .Values.secretName }}
-                      key: token
+                      name: {{ .Values.token.secretRef.name }}
+                      key: {{ .Values.token.secretRef.key }}
+                {{- else }}
+                  value: {{ .Values.token.value | quote }}
+                {{- end }}
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true

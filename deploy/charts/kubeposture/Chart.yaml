@@ -6,4 +6,4 @@ type: application
 
 version: 0.0.0     # Version is tracked via git tags: `helm-${HELM_NAME}-vx.y.z` eg. helm-kubeposture-v0.1.0
 
-appVersion: "0.1.0"
+appVersion: "0.1.1"
