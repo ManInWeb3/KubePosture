@@ -19,6 +19,7 @@ app:
   env:
     DEBUG: "False"
     ALLOWED_HOSTS: "*"
+    CSRF_TRUSTED_ORIGINS: ""      # e.g. "https://kubeposture.example.com"
     LOG_LEVEL: "INFO"
     INGEST_QUEUE_MAX_ATTEMPTS: "3"
 
