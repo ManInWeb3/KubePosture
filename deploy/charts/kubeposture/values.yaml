@@ -1,9 +1,13 @@
 # -- KubePosture Helm chart values
 # Database is NOT included — use CNPG (CloudNativePG) or any external PostgreSQL 16+.
-# Provide DATABASE_URL via the secret referenced by secretName.
 
-# -- Secret containing DATABASE_URL and SECRET_KEY
+# -- Secret containing SECRET_KEY
 secretName: kubeposture-secret
+
+# -- Database URL secret (e.g. CNPG-generated secret)
+db:
+  secretName: kubeposture-secret   # secret that holds the DB URL
+  urlKey: DATABASE_URL             # key inside that secret (e.g. "uri" for CNPG)
 
 # -- Application environment variables (non-sensitive)
 app:

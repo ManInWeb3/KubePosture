@@ -68,8 +68,8 @@ Common environment variables shared across web, worker, cronjobs.
 - name: DATABASE_URL
   valueFrom:
     secretKeyRef:
-      name: {{ .Values.secretName }}
-      key: DATABASE_URL
+      name: {{ .Values.db.secretName }}
+      key: {{ .Values.db.urlKey }}
 - name: SECRET_KEY
   valueFrom:
     secretKeyRef:
