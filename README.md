@@ -329,9 +329,3 @@ Note: Tests marked with `@pytest.mark.django_db` require PostgreSQL running via 
 - **Static files:** Whitenoise
 - **Queue:** PostgreSQL-backed async ingest queue (no Redis/Celery)
 
-## Documentation
-
-- [Architecture](../docs/architecture.md) -- full system design, data model, feature catalog
-- [Implementation Plan](../docs/implementation-plan.md) -- phase-by-phase checklist
-- [UI Reference](../docs/ui-reference.md) -- page layouts, badge conventions, glossary
-- [Conventions](../docs/conventions.md) -- design rules and coding conventions
