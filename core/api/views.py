@@ -1,0 +1,204 @@
+import logging
+
+from rest_framework import generics, status
+from rest_framework.authentication import TokenAuthentication
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from core.api.filters import FindingFilter
+from core.api.permissions import IsAdmin, IsOperator
+from core.api.serializers import FindingSerializer
+from core.models import Finding
+from core.services.queue import enqueue
+
+logger = logging.getLogger(__name__)
+
+
+class IngestView(APIView):
+    """
+    POST /api/v1/ingest/
+
+    Accepts raw CRD JSON (Trivy or Kyverno). Routes by `kind` field to parser.
+    Cluster identified via X-Cluster-Name header or CRD metadata.
+
+    Always queues: INSERT into IngestQueue → return 202 Accepted (~2ms).
+    Queue processor (manage.py process_ingest_queue) handles parsing/dedup.
+
+    Convention A1: This is the only write path for security data.
+    Convention A3: Payload is raw CRD JSON — scanners don't transform.
+    """
+
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        cluster_name = request.headers.get("X-Cluster-Name")
+        payload = request.data
+
+        if not isinstance(payload, dict):
+            return Response(
+                {"error": "Request body must be a JSON object"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Extract cluster_name from CRD labels if not in header
+        if not cluster_name:
+            cluster_name = self._extract_cluster_name(payload)
+
+        if not cluster_name:
+            return Response(
+                {"error": "X-Cluster-Name header required or cluster name must be in CRD metadata"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        item = enqueue(cluster_name=cluster_name, raw_json=payload)
+
+        kind = payload.get("kind", "")
+        if not kind and "operatorObject" in payload:
+            kind = payload["operatorObject"].get("kind", "")
+
+        return Response(
+            {
+                "status": "queued",
+                "queue_id": item.pk,
+                "cluster": cluster_name,
+                "kind": kind,
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+    @staticmethod
+    def _extract_cluster_name(payload: dict) -> str | None:
+        """Try to extract cluster name from CRD metadata labels."""
+        labels = payload.get("metadata", {}).get("labels", {})
+        for key in ("trivy-operator.cluster.name", "cluster"):
+            if key in labels:
+                return labels[key]
+        # Envelope format
+        if "operatorObject" in payload:
+            inner_labels = payload.get("operatorObject", {}).get("metadata", {}).get("labels", {})
+            for key in ("trivy-operator.cluster.name", "cluster"):
+                if key in inner_labels:
+                    return inner_labels[key]
+        return None
+
+
+class FindingListView(generics.ListAPIView):
+    """GET /api/v1/findings/ — filtered, paginated finding list."""
+
+    serializer_class = FindingSerializer
+    filterset_class = FindingFilter
+    queryset = Finding.objects.select_related("cluster").all()
+
+
+class FindingDetailView(generics.RetrieveAPIView):
+    """GET /api/v1/findings/{id}/ — single finding detail."""
+
+    serializer_class = FindingSerializer
+    queryset = Finding.objects.select_related("cluster").all()
+
+
+# ── Lifecycle action endpoints (Convention A2) ─────────────────
+
+
+class _FindingActionView(APIView):
+    """Base for explicit finding action endpoints."""
+
+    def get_finding_or_404(self, pk):
+        from django.shortcuts import get_object_or_404
+
+        return get_object_or_404(Finding, pk=pk)
+
+
+class AcknowledgeView(_FindingActionView):
+    """POST /api/v1/findings/{id}/acknowledge/ — operator+"""
+
+    permission_classes = [IsAuthenticated, IsOperator]
+
+    def post(self, request, pk):
+        from core.services.lifecycle import LifecycleError, acknowledge
+
+        try:
+            finding = acknowledge(pk, request.user)
+        except Finding.DoesNotExist:
+            return Response({"error": "Finding not found"}, status=status.HTTP_404_NOT_FOUND)
+        except LifecycleError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({"status": finding.status, "id": finding.pk})
+
+
+class AcceptRiskView(_FindingActionView):
+    """POST /api/v1/findings/{id}/accept-risk/ — admin-only, requires reason + until"""
+
+    permission_classes = [IsAuthenticated, IsAdmin]
+
+    def post(self, request, pk):
+        from core.services.lifecycle import LifecycleError, accept_risk
+
+        reason = request.data.get("reason", "")
+        until = request.data.get("until")
+        if not reason:
+            return Response(
+                {"error": "reason is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
+        if not until:
+            return Response(
+                {"error": "until (expiry date) is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            finding = accept_risk(pk, request.user, reason, until)
+        except Finding.DoesNotExist:
+            return Response({"error": "Finding not found"}, status=status.HTTP_404_NOT_FOUND)
+        except LifecycleError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            "status": finding.status,
+            "id": finding.pk,
+            "accepted_until": str(finding.accepted_until),
+        })
+
+
+class FalsePositiveView(_FindingActionView):
+    """POST /api/v1/findings/{id}/false-positive/ — admin-only, requires reason"""
+
+    permission_classes = [IsAuthenticated, IsAdmin]
+
+    def post(self, request, pk):
+        from core.services.lifecycle import LifecycleError, false_positive
+
+        reason = request.data.get("reason", "")
+        if not reason:
+            return Response(
+                {"error": "reason is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            finding = false_positive(pk, request.user, reason, )
+        except Finding.DoesNotExist:
+            return Response({"error": "Finding not found"}, status=status.HTTP_404_NOT_FOUND)
+        except LifecycleError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({"status": finding.status, "id": finding.pk})
+
+
+class ReactivateView(_FindingActionView):
+    """POST /api/v1/findings/{id}/reactivate/ — admin-only"""
+
+    permission_classes = [IsAuthenticated, IsAdmin]
+
+    def post(self, request, pk):
+        from core.services.lifecycle import LifecycleError, reactivate
+
+        try:
+            finding = reactivate(pk, request.user)
+        except Finding.DoesNotExist:
+            return Response({"error": "Finding not found"}, status=status.HTTP_404_NOT_FOUND)
+        except LifecycleError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({"status": finding.status, "id": finding.pk})

@@ -1,0 +1,57 @@
+# -- kubeposture-import: imports Trivy/Kyverno CRD data from this cluster into KubePosture
+#
+# Deploy this chart to EACH cluster that has Trivy Operator and/or Kyverno installed.
+# It creates a CronJob that reads CRDs from the local K8s API and POSTs them to the
+# KubePosture ingest endpoint.
+
+# -- Cluster name as registered in KubePosture (e.g. cluster-name-1, cluster-name-2)
+clusterName: ""
+
+# -- KubePosture API base URL
+kubepostureUrl: "https://kubeposture.central.someorg.xyz"
+
+# -- Name of the K8s secret containing the KubePosture API token
+# The secret must have a key named "token"
+secretName: kubeposture-import-token
+
+# -- What to import
+import:
+  trivy: true
+  kyverno: true
+
+# -- CronJob schedule (default: every 6 hours)
+schedule: "0 */6 * * *"
+
+# -- Maximum run time for the import job
+activeDeadlineSeconds: 900
+
+# -- Image containing the import script + kubernetes Python client
+image:
+  repository: ""          # set per environment (same image as kubeposture app)
+  pullPolicy: IfNotPresent
+  tag: ""
+
+imagePullSecrets: []
+
+# -- Resources for the import job
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# -- Naming
+nameOverride: ""
+fullnameOverride: ""
+
+# -- Service account: needs read access to Trivy and Kyverno CRDs
+serviceAccount:
+  create: true
+  automount: true
+  annotations: {}
+  name: ""
+
+nodeSelector: {}
+tolerations: []

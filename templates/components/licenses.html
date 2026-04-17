@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+
+{% block title %}License Overview — KubePosture{% endblock %}
+{% block pretitle %}<a href="{% url 'components-list' %}" class="text-decoration-none">Components</a>{% endblock %}
+{% block page_title %}License Overview <span class="text-muted fs-5 ms-2">{{ total_components }} components</span>{% endblock %}
+
+{% block content %}
+<div class="row row-cards">
+  <!-- Restrictive in production -->
+  {% if prod_restrictive %}
+  <div class="col-lg-6">
+    <div class="card mb-3 border-danger">
+      <div class="card-header bg-danger-lt">
+        <h3 class="card-title text-danger">Restrictive Licenses in Production</h3>
+      </div>
+      <div class="list-group list-group-flush">
+        {% for lic, count in prod_restrictive %}
+        <a href="{% url 'components-list' %}?license={{ lic }}&restrictive=true"
+           class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
+          <span class="text-danger fw-bold">{{ lic }}</span>
+          <span class="badge bg-danger-lt text-danger">{{ count }} components</span>
+        </a>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- All restrictive -->
+  {% if restrictive_counts %}
+  <div class="col-lg-6">
+    <div class="card mb-3">
+      <div class="card-header bg-warning-lt">
+        <h3 class="card-title">All Restrictive Licenses (GPL/AGPL)</h3>
+      </div>
+      <div class="list-group list-group-flush">
+        {% for lic, count in restrictive_counts %}
+        <a href="{% url 'components-list' %}?license={{ lic }}"
+           class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
+          <span>{{ lic }}</span>
+          <span class="badge bg-warning text-dark">{{ count }}</span>
+        </a>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Top licenses -->
+  <div class="col-12">
+    <div class="card">
+      <div class="card-header"><h3 class="card-title">Top 50 Licenses</h3></div>
+      <div class="table-responsive">
+        <table class="table table-vcenter table-sm mb-0">
+          <thead>
+            <tr><th>License</th><th>Components</th><th></th></tr>
+          </thead>
+          <tbody>
+            {% for lic, count in license_counts %}
+            <tr>
+              <td>
+                {% if lic in restrictive_licenses %}
+                  <span class="text-danger fw-bold">{{ lic }}</span>
+                {% else %}
+                  {{ lic }}
+                {% endif %}
+              </td>
+              <td>
+                <div class="d-flex align-items-center">
+                  <div class="flex-fill" style="max-width:300px">
+                    <div class="progress progress-sm">
+                      {% widthratio count license_counts.0.1 100 as pct %}
+                      <div class="progress-bar {% if lic in restrictive_licenses %}bg-danger{% else %}bg-azure{% endif %}"
+                           style="width:{% widthratio count license_counts.0.1 100 %}%"></div>
+                    </div>
+                  </div>
+                  <span class="ms-2 text-muted">{{ count }}</span>
+                </div>
+              </td>
+              <td>
+                <a href="{% url 'components-list' %}?license={{ lic }}" class="btn btn-sm btn-outline-secondary">View</a>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

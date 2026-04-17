@@ -1,0 +1,58 @@
+{
+  "apiVersion": "aquasecurity.github.io/v1alpha1",
+  "kind": "ConfigAuditReport",
+  "metadata": {
+    "name": "replicaset-backend-6d4cf56db6",
+    "namespace": "prod-app-backend",
+    "labels": {
+      "trivy-operator.resource.kind": "ReplicaSet",
+      "trivy-operator.resource.name": "backend-6d4cf56db6",
+      "trivy-operator.resource.namespace": "prod-app-backend"
+    }
+  },
+  "report": {
+    "summary": {
+      "criticalCount": 1,
+      "highCount": 0,
+      "mediumCount": 1,
+      "lowCount": 0
+    },
+    "checks": [
+      {
+        "checkID": "KSV001",
+        "title": "Process can elevate its own privileges",
+        "description": "A program inside the container can elevate its own privileges.",
+        "severity": "CRITICAL",
+        "success": false,
+        "messages": ["Container 'app' should set 'securityContext.allowPrivilegeEscalation' to false"],
+        "category": "Kubernetes Security Check",
+        "scope": {
+          "type": "Container",
+          "value": "app"
+        }
+      },
+      {
+        "checkID": "KSV003",
+        "title": "Default capabilities not dropped",
+        "description": "The container should drop all default capabilities.",
+        "severity": "MEDIUM",
+        "success": false,
+        "messages": ["Container 'app' should add 'ALL' to 'securityContext.capabilities.drop'"],
+        "category": "Kubernetes Security Check",
+        "scope": {
+          "type": "Container",
+          "value": "app"
+        }
+      },
+      {
+        "checkID": "KSV012",
+        "title": "Requires root filesystem to be read-only",
+        "description": "Container should set readOnlyRootFilesystem.",
+        "severity": "LOW",
+        "success": true,
+        "messages": [],
+        "category": "Kubernetes Security Check"
+      }
+    ]
+  }
+}

@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+
+{% block title %}Settings — KubePosture{% endblock %}
+{% block pretitle %}Administration{% endblock %}
+{% block page_title %}Settings{% endblock %}
+
+{% block content %}
+{% if messages %}
+{% for msg in messages %}
+<div class="alert alert-{{ msg.tags }} alert-dismissible">{{ msg }}
+  <a class="btn-close" data-bs-dismiss="alert"></a>
+</div>
+{% endfor %}
+{% endif %}
+
+<!-- Tabs -->
+<ul class="nav nav-bordered mb-3">
+  <li class="nav-item">
+    <a class="nav-link{% if settings_tab == 'users' %} active{% endif %}" href="{% url 'user-list' %}">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-1">
+        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
+        <path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+      </svg>
+      Users
+    </a>
+  </li>
+  <li class="nav-item">
+    <a class="nav-link{% if settings_tab == 'clusters' %} active{% endif %}" href="{% url 'settings-clusters' %}">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-1">
+        <rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/>
+        <line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/>
+      </svg>
+      Clusters
+    </a>
+  </li>
+
+</ul>
+
+<!-- Tab content -->
+{% block settings_content %}
+{% include "settings/_clusters.html" %}
+{% endblock %}
+{% endblock %}

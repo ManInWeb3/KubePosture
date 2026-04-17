@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+{% load findings_tags %}
+
+{% block title %}{{ finding.vuln_id|default:finding.title|truncatechars:40 }} — KubePosture{% endblock %}
+{% block pretitle %}Finding Detail{% endblock %}
+{% block page_title %}
+  {% severity_badge finding.severity %}
+  {{ finding.vuln_id|default:"" }}
+  {{ finding.title|truncatechars:80 }}
+  {% if finding.kev_listed %}<span class="badge bg-danger ms-1">KEV</span>{% endif %}
+{% endblock %}
+
+{% block content %}
+<div class="row row-cards">
+  <!-- Main info -->
+  <div class="col-lg-8">
+    <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title">Finding Details</h3></div>
+      <div class="card-body">
+        <div class="datagrid">
+          <div class="datagrid-item">
+            <div class="datagrid-title">Title</div>
+            <div class="datagrid-content">{{ finding.title }}</div>
+          </div>
+          <div class="datagrid-item">
+            <div class="datagrid-title">ID</div>
+            <div class="datagrid-content">{{ finding.vuln_id|default:"—" }}</div>
+          </div>
+          <div class="datagrid-item">
+            <div class="datagrid-title">Category</div>
+            <div class="datagrid-content">{{ finding.get_category_display }}</div>
+          </div>
+          <div class="datagrid-item">
+            <div class="datagrid-title">Source</div>
+            <div class="datagrid-content">{{ finding.get_source_display }}</div>
+          </div>
+          {% if finding.details.score %}
+          <div class="datagrid-item">
+            <div class="datagrid-title">CVSS</div>
+            <div class="datagrid-content">{{ finding.details.score }}</div>
+          </div>
+          {% endif %}
+          {% if finding.epss_score != None %}
+          <div class="datagrid-item">
+            <div class="datagrid-title">EPSS</div>
+            <div class="datagrid-content">{% epss_badge finding.epss_score %}</div>
+          </div>
+          {% endif %}
+          {% if finding.details.component_name %}
+          <div class="datagrid-item">
+            <div class="datagrid-title">Component</div>
+            <div class="datagrid-content">
+              {{ finding.details.component_name }}
+              {% if finding.details.installed_version %}@ {{ finding.details.installed_version }}{% endif %}
+              {% if finding.details.fixed_version %}
+                <span class="text-success ms-1">Fix: {{ finding.details.fixed_version }}</span>
+              {% endif %}
+            </div>
+          </div>
+          {% endif %}
+          {% if finding.details.advisory_url %}
+          <div class="datagrid-item">
+            <div class="datagrid-title">Advisory</div>
+            <div class="datagrid-content"><a href="{{ finding.details.advisory_url }}" target="_blank" rel="noopener">{{ finding.details.advisory_url|truncatechars:60 }}</a></div>
+          </div>
+          {% endif %}
+          {% if finding.details.description %}
+          <div class="datagrid-item" style="grid-column: span 2">
+            <div class="datagrid-title">Description</div>
+            <div class="datagrid-content">{{ finding.details.description }}</div>
+          </div>
+          {% endif %}
+          {% if finding.details.remediation %}
+          <div class="datagrid-item" style="grid-column: span 2">
+            <div class="datagrid-title">Remediation</div>
+            <div class="datagrid-content">{{ finding.details.remediation }}</div>
+          </div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    <!-- K8s Resource Context -->
+    <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title">Resource Context</h3></div>
+      <div class="card-body">
+        <div class="datagrid">
+          <div class="datagrid-item">
+            <div class="datagrid-title">Cluster</div>
+            <div class="datagrid-content">{{ finding.cluster.name|default:"—" }}</div>
+          </div>
+          <div class="datagrid-item">
+            <div class="datagrid-title">Namespace</div>
+            <div class="datagrid-content">{{ finding.namespace|default:"—" }}</div>
+          </div>
+          <div class="datagrid-item">
+            <div class="datagrid-title">Resource</div>
+            <div class="datagrid-content">{{ finding.resource_kind }}/{{ finding.resource_name }}</div>
+          </div>
+          {% if finding.details.image %}
+          <div class="datagrid-item">
+            <div class="datagrid-title">Image</div>
+            <div class="datagrid-content">{{ finding.details.image }}</div>
+          </div>
+          {% endif %}
+          {% if finding.details.container %}
+          <div class="datagrid-item">
+            <div class="datagrid-title">Container</div>
+            <div class="datagrid-content">{{ finding.details.container }}</div>
+          </div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    <!-- Raw JSON (collapsible) -->
+    <div class="card mb-3">
+      <div class="card-header">
+        <h3 class="card-title">
+          <a data-bs-toggle="collapse" href="#raw-json" class="text-decoration-none">Raw Details (JSON)</a>
+        </h3>
+      </div>
+      <div id="raw-json" class="collapse">
+        <div class="card-body">
+          <pre class="bg-dark text-light p-3 rounded" style="max-height:400px;overflow:auto;font-size:0.8rem">{{ finding.details|pprint }}</pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sidebar: status + actions + audit trail -->
+  <div class="col-lg-4">
+    <!-- Status -->
+    <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title">Lifecycle</h3></div>
+      <div class="card-body">
+        <div class="mb-3">
+          <span class="fw-bold">Status:</span> {% status_badge finding.status %}
+        </div>
+        <div class="mb-3">
+          <span class="fw-bold">Priority:</span> {% priority_badge finding.effective_priority %}
+          {% if priority_reason %}<small class="text-muted ms-1">{{ priority_reason }}</small>{% endif %}
+        </div>
+        <div class="datagrid">
+          <div class="datagrid-item">
+            <div class="datagrid-title">First seen</div>
+            <div class="datagrid-content">{{ finding.first_seen|date:"Y-m-d H:i" }}</div>
+          </div>
+          <div class="datagrid-item">
+            <div class="datagrid-title">Last seen</div>
+            <div class="datagrid-content">{{ finding.last_seen|date:"Y-m-d H:i" }}</div>
+          </div>
+          {% if finding.resolved_at %}
+          <div class="datagrid-item">
+            <div class="datagrid-title">Resolved at</div>
+            <div class="datagrid-content">{{ finding.resolved_at|date:"Y-m-d H:i" }}</div>
+          </div>
+          {% endif %}
+        </div>
+        {% if finding.status == "risk_accepted" %}
+        <div class="alert alert-warning mt-3 mb-0">
+          <strong>Risk accepted</strong> by {{ finding.accepted_by|default:"unknown" }}
+          {% if finding.accepted_until %}until {{ finding.accepted_until }}{% endif %}
+          {% if finding.accepted_reason %}<br><small>{{ finding.accepted_reason }}</small>{% endif %}
+        </div>
+        {% endif %}
+      </div>
+      {% if finding.status == "active" %}
+      <div class="card-footer">
+        <div class="d-flex gap-2">
+          <form method="post" action="{% url 'findings-acknowledge' finding.pk %}">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-sm btn-outline-primary">Acknowledge</button>
+          </form>
+          <button type="button" class="btn btn-sm btn-outline-warning" data-bs-toggle="modal" data-bs-target="#risk-modal">
+            Accept Risk
+          </button>
+        </div>
+      </div>
+      {% elif finding.status == "acknowledged" %}
+      <div class="card-footer">
+        <button type="button" class="btn btn-sm btn-outline-warning" data-bs-toggle="modal" data-bs-target="#risk-modal">
+          Accept Risk
+        </button>
+      </div>
+      {% endif %}
+    </div>
+
+    <!-- Audit Trail -->
+    <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title">Audit Trail</h3></div>
+      <div class="list-group list-group-flush">
+        {% for h in history %}
+        <div class="list-group-item">
+          <div class="d-flex justify-content-between">
+            <small class="text-muted">{{ h.timestamp|date:"Y-m-d H:i" }}</small>
+            <small>{{ h.user.username|default:"system" }}</small>
+          </div>
+          <div>
+            {% status_badge h.old_status %} &rarr; {% status_badge h.new_status %}
+          </div>
+          {% if h.comment %}<small class="text-muted">{{ h.comment|truncatechars:100 }}</small>{% endif %}
+        </div>
+        {% empty %}
+        <div class="list-group-item text-muted text-center">No status changes recorded.</div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Risk acceptance modal -->
+<div class="modal modal-blur fade" id="risk-modal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <form method="post" action="{% url 'findings-accept-risk' finding.pk %}">
+        {% csrf_token %}
+        <div class="modal-header">
+          <h5 class="modal-title">Accept Risk — {{ finding.vuln_id|default:finding.title|truncatechars:40 }}</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label required">Reason</label>
+            <textarea name="reason" class="form-control" rows="3" required placeholder="Why is this risk acceptable?"></textarea>
+          </div>
+          <div class="mb-3">
+            <label class="form-label required">Expiry date</label>
+            <input type="date" name="until" class="form-control" required
+                   min="{{ today|date:'Y-m-d' }}"
+                   value="{{ default_expiry|date:'Y-m-d' }}">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn me-auto" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-warning">Accept Risk</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}

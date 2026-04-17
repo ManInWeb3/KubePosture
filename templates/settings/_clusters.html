@@ -1,0 +1,83 @@
+<!-- Closable explanation -->
+<div class="alert alert-info alert-dismissible" role="alert" id="cluster-help">
+  <div class="d-flex">
+    <div>
+      <h4 class="alert-title">Cluster Exposure Settings</h4>
+      <div class="text-secondary">
+        These flags feed the <strong>effective priority</strong> decision tree. A CRITICAL CVE on an internet-exposed
+        production cluster gets <strong>Immediate</strong> priority, while the same CVE on an isolated dev cluster
+        gets <strong>Scheduled</strong>.
+        <ul class="mt-2 mb-0">
+          <li><strong>Internet Exposed</strong> — cluster has services reachable from the public internet (ingress, LoadBalancer). Increases priority for findings on this cluster.</li>
+          <li><strong>Sensitive Data</strong> — cluster processes PII, financial, or regulated data. Findings on HIGH/MEDIUM severity get elevated to Scheduled instead of Defer.</li>
+          <li><strong>Namespace Overrides</strong> — for mixed clusters where some namespaces are exposed and others are internal. Overrides inherit cluster defaults when not set.</li>
+          <li><strong>Environment</strong> — auto-detected from cluster name on first ingest. Production clusters get higher priority than dev/staging.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <a class="btn-close" data-bs-dismiss="alert" aria-label="Close"></a>
+</div>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table table-hover">
+      <thead>
+        <tr>
+          <th>Cluster</th>
+          <th title="Auto-detected from cluster name convention">Environment</th>
+          <th>Provider</th>
+          <th title="Cluster has internet-facing services (ingress, LoadBalancer)">Internet Exposed</th>
+          <th title="Cluster processes PII, financial, or regulated data">Sensitive Data</th>
+          <th title="Per-namespace exposure overrides for mixed clusters">NS Overrides</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in clusters %}
+        <tr>
+          <td><strong>{{ c.name }}</strong></td>
+          <td>
+            {% if c.environment == "prod" %}
+              <span class="badge bg-danger-lt text-danger">prod</span>
+            {% elif c.environment == "staging" %}
+              <span class="badge bg-warning-lt text-warning">staging</span>
+            {% elif c.environment == "dev" %}
+              <span class="badge bg-azure-lt text-azure">dev</span>
+            {% else %}
+              <span class="badge bg-secondary-lt text-secondary">{{ c.environment }}</span>
+            {% endif %}
+          </td>
+          <td class="text-muted">{{ c.provider }}</td>
+          <td>
+            {% if c.internet_exposed %}
+              <span class="badge bg-danger-lt text-danger" title="Internet-facing services present">Yes</span>
+            {% else %}
+              <span class="badge bg-success-lt text-success" title="No public exposure">No</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if c.contains_sensitive_data %}
+              <span class="badge bg-warning-lt text-warning" title="Processes PII/financial/regulated data">Yes</span>
+            {% else %}
+              <span class="badge bg-secondary-lt text-secondary">No</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if c.namespace_overrides %}
+              <span class="badge bg-blue-lt text-blue" title="{{ c.namespace_overrides }}">{{ c.namespace_overrides|length }} ns</span>
+            {% else %}
+              <span class="text-muted">—</span>
+            {% endif %}
+          </td>
+          <td>
+            <a href="{% url 'settings-cluster-edit' c.pk %}" class="btn btn-sm btn-outline-primary">Configure</a>
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="7" class="text-center text-muted py-4">No clusters registered. Clusters appear after first data ingest.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>

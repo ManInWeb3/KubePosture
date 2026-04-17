@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+
+{% block title %}Components — KubePosture{% endblock %}
+{% block pretitle %}SBOM{% endblock %}
+{% block page_title %}
+  Component Inventory
+  <span class="text-muted fs-5 ms-2">{{ page_obj.paginator.count }} components</span>
+  <a href="{% url 'license-overview' %}" class="btn btn-sm btn-outline-secondary ms-3">License Overview</a>
+{% endblock %}
+
+{% block content %}
+<!-- Filters -->
+<div class="card mb-3">
+  <div class="card-body">
+    <form method="get" id="comp-filter" hx-get="{% url 'components-list' %}" hx-target="#comp-table" hx-push-url="true" hx-swap="innerHTML">
+      <div class="row g-2">
+        <div class="col-auto">
+          <select name="cluster" class="form-select form-select-sm" onchange="this.form.requestSubmit()">
+            <option value="">All clusters</option>
+            {% for c in clusters %}
+            <option value="{{ c.pk }}" {% if request.GET.cluster == c.pk|stringformat:"d" %}selected{% endif %}>{{ c.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-auto flex-grow-1">
+          <input type="text" name="search" class="form-control form-control-sm"
+                 placeholder="Search component name or purl (e.g. openssl, log4j, pkg:deb/...)"
+                 value="{{ request.GET.search }}"
+                 hx-get="{% url 'components-list' %}" hx-target="#comp-table"
+                 hx-trigger="keyup changed delay:300ms" hx-push-url="true" hx-include="#comp-filter">
+        </div>
+        <div class="col-auto">
+          <label class="form-check form-check-inline">
+            <input type="checkbox" name="restrictive" value="true" class="form-check-input"
+                   {% if request.GET.restrictive == "true" %}checked{% endif %} onchange="this.form.requestSubmit()">
+            <span class="form-check-label text-danger fw-bold">GPL/AGPL only</span>
+          </label>
+        </div>
+        <div class="col-auto">
+          <a href="{% url 'components-list' %}" class="btn btn-sm btn-outline-secondary">Clear</a>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="comp-table">
+  {% include "components/_table.html" %}
+</div>
+{% endblock %}

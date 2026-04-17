@@ -1,0 +1,62 @@
+{{- range $name, $job := .Values.cronJobs }}
+{{- if $job.enabled }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "kubeposture.fullname" $ }}-{{ $name | kebabcase }}
+  labels:
+    {{- include "kubeposture.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: cronjob
+spec:
+  schedule: {{ $job.schedule | quote }}
+  concurrencyPolicy: Forbid
+  failedJobsHistoryLimit: 3
+  successfulJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ $job.activeDeadlineSeconds | default 300 }}
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            {{- include "kubeposture.selectorLabels" $ | nindent 12 }}
+            app.kubernetes.io/component: cronjob
+            kubeposture/cronjob: {{ $name | kebabcase }}
+        spec:
+          {{- with $.Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          serviceAccountName: {{ include "kubeposture.serviceAccountName" $ }}
+          securityContext:
+            {{- include "kubeposture.podSecurityContext" $ | nindent 12 }}
+          restartPolicy: Never
+          containers:
+            - name: {{ $name | kebabcase }}
+              image: "{{ $.Values.image.repository }}:{{ $.Values.image.tag | default $.Chart.AppVersion }}"
+              imagePullPolicy: {{ $.Values.image.pullPolicy }}
+              command:
+                {{- toYaml $job.command | nindent 16 }}
+              env:
+                {{- include "kubeposture.env" $ | nindent 16 }}
+              securityContext:
+                {{- include "kubeposture.securityContext" $ | nindent 16 }}
+              resources:
+                {{- toYaml $job.resources | nindent 16 }}
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}
+          {{- with $.Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $.Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}
+{{- end }}

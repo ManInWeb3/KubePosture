@@ -1,0 +1,57 @@
+# Sample CIS K8s 1.23 framework fixture (subset for testing).
+# Full fixture will be extracted from Trivy Operator compliance specs.
+#
+# Usage: python manage.py load_frameworks fixtures/k8s-cis-1.23-sample.yaml
+
+framework:
+  id: k8s-cis-1.23
+  name: "CIS Kubernetes Benchmark"
+  version: "1.23"
+  description: "CIS Kubernetes Benchmark v1.23 — subset for development testing"
+  source: trivy
+
+controls:
+  - id: "1.2.1"
+    section: "1.2 API Server"
+    title: "Ensure that the --anonymous-auth argument is set to false"
+    severity: CRITICAL
+    check_type: automated
+    check_ids: ["AVD-KCV-0001"]
+    kyverno_policies: []
+    remediation: "Set --anonymous-auth=false on the API server"
+
+  - id: "1.2.6"
+    section: "1.2 API Server"
+    title: "Ensure that the --profiling argument is set to false"
+    severity: CRITICAL
+    check_type: automated
+    check_ids: ["AVD-KCV-0020"]
+    kyverno_policies: []
+    remediation: "Set --profiling=false on the API server"
+
+  - id: "4.1.1"
+    section: "4.1 RBAC and Service Accounts"
+    title: "Ensure that the cluster-admin role is only used where required"
+    severity: HIGH
+    check_type: automated
+    check_ids: ["AVD-KSV-0017"]
+    kyverno_policies: ["disallow-privileged-containers"]
+    remediation: "Minimize use of cluster-admin role binding"
+
+  - id: "5.1.1"
+    section: "5.1 RBAC"
+    title: "Ensure that the cluster-admin role is only used where required"
+    severity: HIGH
+    check_type: automated
+    check_ids: ["AVD-KSV-0041"]
+    kyverno_policies: []
+    remediation: "Review cluster-admin role bindings and remove unnecessary ones"
+
+  - id: "5.7.1"
+    section: "5.7 General Policies"
+    title: "Create administrative boundaries between resources using namespaces"
+    severity: MEDIUM
+    check_type: manual
+    check_ids: []
+    kyverno_policies: []
+    remediation: "Use namespaces to isolate workloads and teams"

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Login — KubePosture</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.2.0/dist/css/tabler.min.css">
+</head>
+<body class="d-flex flex-column bg-light" style="min-height:100vh">
+  <div class="page page-center">
+    <div class="container container-tight py-4">
+      <div class="text-center mb-4">
+        <span class="fs-1 fw-bold">KubePosture</span>
+        <div class="text-muted">K8s Security Platform</div>
+      </div>
+      <div class="card card-md">
+        <div class="card-body">
+          <h2 class="h2 text-center mb-4">Sign in</h2>
+          {% if form.errors %}
+          <div class="alert alert-danger">Invalid username or password.</div>
+          {% endif %}
+          <form method="post" action="{% url 'login' %}">
+            {% csrf_token %}
+            <input type="hidden" name="next" value="{{ next }}">
+            <div class="mb-3">
+              <label class="form-label">Username</label>
+              <input type="text" name="username" class="form-control" placeholder="Username" autofocus required>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Password</label>
+              <input type="password" name="password" class="form-control" placeholder="Password" required>
+            </div>
+            <div class="form-footer">
+              <button type="submit" class="btn btn-primary w-100">Sign in</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

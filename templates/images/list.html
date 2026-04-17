@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% load findings_tags %}
+
+{% block title %}Images — KubePosture{% endblock %}
+{% block pretitle %}Vulnerability Posture{% endblock %}
+{% block page_title %}
+  Images
+  <span class="text-muted fs-5 ms-2">{{ total_images }} entries with active CVEs</span>
+{% endblock %}
+
+{% block content %}
+<!-- Filters (same order as columns) -->
+<div class="card mb-3">
+  <div class="card-body py-2">
+    <form method="get" class="d-flex gap-2 align-items-center flex-wrap">
+      <select name="cluster" class="form-select form-select-sm" style="width:auto" onchange="this.form.submit()">
+        <option value="">All clusters</option>
+        {% for c in clusters %}
+        <option value="{{ c.pk }}" {% if request.GET.cluster == c.pk|stringformat:"d" %}selected{% endif %}>{{ c.name }}</option>
+        {% endfor %}
+      </select>
+      <input type="text" name="namespace" class="form-control form-control-sm" style="max-width:200px"
+             placeholder="Namespace..." value="{{ request.GET.namespace|default:'' }}">
+      <input type="text" name="search" class="form-control form-control-sm" style="max-width:300px"
+             placeholder="Search image name..." value="{{ request.GET.search|default:'' }}">
+      <button type="submit" class="btn btn-sm btn-outline-secondary">Filter</button>
+      {% if request.GET.cluster or request.GET.namespace or request.GET.search %}
+      <a href="{% url 'image-list' %}" class="btn btn-sm btn-outline-secondary">Clear</a>
+      {% endif %}
+    </form>
+  </div>
+</div>
+
+<!-- Image table -->
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table table-hover">
+      <thead>
+        <tr>
+          <th>Cluster</th>
+          <th>Namespace</th>
+          <th>Image</th>
+          <th title="Total active CVEs">Total</th>
+          <th title="Critical severity CVEs">C</th>
+          <th title="High severity CVEs">H</th>
+          <th title="CVEs with a fix available">Fixable</th>
+          <th title="CVEs on CISA Known Exploited Vulnerabilities list">KEV</th>
+          <th title="Highest EPSS score among CVEs in this image">Max EPSS</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for stat in image_stats %}
+        <tr>
+          <td>{{ stat.cluster__name|default:"—" }}</td>
+          <td class="text-muted">{{ stat.namespace|default:"—" }}</td>
+          <td>
+            <a href="{% url 'image-detail' stat.image %}" class="fw-bold font-monospace" style="font-size:0.85rem"
+               title="{{ stat.image }}">
+              {{ stat.short_image }}
+            </a>
+          </td>
+          <td><span class="fw-bold">{{ stat.total_cves }}</span></td>
+          <td>{% if stat.critical %}<span class="text-danger fw-bold">{{ stat.critical }}</span>{% else %}0{% endif %}</td>
+          <td>{% if stat.high %}<span class="text-orange">{{ stat.high }}</span>{% else %}0{% endif %}</td>
+          <td>{% if stat.fixable %}<span class="text-success">{{ stat.fixable }}</span>{% else %}0{% endif %}</td>
+          <td>{% if stat.kev_count %}<span class="badge bg-danger-lt text-danger">{{ stat.kev_count }}</span>{% else %}—{% endif %}</td>
+          <td>{% if stat.max_epss %}{% epss_badge stat.max_epss %}{% else %}—{% endif %}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="9" class="text-center text-muted py-4">No images with active vulnerabilities.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

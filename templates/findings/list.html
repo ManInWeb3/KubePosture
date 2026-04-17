@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+
+{% block title %}Findings — KubePosture{% endblock %}
+{% block pretitle %}Security Findings{% endblock %}
+{% block page_title %}
+  Findings
+  <span class="text-muted fs-5 ms-2">{{ page_obj.paginator.count }} total</span>
+{% endblock %}
+
+{% block content %}
+<!-- Filters -->
+<div class="card mb-3">
+  <div class="card-body">
+    <form method="get" id="filter-form" hx-get="{% url 'findings-list' %}" hx-target="#findings-table" hx-push-url="true" hx-swap="innerHTML">
+      <div class="row g-2">
+        <div class="col-auto">
+          <select name="cluster" class="form-select form-select-sm" onchange="this.form.requestSubmit()">
+            <option value="">All clusters</option>
+            {% for c in clusters %}
+            <option value="{{ c.pk }}" {% if request.GET.cluster == c.pk|stringformat:"d" %}selected{% endif %}>{{ c.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-auto">
+          <select name="priority" class="form-select form-select-sm" title="Effective priority — contextual action urgency" onchange="this.form.requestSubmit()">
+            <option value="">All priorities</option>
+            {% for val, label in priority_choices %}
+            <option value="{{ val }}" {% if request.GET.priority == val %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-auto">
+          <select name="severity" class="form-select form-select-sm" onchange="this.form.requestSubmit()">
+            <option value="">All severities</option>
+            {% for val, label in severity_choices %}
+            <option value="{{ val }}" {% if request.GET.severity == val %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-auto">
+          <label class="form-check form-check-inline" title="Show only CISA Known Exploited Vulnerabilities">
+            <input type="checkbox" name="kev_listed" value="true" class="form-check-input"
+                   {% if request.GET.kev_listed == "true" %}checked{% endif %} onchange="this.form.requestSubmit()">
+            <span class="form-check-label text-danger fw-bold">KEV</span>
+          </label>
+        </div>
+        <div class="col-auto">
+          <select name="status" class="form-select form-select-sm" onchange="this.form.requestSubmit()">
+            <option value="">All statuses</option>
+            {% for val, label in status_choices %}
+            <option value="{{ val }}" {% if request.GET.status == val %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-auto">
+          <select name="category" class="form-select form-select-sm" onchange="this.form.requestSubmit()">
+            <option value="">All categories</option>
+            {% for val, label in category_choices %}
+            <option value="{{ val }}" {% if request.GET.category == val %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-auto">
+          <input type="text" name="search" class="form-control form-control-sm" placeholder="Search component, CVE, title..."
+                 value="{{ request.GET.search }}" hx-get="{% url 'findings-list' %}" hx-target="#findings-table"
+                 hx-trigger="keyup changed delay:300ms" hx-push-url="true" hx-include="#filter-form">
+        </div>
+        {% if request.GET.image %}
+        <input type="hidden" name="image" value="{{ request.GET.image }}">
+        <div class="col-auto">
+          <span class="badge bg-azure-lt text-azure" title="{{ request.GET.image }}">
+            Image: {{ request.GET.image|truncatechars:30 }}
+            <a href="{% url 'findings-list' %}" class="ms-1 text-azure">&times;</a>
+          </span>
+        </div>
+        {% endif %}
+        <div class="col-auto">
+          <a href="{% url 'findings-list' %}" class="btn btn-sm btn-outline-secondary">Clear</a>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Bulk actions -->
+<form method="post" action="{% url 'findings-bulk-action' %}" id="bulk-form">
+  {% csrf_token %}
+  <div class="d-flex align-items-center mb-2 gap-2" id="bulk-actions" style="display:none !important">
+    <span class="text-muted" id="bulk-count">0 selected</span>
+    <select name="action" class="form-select form-select-sm" style="width:auto">
+      <option value="">Bulk action...</option>
+      <option value="acknowledge">Acknowledge</option>
+      <option value="resolve">Resolve</option>
+    </select>
+    <button type="submit" class="btn btn-sm btn-primary">Apply</button>
+  </div>
+
+<!-- Findings table -->
+<div id="findings-table">
+  {% include "findings/_table.html" %}
+</div>
+</form>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// Bulk selection UI
+document.addEventListener('change', function(e) {
+  if (e.target.matches('.finding-check, #select-all')) {
+    const checks = document.querySelectorAll('.finding-check:checked');
+    const bar = document.getElementById('bulk-actions');
+    const count = document.getElementById('bulk-count');
+    if (checks.length > 0) {
+      bar.style.removeProperty('display');
+      count.textContent = checks.length + ' selected';
+    } else {
+      bar.style.display = 'none';
+    }
+    if (e.target.id === 'select-all') {
+      document.querySelectorAll('.finding-check').forEach(cb => cb.checked = e.target.checked);
+      if (e.target.checked) {
+        bar.style.removeProperty('display');
+        count.textContent = document.querySelectorAll('.finding-check').length + ' selected';
+      } else {
+        bar.style.display = 'none';
+      }
+    }
+  }
+});
+</script>
+{% endblock %}

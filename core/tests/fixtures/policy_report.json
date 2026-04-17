@@ -1,0 +1,71 @@
+{
+  "apiVersion": "wgpolicyk8s.io/v1alpha2",
+  "kind": "PolicyReport",
+  "metadata": {
+    "name": "polr-ns-prod-app-backend",
+    "namespace": "prod-app-backend",
+    "labels": {
+      "app.kubernetes.io/managed-by": "kyverno"
+    }
+  },
+  "scope": {
+    "apiVersion": "apps/v1",
+    "kind": "Deployment",
+    "name": "backend",
+    "namespace": "prod-app-backend"
+  },
+  "results": [
+    {
+      "policy": "disallow-privileged-containers",
+      "rule": "restrict-privileged",
+      "result": "pass",
+      "severity": "high",
+      "category": "Pod Security Standards",
+      "message": "Validation rule 'restrict-privileged' passed.",
+      "source": "kyverno"
+    },
+    {
+      "policy": "require-resource-limits",
+      "rule": "check-cpu-limits",
+      "result": "fail",
+      "severity": "medium",
+      "category": "Best Practices",
+      "message": "Container 'app' does not have CPU limits defined.",
+      "source": "kyverno"
+    },
+    {
+      "policy": "require-resource-limits",
+      "rule": "check-memory-limits",
+      "result": "fail",
+      "severity": "medium",
+      "category": "Best Practices",
+      "message": "Container 'app' does not have memory limits defined.",
+      "source": "kyverno"
+    },
+    {
+      "policy": "deny-latest-tag",
+      "rule": "validate-image-tag",
+      "result": "pass",
+      "severity": "high",
+      "category": "Best Practices",
+      "message": "Validation rule 'validate-image-tag' passed.",
+      "source": "kyverno"
+    },
+    {
+      "policy": "restrict-host-namespaces",
+      "rule": "host-namespaces",
+      "result": "warn",
+      "severity": "high",
+      "category": "Pod Security Standards",
+      "message": "Warning: host namespaces usage detected.",
+      "source": "kyverno"
+    }
+  ],
+  "summary": {
+    "pass": 2,
+    "fail": 2,
+    "warn": 1,
+    "error": 0,
+    "skip": 0
+  }
+}

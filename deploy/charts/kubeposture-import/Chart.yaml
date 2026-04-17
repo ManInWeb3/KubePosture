@@ -1,0 +1,9 @@
+apiVersion: v2
+name: kubeposture-import
+description: CronJob to import Trivy/Kyverno CRD data from a cluster into KubePosture
+
+type: application
+
+version: 0.0.0     # Version is tracked via git tags: `helm-${HELM_NAME}-vx.y.z` eg. helm-kubeposture-import-v0.1.0
+
+appVersion: "0.1.0"

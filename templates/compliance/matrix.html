@@ -1,0 +1,236 @@
+{% extends "base.html" %}
+
+{% block title %}{{ framework.name }} — Compliance Matrix{% endblock %}
+{% block pretitle %}
+  <a href="{% url 'compliance-overview' %}" class="text-decoration-none">Compliance</a>
+{% endblock %}
+{% block page_title %}{{ framework.name }} <span class="text-muted">v{{ framework.version }}</span>{% endblock %}
+
+{% block extra_css %}
+<style>
+  .matrix-cell {
+    text-align: center;
+    min-width: 100px;
+    font-weight: 600;
+  }
+  .matrix-cell.pass { background-color: #d3f9d8; color: #2b8a3e; }
+  .matrix-cell.fail { background-color: #ffe3e3; color: #c92a2a; }
+  .matrix-cell.manual { background-color: #fff3bf; color: #e67700; }
+  .matrix-cell.missing { background-color: #f1f3f5; color: #adb5bd; }
+  tr.control-row { cursor: pointer; }
+  tr.control-row:hover td:first-child { text-decoration: underline; }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Summary bar -->
+<div class="row mb-3">
+  {% for cluster in clusters %}
+  <div class="col-auto">
+    {% with snap=snapshots|dictsort:"cluster_id" %}
+    <div class="card card-sm">
+      <div class="card-body py-2 px-3">
+        <div class="fw-bold">{{ cluster.name }}</div>
+        {% for s_id, s in snapshots.items %}
+          {% if s.cluster_id == cluster.pk %}
+          <span class="{% if s.pass_rate >= 80 %}text-success{% elif s.pass_rate >= 60 %}text-warning{% else %}text-danger{% endif %}">
+            {{ s.pass_rate }}%
+          </span>
+          <small class="text-muted">({{ s.total_pass }}P/{{ s.total_fail }}F)</small>
+          {% endif %}
+        {% endfor %}
+      </div>
+    </div>
+    {% endwith %}
+  </div>
+  {% endfor %}
+</div>
+
+<!-- Filters -->
+<div class="card mb-3">
+  <div class="card-body py-2">
+    <form method="get" id="matrix-filters" class="d-flex align-items-center gap-2 flex-wrap">
+      <label class="form-label mb-0">Clusters:</label>
+      <div style="position:relative">
+        <button class="btn btn-sm btn-outline-secondary" type="button" id="cluster-toggle">
+          {% if selected_cluster_ids %}{{ selected_cluster_ids|length }} selected &#9662;{% else %}All clusters &#9662;{% endif %}
+        </button>
+        <div id="cluster-popup" class="card shadow p-2" style="display:none;position:absolute;top:100%;left:0;z-index:1050;min-width:220px;max-height:300px;overflow-y:auto;margin-top:4px">
+          {% for c in all_clusters %}
+          <label class="d-flex align-items-center gap-2 py-1 px-2" style="cursor:pointer">
+            <input type="checkbox" name="clusters" value="{{ c.pk }}" class="form-check-input m-0"
+                   {% if c.pk in selected_cluster_ids %}checked{% endif %}
+                   onchange="document.getElementById('matrix-filters').submit()">
+            {{ c.name }}
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+      <label class="form-label mb-0 ms-2">Section:</label>
+      <select name="section" class="form-select form-select-sm" style="width:auto" onchange="this.form.submit()">
+        <option value="">All sections</option>
+        {% for sec in sections %}
+        <option value="{{ sec }}" {% if section_filter == sec %}selected{% endif %}>{{ sec }}</option>
+        {% endfor %}
+      </select>
+      {% if section_filter or selected_cluster_ids %}
+      <a href="{% url 'compliance-matrix' framework.slug %}" class="btn btn-sm btn-outline-secondary">Clear all</a>
+      {% endif %}
+    </form>
+  </div>
+</div>
+
+<!-- Matrix table -->
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-vcenter table-bordered table-sm mb-0">
+      <thead>
+        <tr>
+          <th style="width:70px">ID</th>
+          <th>Title</th>
+          <th style="width:30px" title="Severity">S</th>
+          {% for cluster in clusters %}
+          <th class="text-center" style="min-width:100px">{{ cluster.name }}</th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in matrix_rows %}
+        <tr class="control-row" onclick="showControl({{ row.control.pk }})"
+            data-ctrl-id="{{ row.control.pk }}"
+            data-ctrl-control-id="{{ row.control.control_id }}"
+            data-ctrl-title="{{ row.control.title }}"
+            data-ctrl-severity="{{ row.control.severity }}"
+            data-ctrl-section="{{ row.control.section }}"
+            data-ctrl-type="{{ row.control.check_type }}"
+            data-ctrl-description="{{ row.control.description }}"
+            data-ctrl-remediation="{{ row.control.remediation }}"
+            data-ctrl-check-ids="{{ row.control.check_ids|join:', ' }}"
+            data-ctrl-kyverno="{{ row.control.kyverno_policies|join:', ' }}">
+          <td><code>{{ row.control.control_id }}</code></td>
+          <td {% if row.control.title|length > 70 %}title="{{ row.control.title }}"{% endif %}>{{ row.control.title|truncatechars:70 }}</td>
+          <td>
+            {% if row.control.severity == "Critical" %}<span class="badge bg-danger-lt text-danger" title="Critical">C</span>
+            {% elif row.control.severity == "High" %}<span class="badge bg-orange-lt text-orange" title="High">H</span>
+            {% elif row.control.severity == "Medium" %}<span class="badge bg-yellow-lt text-yellow" title="Medium">M</span>
+            {% else %}<span class="badge bg-blue-lt text-blue" title="Low">L</span>{% endif %}
+          </td>
+          {% for cell in row.cells %}
+          <td class="matrix-cell {% if cell.status == 'PASS' %}pass{% elif cell.status == 'FAIL' %}fail{% elif cell.status == 'MANUAL' %}manual{% else %}missing{% endif %}"
+              title="{% if cell.status == 'PASS' %}Control check passed — compliant{% elif cell.status == 'FAIL' %}Control check failed — non-compliant, needs remediation{% elif cell.status == 'MANUAL' %}Requires manual verification — cannot be checked automatically{% else %}No scan data for this control on this cluster{% endif %}">
+            {% if cell.status == "PASS" %}PASS
+            {% elif cell.status == "FAIL" %}FAIL{% if cell.result.total_fail %} ({{ cell.result.total_fail }}){% endif %}
+            {% elif cell.status == "MANUAL" %}MANUAL
+            {% else %}—{% endif %}
+          </td>
+          {% endfor %}
+        </tr>
+        {% empty %}
+        <tr><td colspan="{{ clusters|length|add:3 }}" class="text-center text-muted py-4">No controls found.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Bottom offcanvas for control details -->
+<div class="offcanvas offcanvas-bottom" tabindex="-1" id="control-drawer" style="height:auto;max-height:50vh">
+  <div class="offcanvas-header">
+    <h5 class="offcanvas-title">
+      <code id="drawer-id"></code>
+      <span id="drawer-title" class="ms-2"></span>
+      <span id="drawer-severity" class="badge ms-2"></span>
+    </h5>
+    <button type="button" class="btn-close" data-bs-dismiss="offcanvas"></button>
+  </div>
+  <div class="offcanvas-body">
+    <div class="row">
+      <div class="col-lg-6">
+        <div class="datagrid">
+          <div class="datagrid-item">
+            <div class="datagrid-title">Section</div>
+            <div class="datagrid-content" id="drawer-section"></div>
+          </div>
+          <div class="datagrid-item">
+            <div class="datagrid-title">Check Type</div>
+            <div class="datagrid-content" id="drawer-type"></div>
+          </div>
+          <div class="datagrid-item" id="drawer-checks-row">
+            <div class="datagrid-title">Trivy Check IDs</div>
+            <div class="datagrid-content" id="drawer-checks"></div>
+          </div>
+          <div class="datagrid-item" id="drawer-kyverno-row">
+            <div class="datagrid-title">Kyverno Policies</div>
+            <div class="datagrid-content" id="drawer-kyverno"></div>
+          </div>
+        </div>
+      </div>
+      <div class="col-lg-6">
+        <div id="drawer-description-section">
+          <h4 class="mb-1">Description</h4>
+          <p id="drawer-description" class="text-muted"></p>
+        </div>
+        <div id="drawer-remediation-section">
+          <h4 class="mb-1">Remediation</h4>
+          <p id="drawer-remediation" class="text-muted"></p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const SEV_CLASSES = {Critical:'bg-danger',High:'bg-orange',Medium:'bg-yellow text-dark',Low:'bg-blue'};
+function getDrawer() {
+  return bootstrap.Offcanvas.getOrCreateInstance(document.getElementById('control-drawer'));
+}
+
+function showControl(pk) {
+  const row = document.querySelector(`[data-ctrl-id="${pk}"]`);
+  if (!row) return;
+
+  document.getElementById('drawer-id').textContent = row.dataset.ctrlControlId;
+  document.getElementById('drawer-title').textContent = row.dataset.ctrlTitle;
+  document.getElementById('drawer-section').textContent = row.dataset.ctrlSection || '—';
+  document.getElementById('drawer-type').textContent = row.dataset.ctrlType;
+
+  const sevEl = document.getElementById('drawer-severity');
+  sevEl.textContent = row.dataset.ctrlSeverity;
+  sevEl.className = 'badge ms-2 ' + (SEV_CLASSES[row.dataset.ctrlSeverity] || 'bg-secondary');
+
+  const checks = row.dataset.ctrlCheckIds;
+  document.getElementById('drawer-checks').textContent = checks || '—';
+  document.getElementById('drawer-checks-row').style.display = checks ? '' : 'none';
+
+  const kyverno = row.dataset.ctrlKyverno;
+  document.getElementById('drawer-kyverno').textContent = kyverno || '—';
+  document.getElementById('drawer-kyverno-row').style.display = kyverno ? '' : 'none';
+
+  const desc = row.dataset.ctrlDescription;
+  document.getElementById('drawer-description').textContent = desc || '';
+  document.getElementById('drawer-description-section').style.display = desc ? '' : 'none';
+
+  const rem = row.dataset.ctrlRemediation;
+  document.getElementById('drawer-remediation').textContent = rem || '';
+  document.getElementById('drawer-remediation-section').style.display = rem ? '' : 'none';
+
+  getDrawer().show();
+}
+
+// Cluster multi-select popup (no Bootstrap dependency)
+(function(){
+  var btn = document.getElementById('cluster-toggle');
+  var popup = document.getElementById('cluster-popup');
+  if (!btn || !popup) return;
+  btn.addEventListener('click', function(e){
+    e.stopPropagation();
+    popup.style.display = popup.style.display === 'none' ? 'block' : 'none';
+  });
+  popup.addEventListener('click', function(e){ e.stopPropagation(); });
+  document.addEventListener('click', function(){ popup.style.display = 'none'; });
+})();
+</script>
+{% endblock %}

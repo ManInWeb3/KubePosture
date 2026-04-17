@@ -1,0 +1,214 @@
+{% extends "base.html" %}
+{% load findings_tags %}
+
+{% block title %}Dashboard — KubePosture{% endblock %}
+{% block pretitle %}Overview{% endblock %}
+{% block page_title %}Security Dashboard{% endblock %}
+
+{% block content %}
+<!-- Top summary row -->
+<div class="row row-deck row-cards mb-3">
+  <div class="col-sm-6 col-lg-3">
+    <div class="card">
+      <div class="card-body">
+        <div class="d-flex align-items-center">
+          <div class="subheader">Active Findings</div>
+        </div>
+        <div class="h1 mb-0">{{ total_findings }}</div>
+        <div class="text-muted">
+          <span class="text-green">{{ total_resolved_week }}</span> resolved this week
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-6 col-lg-3">
+    <div class="card{% if kev_count > 0 %} border-danger{% endif %}">
+      <div class="card-body">
+        <div class="subheader" title="CISA Known Exploited Vulnerabilities — CVEs actively being exploited in the wild">KEV-Listed</div>
+        <div class="h1 mb-0 {% if kev_count > 0 %}text-danger{% endif %}">{{ kev_count }}</div>
+        <div class="text-muted">
+          <a href="{% url 'findings-list' %}?kev_listed=true">actively exploited in the wild</a>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-6 col-lg-3">
+    <div class="card{% if immediate_count > 0 %} border-danger{% endif %}">
+      <div class="card-body">
+        <div class="subheader" title="Findings with Immediate effective priority — fix within 24-48h. KEV-listed, high EPSS on exposed production, or Critical on exposed production.">Immediate</div>
+        <div class="h1 mb-0 {% if immediate_count > 0 %}text-danger{% endif %}">{{ immediate_count }}</div>
+        <div class="text-muted">
+          <a href="{% url 'findings-list' %}?priority=immediate&status=active">{{ needs_attention_count }} total need attention</a>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-6 col-lg-3">
+    <div class="card">
+      <div class="card-body">
+        <div class="subheader">Clusters</div>
+        <div class="h1 mb-0">{{ cluster_count }}</div>
+        <div class="text-muted">reporting to KubePosture</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Severity breakdown -->
+<div class="row row-deck row-cards mb-3">
+  {% for card in severity_cards %}
+  <div class="col-sm-6 col-lg-3">
+    <a href="{% url 'findings-list' %}?severity={{ card.severity }}&status=active" class="card card-link">
+      <div class="card-body">
+        <div class="d-flex align-items-center">
+          {% severity_badge card.severity %}
+          <div class="ms-auto">
+            {% if card.new_this_week > 0 %}
+            <span class="badge bg-danger-lt text-danger">+{{ card.new_this_week }} this week</span>
+            {% endif %}
+          </div>
+        </div>
+        <div class="h1 mb-0 mt-2">{{ card.count }}</div>
+      </div>
+    </a>
+  </div>
+  {% endfor %}
+</div>
+
+<div class="row row-cards">
+  <!-- Left column -->
+  <div class="col-lg-8">
+    <!-- Top CVEs by EPSS -->
+    {% if top_epss %}
+    <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title" title="EPSS: Exploit Prediction Scoring System. Probability (0-100%) this CVE will be exploited in the next 30 days.">Top CVEs by Exploit Probability (EPSS)</h3></div>
+      <div class="table-responsive">
+        <table class="table table-vcenter table-sm card-table">
+          <thead>
+            <tr><th>CVE</th><th>Title</th><th>Severity</th><th>EPSS</th><th>KEV</th><th>Cluster</th></tr>
+          </thead>
+          <tbody>
+            {% for f in top_epss %}
+            <tr>
+              <td><a href="{% url 'findings-detail' f.pk %}">{{ f.vuln_id }}</a></td>
+              <td>{{ f.title|truncatechars:50 }}</td>
+              <td>{% severity_badge f.severity %}</td>
+              <td>{% epss_badge f.epss_score %}</td>
+              <td>{% if f.kev_listed %}<span class="badge bg-danger-lt text-danger" title="CISA Known Exploited Vulnerability — actively being exploited in the wild">KEV</span>{% endif %}</td>
+              <td class="text-muted">{{ f.cluster.name|default:"—" }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Scan Health Matrix -->
+    <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title">Scan Health</h3></div>
+      <div class="table-responsive">
+        <table class="table table-vcenter table-sm card-table">
+          <thead>
+            <tr><th>Cluster</th><th>Source</th><th>Last Ingest</th><th>Active Findings</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            {% for ss in scan_statuses %}
+            <tr>
+              <td>{{ ss.cluster.name }}</td>
+              <td><span class="badge bg-azure-lt text-azure">{{ ss.source }}</span></td>
+              <td>{{ ss.last_ingest|date:"Y-m-d H:i" }}</td>
+              <td>{{ ss.finding_count }}</td>
+              <td>
+                {% if ss.last_ingest < stale_threshold %}
+                  <span class="badge bg-danger-lt text-danger" title="No scan data received in the last 24 hours. Scanner may be down or misconfigured.">STALE</span>
+                {% else %}
+                  <span class="badge bg-success-lt text-success">OK</span>
+                {% endif %}
+              </td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="5" class="text-center text-muted">No scan data yet.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right column -->
+  <div class="col-lg-4">
+    <!-- Compliance -->
+    {% if compliance_cards %}
+    <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title">Compliance</h3></div>
+      <div class="list-group list-group-flush">
+        {% for c in compliance_cards %}
+        <a href="{% url 'compliance-matrix' c.framework.slug %}" class="list-group-item list-group-item-action">
+          <div class="d-flex justify-content-between align-items-center">
+            <div>
+              <div class="fw-bold">{{ c.framework.slug }}</div>
+              <small class="text-muted">{{ c.cluster_count }} clusters</small>
+            </div>
+            <span class="avatar avatar-sm rounded
+              {% if c.pass_rate >= 80 %}bg-success-lt text-success
+              {% elif c.pass_rate >= 60 %}bg-warning-lt text-warning
+              {% else %}bg-danger-lt text-danger{% endif %}">
+              {{ c.pass_rate }}%
+            </span>
+          </div>
+        </a>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Kyverno -->
+    {% if kyverno_snaps %}
+    <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title">Kyverno Policy Compliance</h3></div>
+      <div class="list-group list-group-flush">
+        {% for s in kyverno_snaps %}
+        <div class="list-group-item">
+          <div class="d-flex justify-content-between align-items-center">
+            <div>
+              <div class="fw-bold">{{ s.cluster.name }}</div>
+              <small class="text-muted">{{ s.total_pass }}P / {{ s.total_fail }}F / {{ s.total_warn }}W</small>
+            </div>
+            <span class="avatar avatar-sm rounded
+              {% if s.pass_rate >= 80 %}bg-success-lt text-success
+              {% elif s.pass_rate >= 60 %}bg-warning-lt text-warning
+              {% else %}bg-danger-lt text-danger{% endif %}">
+              {{ s.pass_rate }}%
+            </span>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Expiring risk acceptances -->
+    {% if expiring_acceptances %}
+    <div class="card mb-3 border-warning">
+      <div class="card-header bg-warning-lt">
+        <h3 class="card-title">Risk Acceptances Expiring (30d)</h3>
+      </div>
+      <div class="list-group list-group-flush">
+        {% for f in expiring_acceptances %}
+        <a href="{% url 'findings-detail' f.pk %}" class="list-group-item list-group-item-action">
+          <div class="d-flex justify-content-between">
+            <div>
+              {% severity_badge f.severity %}
+              <span class="ms-1">{{ f.vuln_id|default:f.title|truncatechars:30 }}</span>
+            </div>
+            <span class="text-warning">{{ f.accepted_until }}</span>
+          </div>
+        </a>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

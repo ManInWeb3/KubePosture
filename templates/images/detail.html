@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% load findings_tags %}
+
+{% block title %}{{ short_image }} — KubePosture{% endblock %}
+{% block pretitle %}<a href="{% url 'image-list' %}" class="text-decoration-none">Images</a>{% endblock %}
+{% block page_title %}
+  <span class="font-monospace">{{ short_image }}</span>
+{% endblock %}
+
+{% block content %}
+<!-- Stats cards -->
+<div class="row row-deck row-cards mb-3">
+  <div class="col-sm-3">
+    <div class="card">
+      <div class="card-body text-center">
+        <div class="h1 mb-0">{{ total }}</div>
+        <div class="text-muted">Total CVEs</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-3">
+    <div class="card{% if critical %} border-danger{% endif %}">
+      <div class="card-body text-center">
+        <div class="h1 mb-0 {% if critical %}text-danger{% endif %}">{{ critical }}</div>
+        <div class="text-muted">Critical</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-3">
+    <div class="card">
+      <div class="card-body text-center">
+        <div class="h1 mb-0 text-orange">{{ high }}</div>
+        <div class="text-muted">High</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-3">
+    <div class="card">
+      <div class="card-body text-center">
+        <div class="h1 mb-0 text-success">{{ fixable }}</div>
+        <div class="text-muted">Fixable</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Full image reference + link to findings -->
+<div class="card mb-3">
+  <div class="card-body py-2 d-flex align-items-center justify-content-between">
+    <div>
+      <small class="text-muted">Full reference:</small>
+      <code>{{ image_ref }}</code>
+    </div>
+    <a href="{% url 'findings-list' %}?image={{ image_ref }}" class="btn btn-sm btn-outline-primary"
+       title="View all findings for this image in the Findings page">
+      View in Findings
+    </a>
+  </div>
+</div>
+
+<!-- CVE table -->
+<div class="card">
+  <div class="card-header"><h3 class="card-title">Vulnerabilities ({{ total }}{% if total > 200 %}, showing first 200{% endif %})</h3></div>
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table table-sm">
+      <thead>
+        <tr>
+          <th>Severity</th>
+          <th>CVE</th>
+          <th>Component</th>
+          <th>Installed</th>
+          <th>Fix Available</th>
+          <th>EPSS</th>
+          <th>Cluster</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for f in findings %}
+        <tr>
+          <td>{% severity_badge f.severity %}</td>
+          <td>
+            <a href="{% url 'findings-detail' f.pk %}">{{ f.vuln_id|default:"—" }}</a>
+            {% if f.kev_listed %}<span class="badge bg-danger-lt text-danger ms-1">KEV</span>{% endif %}
+          </td>
+          <td class="text-muted">{{ f.details.component_name|default:"" }}</td>
+          <td class="font-monospace text-muted" style="font-size:0.8rem">{{ f.details.installed_version|default:"" }}</td>
+          <td>
+            {% if f.details.fixed_version %}
+              <span class="font-monospace text-success" style="font-size:0.8rem">{{ f.details.fixed_version }}</span>
+            {% else %}
+              <span class="text-muted">—</span>
+            {% endif %}
+          </td>
+          <td>{% if f.epss_score != None %}{% epss_badge f.epss_score %}{% endif %}</td>
+          <td class="text-muted">{{ f.cluster.name|default:"" }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="7" class="text-center text-muted py-4">No vulnerabilities found.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

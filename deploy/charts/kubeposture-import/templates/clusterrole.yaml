@@ -1,0 +1,28 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kubeposture-import.fullname" . }}
+  labels:
+    {{- include "kubeposture-import.labels" . | nindent 4 }}
+rules:
+  {{- if .Values.import.trivy }}
+  # Trivy Operator CRDs (7 types)
+  - apiGroups: ["aquasecurity.github.io"]
+    resources:
+      - vulnerabilityreports
+      - configauditreports
+      - exposedsecretreports
+      - rbacassessmentreports
+      - infraassessmentreports
+      - clustercompliancereports
+      - sbomreports
+    verbs: ["get", "list"]
+  {{- end }}
+  {{- if .Values.import.kyverno }}
+  # Kyverno PolicyReport CRDs (2 types)
+  - apiGroups: ["wgpolicyk8s.io"]
+    resources:
+      - policyreports
+      - clusterpolicyreports
+    verbs: ["get", "list"]
+  {{- end }}

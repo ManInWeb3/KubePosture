@@ -1,0 +1,17 @@
+{{- /*
+ConfigMap: cluster metadata overrides
+Rendered only when .Values.clusterNameParsingOverrides is non-empty.
+Consumed by all pods via CLUSTER_NAME_PARSING_OVERRIDES_JSON env var (see _helpers.tpl).
+*/ -}}
+{{- if .Values.clusterNameParsingOverrides }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kubeposture.fullname" . }}-overrides
+  labels:
+    {{- include "kubeposture.labels" . | nindent 4 }}
+data:
+  # JSON-serialised cluster overrides — injected into the app at startup.
+  # Edit via Helm values (clusterNameParsingOverrides key), not directly here.
+  CLUSTER_NAME_PARSING_OVERRIDES_JSON: {{ .Values.clusterNameParsingOverrides | toJson | quote }}
+{{- end }}

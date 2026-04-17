@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+
+{% block title %}Compliance — KubePosture{% endblock %}
+{% block pretitle %}Compliance{% endblock %}
+{% block page_title %}Compliance{% endblock %}
+
+{% block content %}
+<!-- Tabs -->
+<ul class="nav nav-bordered mb-3">
+  <li class="nav-item">
+    <a class="nav-link{% if compliance_tab == 'trivy' %} active{% endif %}" href="{% url 'compliance-overview' %}">
+      Trivy Frameworks
+    </a>
+  </li>
+  <li class="nav-item">
+    <a class="nav-link{% if compliance_tab == 'kyverno' %} active{% endif %}" href="{% url 'kyverno-overview' %}">
+      Kyverno Policies
+    </a>
+  </li>
+</ul>
+
+<!-- Trivy tab content -->
+<div class="alert alert-info alert-dismissible mb-3" role="alert">
+  <div class="text-secondary">
+    <strong>Trivy Operator</strong> scans cluster state against industry frameworks (CIS Kubernetes Benchmark, NSA Hardening, Pod Security Standards).
+    Each card shows the pass rate per cluster. Click <strong>View Matrix</strong> to see per-control PASS/FAIL breakdown with remediation guidance.
+  </div>
+  <a class="btn-close" data-bs-dismiss="alert" aria-label="Close"></a>
+</div>
+
+{% if cards %}
+<div class="row row-cards">
+  {% for card in cards %}
+  <div class="col-sm-6 col-lg-4">
+    <div class="card">
+      <div class="card-body">
+        <div class="d-flex align-items-center mb-3">
+          <div class="flex-fill">
+            <h3 class="card-title mb-0">
+              <a href="{% url 'compliance-matrix' card.framework.slug %}">{{ card.framework.name }}</a>
+            </h3>
+            <div class="text-muted">v{{ card.framework.version }} &middot; {{ card.framework.total_controls }} controls</div>
+          </div>
+          <div class="ms-3">
+            {% with rate=card.avg_pass_rate %}
+            <span class="avatar avatar-lg rounded
+              {% if rate >= 80 %}bg-success-lt text-success
+              {% elif rate >= 60 %}bg-warning-lt text-warning
+              {% else %}bg-danger-lt text-danger{% endif %}">
+              {{ rate }}%
+            </span>
+            {% endwith %}
+          </div>
+        </div>
+        {% for snap in card.snapshots %}
+        <div class="d-flex align-items-center mb-1">
+          <span class="text-muted" style="width:140px">{{ snap.cluster.name }}</span>
+          <div class="flex-fill">
+            <div class="progress progress-sm">
+              <div class="progress-bar
+                {% if snap.pass_rate >= 80 %}bg-success
+                {% elif snap.pass_rate >= 60 %}bg-warning
+                {% else %}bg-danger{% endif %}"
+                style="width: {{ snap.pass_rate }}%"
+                role="progressbar">
+              </div>
+            </div>
+          </div>
+          <span class="ms-2 text-muted" style="width:80px;text-align:right">
+            {{ snap.pass_rate }}% <small>({{ snap.total_pass }}/{{ snap.total_pass|add:snap.total_fail }})</small>
+          </span>
+        </div>
+        {% endfor %}
+        <div class="mt-2">
+          <a href="{% url 'compliance-matrix' card.framework.slug %}" class="btn btn-sm btn-outline-primary">View Matrix</a>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="card">
+  <div class="card-body text-center text-muted py-4">
+    No Trivy compliance data loaded. Ingest ClusterComplianceReports from Trivy Operator to see compliance frameworks.
+  </div>
+</div>
+{% endif %}
+{% endblock %}

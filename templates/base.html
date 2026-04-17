@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}KubePosture{% endblock %}</title>
+  <!-- Tabler CSS (Bootstrap 5 superset) -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.2.0/dist/css/tabler.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.2.0/dist/css/tabler-vendors.min.css">
+  <style>
+    /* Collapsed sidebar: hide text, show icons only */
+    /* Sidebar: compact */
+    @media (min-width: 992px) {
+      .navbar-vertical.navbar-expand-lg { width: 10rem; }
+      .navbar-vertical.navbar-expand-lg ~ .page-wrapper { margin-left: 10rem; }
+      .navbar-vertical.navbar-expand-lg .navbar-collapse { display: flex !important; flex-direction: column; height: calc(100vh - 3.5rem); }
+      .navbar-vertical.navbar-expand-lg #sidebar-footer { margin-top: auto; }
+    }
+    /* Collapsed sidebar: icons only */
+    .navbar-narrow .nav-link-title,
+    .navbar-narrow .navbar-brand span { display: none; }
+    .navbar-narrow { width: 4rem !important; min-width: 4rem !important; }
+    .navbar-narrow .nav-link { justify-content: center; padding-left: 0; padding-right: 0; }
+    .navbar-narrow .nav-link-icon { margin-right: 0; }
+    /* Sortable table headers */
+    th.sortable { cursor: pointer; user-select: none; }
+    th.sortable:hover { text-decoration: underline; }
+    th.sort-asc::after { content: " \25B2"; font-size: 0.7em; }
+    th.sort-desc::after { content: " \25BC"; font-size: 0.7em; }
+    /* Toggle arrow flips when collapsed */
+    #sidebar-toggle { cursor: pointer; opacity: 0.6; transition: transform 0.2s; }
+    #sidebar-toggle:hover { opacity: 1; }
+    .navbar-narrow #sidebar-toggle { transform: rotate(180deg); }
+
+    /* ── Dim theme — GitHub Dark Dimmed (lighter page bg, darker cards) ── */
+    [data-bs-theme="dim"] {
+      color-scheme: dark;
+      --tblr-body-bg: #2d333b;
+      --tblr-body-color: #adbac7;
+      --tblr-bg-surface: #22272e;
+      --tblr-bg-surface-secondary: #1c2128;
+      --tblr-card-bg: #22272e;
+      --tblr-card-border-color: #373e47;
+      --tblr-border-color: #373e47;
+      --tblr-muted: #768390;
+      --tblr-btn-color: #adbac7;
+      --bs-body-bg: #2d333b;
+      --bs-body-color: #adbac7;
+      --bs-border-color: #373e47;
+      --bs-secondary-bg: #22272e;
+      --bs-tertiary-bg: #1c2128;
+      --bs-card-bg: #22272e;
+      --bs-link-color: #539bf5;
+      --bs-link-hover-color: #6cb6ff;
+      --bs-table-bg: transparent;
+      --bs-table-striped-bg: #2d333b;
+      --bs-table-hover-bg: #353b45;
+    }
+    [data-bs-theme="dim"] .card { background-color: #22272e; border-color: #373e47; }
+    [data-bs-theme="dim"] .table { --bs-table-bg: transparent; color: #adbac7; }
+    [data-bs-theme="dim"] .form-control,
+    [data-bs-theme="dim"] .form-select { background-color: #1c2128; border-color: #373e47; color: #adbac7; }
+    [data-bs-theme="dim"] .form-control:focus,
+    [data-bs-theme="dim"] .form-select:focus { background-color: #22272e; border-color: #539bf5; color: #adbac7; }
+    [data-bs-theme="dim"] .dropdown-menu { background-color: #1c2128; border-color: #444c56; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+    [data-bs-theme="dim"] .dropdown-item { color: #adbac7; }
+    [data-bs-theme="dim"] .dropdown-item:hover { background-color: #2d333b; }
+    [data-bs-theme="dim"] .list-group-item { background-color: #22272e; border-color: #373e47; color: #adbac7; }
+    [data-bs-theme="dim"] .page-header { background-color: #2d333b; }
+    [data-bs-theme="dim"] .text-muted { color: #768390 !important; }
+    [data-bs-theme="dim"] pre { background-color: #1c2128 !important; }
+    [data-bs-theme="dim"] .offcanvas { background-color: #22272e; color: #adbac7; }
+    [data-bs-theme="dim"] .btn-outline-secondary { color: #768390; border-color: #373e47; }
+    [data-bs-theme="dim"] .btn-outline-secondary:hover { background-color: #2d333b; color: #adbac7; }
+    [data-bs-theme="dim"] .progress { background-color: #373e47; }
+    [data-bs-theme="dim"] .form-check-input { background-color: #1c2128; border-color: #444c56; }
+    [data-bs-theme="dim"] .form-check-input:checked { background-color: #539bf5; border-color: #539bf5; }
+    /* Sidebar matches card color in dim mode */
+    [data-bs-theme="dim"] .navbar-vertical { background-color: #22272e !important; }
+  </style>
+  {% block extra_css %}{% endblock %}
+  <!-- Theme: apply before render to avoid flash -->
+  <script>
+    (function(){
+      var t = localStorage.getItem('kv-theme') || 'auto';
+      if (t === 'auto') t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dim' : 'light';
+      document.documentElement.setAttribute('data-bs-theme', t);
+    })();
+  </script>
+  <style>
+    @media (min-width: 992px) {
+      #sidebar > .container-fluid { display:flex; flex-direction:column; min-height:100vh; }
+      #sidebar-menu { flex:1; display:flex; flex-direction:column; }
+    }
+  </style>
+</head>
+<body class="layout-fluid">
+  <div class="page">
+    <!-- Sidebar -->
+    <aside class="navbar navbar-vertical navbar-expand-lg" data-bs-theme="dark" id="sidebar">
+      <div class="container-fluid">
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#sidebar-menu">
+          <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="d-flex align-items-center w-100">
+          <a href="/" class="navbar-brand navbar-brand-autodark flex-fill">
+            <span class="fs-3 fw-bold">KubePosture</span>
+          </a>
+          <!-- Collapse toggle -->
+          <span id="sidebar-toggle" class="text-white d-none d-lg-inline" title="Toggle sidebar">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="15 18 9 12 15 6"/>
+            </svg>
+          </span>
+        </div>
+        <div class="collapse navbar-collapse" id="sidebar-menu">
+          <ul class="navbar-nav pt-lg-3">
+            <li class="nav-item">
+              <a class="nav-link{% if nav == 'dashboard' %} active{% endif %}" href="/" title="Dashboard">
+                <span class="nav-link-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg></span>
+                <span class="nav-link-title">Dashboard</span>
+              </a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link{% if nav == 'findings' %} active{% endif %}" href="{% url 'findings-list' %}" title="Findings">
+                <span class="nav-link-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>
+                <span class="nav-link-title">Findings</span>
+              </a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link{% if nav == 'compliance' %} active{% endif %}" href="{% url 'compliance-overview' %}" title="Compliance">
+                <span class="nav-link-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span>
+                <span class="nav-link-title">Compliance</span>
+              </a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link{% if nav == 'components' %} active{% endif %}" href="{% url 'components-list' %}" title="Components">
+                <span class="nav-link-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></span>
+                <span class="nav-link-title">Components</span>
+              </a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link{% if nav == 'images' %} active{% endif %}" href="{% url 'image-list' %}" title="Images — CVEs grouped by container image">
+                <span class="nav-link-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg></span>
+                <span class="nav-link-title">Images</span>
+              </a>
+            </li>
+            {% if user.is_superuser or perms.auth.change_user %}
+            <li class="nav-item mt-2">
+              <a class="nav-link{% if nav == 'settings' %} active{% endif %}" href="{% url 'settings-clusters' %}" title="Settings">
+                <span class="nav-link-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
+                <span class="nav-link-title">Settings</span>
+              </a>
+            </li>
+            {% endif %}
+          </ul>
+          {% if user.is_authenticated %}
+          <ul class="navbar-nav mt-auto pt-3 border-top border-secondary" id="sidebar-footer">
+            <li class="nav-item">
+              <a class="nav-link{% if nav == 'profile' %} active{% endif %}" href="{% url 'profile' %}" title="{{ user.username }}">
+                <span class="nav-link-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span>
+                <span class="nav-link-title">{{ user.username }}</span>
+              </a>
+            </li>
+            <li class="nav-item">
+              <form method="post" action="{% url 'logout' %}" class="m-0">
+                {% csrf_token %}
+                <button type="submit" class="nav-link border-0 bg-transparent w-100 text-start" title="Sign out" style="cursor:pointer">
+                  <span class="nav-link-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg></span>
+                  <span class="nav-link-title">Sign out</span>
+                </button>
+              </form>
+            </li>
+          </ul>
+          {% endif %}
+        </div>
+      </div>
+    </aside>
+    <!-- Main content -->
+    <div class="page-wrapper">
+      <div class="page-header d-print-none">
+        <div class="container-xl">
+          <div class="page-pretitle">{% block pretitle %}KubePosture{% endblock %}</div>
+          <h2 class="page-title">{% block page_title %}{% endblock %}</h2>
+        </div>
+      </div>
+      <div class="page-body">
+        <div class="container-xl">
+          {% block content %}{% endblock %}
+        </div>
+      </div>
+    </div>
+  </div>
+  <!-- Tabler JS (includes Bootstrap internally) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tabler/core@1.2.0/dist/js/tabler.min.js"></script>
+  <!-- Bootstrap 5 JS — loaded AFTER Tabler to expose window.bootstrap for programmatic use -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <!-- HTMX -->
+  <script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js"></script>
+  <script>
+    // Sidebar collapse toggle — persisted to localStorage
+    (function(){
+      var sidebar = document.getElementById('sidebar');
+      var toggle = document.getElementById('sidebar-toggle');
+      if (localStorage.getItem('kv-sidebar') === 'narrow') sidebar.classList.add('navbar-narrow');
+      toggle.addEventListener('click', function(){
+        sidebar.classList.toggle('navbar-narrow');
+        localStorage.setItem('kv-sidebar', sidebar.classList.contains('navbar-narrow') ? 'narrow' : 'wide');
+      });
+    })();
+  </script>
+  {% block extra_js %}{% endblock %}
+</body>
+</html>

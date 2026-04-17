@@ -1,0 +1,108 @@
+{% load findings_tags %}
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table table-hover" id="findings-tbl">
+      <thead>
+        <tr>
+          <th class="w-1"><input type="checkbox" class="form-check-input" id="select-all"></th>
+          <th class="sortable" data-col="cluster">Cluster</th>
+          <th class="sortable" data-col="priority" title="Effective priority — contextual action urgency based on severity, threat intel, and deployment exposure">Priority</th>
+          <th class="sortable" data-col="severity">Severity</th>
+          <th class="sortable" data-col="epss" title="Exploit Prediction Scoring System — probability of exploitation in next 30 days">EPSS</th>
+          <th title="CISA Known Exploited Vulnerability — actively exploited in the wild">KEV</th>
+          <th class="sortable" data-col="status">Status</th>
+          <th class="sortable" data-col="id">ID</th>
+          <th>Title</th>
+          <th>Component</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for finding in findings %}
+        <tr>
+          <td><input type="checkbox" class="form-check-input finding-check" name="finding_ids" value="{{ finding.pk }}"></td>
+          <td>{{ finding.cluster.name|default:"—" }}</td>
+          <td>{% priority_badge finding.effective_priority %}</td>
+          <td>{% severity_badge finding.severity %}</td>
+          <td>
+            {% if finding.epss_score != None %}
+              {% epss_badge finding.epss_score %}
+            {% endif %}
+          </td>
+          <td>{% if finding.kev_listed %}<span class="badge bg-danger-lt text-danger" title="CISA Known Exploited Vulnerability — actively being exploited in the wild">KEV</span>{% endif %}</td>
+          <td>{% status_badge finding.status %}</td>
+          <td>
+            <a href="{% url 'findings-detail' finding.pk %}">
+              {{ finding.vuln_id|default:"—" }}
+            </a>
+          </td>
+          <td><a href="{% url 'findings-detail' finding.pk %}">{{ finding.title }}</a></td>
+          <td class="text-muted">{{ finding.details.component_name|default:"" }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="10" class="text-center text-muted py-4">No findings match the current filters.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if page_obj.has_other_pages %}
+  <div class="card-footer d-flex align-items-center">
+    <p class="m-0 text-muted">
+      Showing {{ page_obj.start_index }}–{{ page_obj.end_index }} of {{ page_obj.paginator.count }}
+    </p>
+    <ul class="pagination m-0 ms-auto">
+      {% if page_obj.has_previous %}
+      <li class="page-item">
+        <a class="page-link" href="?{{ filter_querystring }}&page={{ page_obj.previous_page_number }}"
+           hx-get="{% url 'findings-list' %}?{{ filter_querystring }}&page={{ page_obj.previous_page_number }}"
+           hx-target="#findings-table" hx-push-url="true">Prev</a>
+      </li>
+      {% endif %}
+      {% for num in page_obj.paginator.page_range %}
+        {% if num == page_obj.number %}
+        <li class="page-item active"><a class="page-link">{{ num }}</a></li>
+        {% elif num > page_obj.number|add:"-3" and num < page_obj.number|add:"3" %}
+        <li class="page-item">
+          <a class="page-link" href="?{{ filter_querystring }}&page={{ num }}"
+             hx-get="{% url 'findings-list' %}?{{ filter_querystring }}&page={{ num }}"
+             hx-target="#findings-table" hx-push-url="true">{{ num }}</a>
+        </li>
+        {% endif %}
+      {% endfor %}
+      {% if page_obj.has_next %}
+      <li class="page-item">
+        <a class="page-link" href="?{{ filter_querystring }}&page={{ page_obj.next_page_number }}"
+           hx-get="{% url 'findings-list' %}?{{ filter_querystring }}&page={{ page_obj.next_page_number }}"
+           hx-target="#findings-table" hx-push-url="true">Next</a>
+      </li>
+      {% endif %}
+    </ul>
+  </div>
+  {% endif %}
+</div>
+<script>
+// Client-side column sorting for current page
+(function(){
+  var table = document.getElementById('findings-tbl');
+  if (!table) return;
+  var headers = table.querySelectorAll('th.sortable');
+  var dir = {};
+  headers.forEach(function(th){
+    th.style.cursor = 'pointer';
+    th.addEventListener('click', function(){
+      var col = Array.from(th.parentNode.children).indexOf(th);
+      var tbody = table.querySelector('tbody');
+      var rows = Array.from(tbody.querySelectorAll('tr'));
+      dir[col] = !(dir[col]);
+      rows.sort(function(a,b){
+        var at = (a.children[col]||{}).textContent||'';
+        var bt = (b.children[col]||{}).textContent||'';
+        return dir[col] ? at.localeCompare(bt) : bt.localeCompare(at);
+      });
+      rows.forEach(function(r){ tbody.appendChild(r); });
+      // Visual indicator
+      headers.forEach(function(h){ h.classList.remove('sort-asc','sort-desc'); });
+      th.classList.add(dir[col] ? 'sort-asc' : 'sort-desc');
+    });
+  });
+})();
+</script>

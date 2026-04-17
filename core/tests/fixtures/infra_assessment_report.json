@@ -1,0 +1,60 @@
+{
+  "apiVersion": "aquasecurity.github.io/v1alpha1",
+  "kind": "InfraAssessmentReport",
+  "metadata": {
+    "name": "pod-kube-apiserver-node01",
+    "namespace": "kube-system",
+    "labels": {
+      "trivy-operator.resource.kind": "Pod",
+      "trivy-operator.resource.name": "kube-apiserver-node01",
+      "trivy-operator.resource.namespace": "kube-system",
+      "plugin-config-hash": "abc123",
+      "resource-spec-hash": "def456"
+    },
+    "annotations": {
+      "trivy-operator.aquasecurity.github.io/report-ttl": "24h0m0s"
+    }
+  },
+  "report": {
+    "scanner": {
+      "name": "Trivy",
+      "vendor": "Aqua Security",
+      "version": "0.52.0"
+    },
+    "summary": {
+      "criticalCount": 1,
+      "highCount": 0,
+      "mediumCount": 1,
+      "lowCount": 0
+    },
+    "checks": [
+      {
+        "checkID": "KCV0020",
+        "title": "Ensure that the --profiling argument is set to false",
+        "description": "Disable profiling to reduce attack surface.",
+        "severity": "CRITICAL",
+        "success": false,
+        "messages": ["API server has profiling enabled"],
+        "category": "Kubernetes Security Check"
+      },
+      {
+        "checkID": "KCV0001",
+        "title": "Ensure that the --anonymous-auth argument is set to false",
+        "description": "Disable anonymous requests to the API server.",
+        "severity": "MEDIUM",
+        "success": false,
+        "messages": ["API server allows anonymous authentication"],
+        "category": "Kubernetes Security Check"
+      },
+      {
+        "checkID": "KCV0010",
+        "title": "Ensure that the admission control plugin AlwaysPullImages is set",
+        "description": "Always pull images to ensure integrity.",
+        "severity": "LOW",
+        "success": true,
+        "messages": [],
+        "category": "Kubernetes Security Check"
+      }
+    ]
+  }
+}

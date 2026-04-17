@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+
+{% block title %}Profile — KubePosture{% endblock %}
+{% block pretitle %}Account{% endblock %}
+{% block page_title %}Profile{% endblock %}
+
+{% block content %}
+{% if messages %}
+{% for msg in messages %}
+<div class="alert alert-{{ msg.tags }}">{{ msg }}</div>
+{% endfor %}
+{% endif %}
+
+<div class="row row-cards">
+  <div class="col-lg-6">
+    <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title">User Info</h3></div>
+      <div class="card-body">
+        <form method="post" action="{% url 'profile' %}">
+          {% csrf_token %}
+          <div class="mb-3">
+            <label class="form-label">Username</label>
+            <input type="text" class="form-control" value="{{ user.username }}" disabled>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">First name</label>
+            <input type="text" name="first_name" class="form-control" value="{{ user.first_name }}">
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Last name</label>
+            <input type="text" name="last_name" class="form-control" value="{{ user.last_name }}">
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Email</label>
+            <input type="email" name="email" class="form-control" value="{{ user.email }}">
+          </div>
+          <button type="submit" class="btn btn-primary">Save changes</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-6">
+    <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title">Account Details</h3></div>
+      <div class="card-body">
+        <div class="datagrid">
+          <div class="datagrid-item">
+            <div class="datagrid-title">Roles</div>
+            <div class="datagrid-content">
+              {% for g in groups %}
+                <span class="badge bg-blue-lt text-blue">{{ g }}</span>
+              {% empty %}
+                <span class="text-muted">No roles assigned</span>
+              {% endfor %}
+              {% if user.is_superuser %}<span class="badge bg-danger-lt text-danger">superuser</span>{% endif %}
+            </div>
+          </div>
+          <div class="datagrid-item">
+            <div class="datagrid-title">Last login</div>
+            <div class="datagrid-content">{{ user.last_login|date:"Y-m-d H:i"|default:"Never" }}</div>
+          </div>
+          <div class="datagrid-item">
+            <div class="datagrid-title">Joined</div>
+            <div class="datagrid-content">{{ user.date_joined|date:"Y-m-d" }}</div>
+          </div>
+        </div>
+      </div>
+      <div class="card-footer d-flex gap-2">
+        <a href="{% url 'password-change' %}" class="btn btn-outline-warning">Change password</a>
+        <form method="post" action="{% url 'logout' %}" class="d-inline">
+          {% csrf_token %}
+          <button type="submit" class="btn btn-outline-danger">Sign out</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- Theme -->
+    <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title">Appearance</h3></div>
+      <div class="card-body">
+        <div class="mb-2"><strong>Theme</strong></div>
+        <div class="btn-group" role="group" id="theme-selector">
+          <button type="button" class="btn btn-outline-secondary" data-theme="auto">Auto</button>
+          <button type="button" class="btn btn-outline-secondary" data-theme="light">Light</button>
+          <button type="button" class="btn btn-outline-secondary" data-theme="dim">Dim</button>
+          <button type="button" class="btn btn-outline-secondary" data-theme="dark">Dark</button>
+        </div>
+        <small class="d-block text-muted mt-1">Auto = Dim when system is dark, Light when system is light.</small>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function(){
+  var current = localStorage.getItem('kv-theme') || 'auto';
+  var btns = document.querySelectorAll('#theme-selector button');
+  btns.forEach(function(btn){
+    if (btn.dataset.theme === current) btn.classList.add('active');
+    btn.addEventListener('click', function(){
+      var theme = this.dataset.theme;
+      localStorage.setItem('kv-theme', theme);
+      var resolved = theme;
+      if (theme === 'auto') resolved = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dim' : 'light';
+      document.documentElement.setAttribute('data-bs-theme', resolved);
+      btns.forEach(function(b){ b.classList.remove('active'); });
+      this.classList.add('active');
+    });
+  });
+})();
+</script>
+{% endblock %}

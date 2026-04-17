@@ -1,0 +1,40 @@
+{% if parsed %}
+<div class="datagrid">
+  <div class="datagrid-item">
+    <div class="datagrid-title">Package URL</div>
+    <div class="datagrid-content"><code class="text-muted" style="font-size:0.85em">{{ purl }}</code></div>
+  </div>
+  <div class="datagrid-item">
+    <div class="datagrid-title">Type</div>
+    <div class="datagrid-content"><span class="badge bg-azure-lt">{{ parsed.type }}</span></div>
+  </div>
+  {% if parsed.namespace %}
+  <div class="datagrid-item">
+    <div class="datagrid-title">Namespace</div>
+    <div class="datagrid-content">{{ parsed.namespace }}</div>
+  </div>
+  {% endif %}
+  <div class="datagrid-item">
+    <div class="datagrid-title">Name</div>
+    <div class="datagrid-content">{{ parsed.name }}</div>
+  </div>
+  {% if parsed.version %}
+  <div class="datagrid-item">
+    <div class="datagrid-title">Version</div>
+    <div class="datagrid-content">{{ parsed.version }}</div>
+  </div>
+  {% endif %}
+  {% if registry_url %}
+  <div class="datagrid-item">
+    <div class="datagrid-title">Registry</div>
+    <div class="datagrid-content">
+      <a href="{{ registry_url }}" target="_blank" rel="noopener">
+        {{ registry_name }} &#8599;
+      </a>
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% else %}
+<span class="text-muted">{{ purl|default:"No purl available" }}</span>
+{% endif %}

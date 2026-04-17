@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+
+{% block title %}Kyverno Compliance — KubePosture{% endblock %}
+{% block pretitle %}Compliance{% endblock %}
+{% block page_title %}Compliance{% endblock %}
+
+{% block content %}
+<!-- Tabs -->
+<ul class="nav nav-bordered mb-3">
+  <li class="nav-item">
+    <a class="nav-link{% if compliance_tab == 'trivy' %} active{% endif %}" href="{% url 'compliance-overview' %}">
+      Trivy Frameworks
+    </a>
+  </li>
+  <li class="nav-item">
+    <a class="nav-link{% if compliance_tab == 'kyverno' %} active{% endif %}" href="{% url 'kyverno-overview' %}">
+      Kyverno Policies
+    </a>
+  </li>
+</ul>
+
+<!-- Info -->
+<div class="alert alert-info alert-dismissible mb-3" role="alert">
+  <div class="text-secondary">
+    <strong>Kyverno</strong> evaluates workloads against admission policies deployed in each cluster.
+    This shows results for <strong>deployed policies only</strong> — if a policy isn't installed, it won't appear here.
+    To improve coverage, deploy more policies in <strong>audit mode</strong> first, then switch to enforce after fixing violations.
+  </div>
+  <a class="btn-close" data-bs-dismiss="alert" aria-label="Close"></a>
+</div>
+
+<!-- Filters -->
+<div class="card mb-3">
+  <div class="card-body py-2">
+    <form method="get" id="kyverno-filter" class="d-flex gap-2 align-items-center flex-wrap">
+      <!-- Cluster filter -->
+      <select name="clusters" class="form-select form-select-sm" style="width:auto" onchange="this.form.submit()">
+        <option value="">All clusters</option>
+        {% for c in all_clusters %}
+        <option value="{{ c.pk }}" {% if c.pk in selected_cluster_ids %}selected{% endif %}>{{ c.name }}</option>
+        {% endfor %}
+      </select>
+      <!-- Status filter -->
+      <select name="result" class="form-select form-select-sm" style="width:auto" onchange="this.form.submit()">
+        <option value="">All statuses ({{ total_pass|add:total_fail|add:total_warn }})</option>
+        <option value="pass" {% if status_filter == "pass" %}selected{% endif %}>Pass ({{ total_pass }})</option>
+        <option value="fail" {% if status_filter == "fail" %}selected{% endif %}>Fail ({{ total_fail }})</option>
+        {% if total_warn %}<option value="warn" {% if status_filter == "warn" %}selected{% endif %}>Warn ({{ total_warn }})</option>{% endif %}
+      </select>
+      {% if selected_cluster_ids or status_filter %}
+      <a href="{% url 'kyverno-overview' %}" class="btn btn-sm btn-outline-secondary">Clear</a>
+      {% endif %}
+    </form>
+  </div>
+</div>
+
+<!-- Results table -->
+{% if results %}
+<div class="card">
+  <div class="card-header">
+    <h3 class="card-title">{{ total_results }} result{{ total_results|pluralize }}</h3>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table table-hover">
+      <thead>
+        <tr>
+          <th>Result</th>
+          <th>Cluster</th>
+          <th>Policy</th>
+          <th>Rule</th>
+          <th>Namespace</th>
+          <th>Resource</th>
+          <th style="min-width:300px">Message</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in results %}
+        <tr>
+          <td>
+            {% if r.result == "pass" %}
+              <span class="badge bg-success-lt text-success">PASS</span>
+            {% elif r.result == "fail" or r.result == "error" %}
+              <span class="badge bg-danger-lt text-danger">FAIL</span>
+            {% elif r.result == "warn" %}
+              <span class="badge bg-warning-lt text-warning">WARN</span>
+            {% else %}
+              <span class="badge bg-secondary-lt text-secondary">{{ r.result|upper }}</span>
+            {% endif %}
+          </td>
+          <td>{{ r.cluster_name|default:"—" }}</td>
+          <td class="fw-bold">{{ r.policy }}</td>
+          <td class="text-muted">{{ r.rule }}</td>
+          <td class="text-muted">{{ r.namespace|default:"—" }}</td>
+          <td class="text-muted">
+            {% if r.resource_kind %}{{ r.resource_kind }}/{% endif %}{{ r.resource_name|default:"" }}
+          </td>
+          <td>{{ r.message|default:"" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+<div class="card">
+  <div class="card-body text-center text-muted py-4">
+    {% if status_filter %}
+      No {{ status_filter }} results found.
+    {% else %}
+      No Kyverno policy data loaded. Run the Kyverno export script to import PolicyReports.
+      <br><small>Data imported before this update needs to be re-imported to show individual results.</small>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+{% endblock %}

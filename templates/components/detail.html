@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% load purl_tags %}
+
+{% block title %}{{ component_name }} — Components{% endblock %}
+{% block pretitle %}<a href="{% url 'components-list' %}" class="text-decoration-none">Components</a>{% endblock %}
+{% block page_title %}
+  {{ component_name }}
+  <span class="text-muted fs-5 ms-2">{{ total_instances }} instances across {{ cluster_count }} clusters</span>
+{% endblock %}
+
+{% block content %}
+<div class="row row-cards">
+  <!-- Sidebar: package info + licenses -->
+  <div class="col-lg-4">
+    <!-- Package info from purl -->
+    {% if sample_purl %}
+    <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title">Package Info</h3></div>
+      <div class="card-body">
+        {% purl_info sample_purl %}
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Licenses -->
+    {% if all_licenses %}
+    <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title">Licenses</h3></div>
+      <div class="list-group list-group-flush">
+        {% for lic, count in all_licenses %}
+        <div class="list-group-item d-flex justify-content-between align-items-center">
+          {% if lic in restrictive_licenses %}
+            <span class="text-danger fw-bold">{{ lic }}</span>
+          {% else %}
+            <span>{{ lic }}</span>
+          {% endif %}
+          <span class="badge bg-secondary-lt text-secondary">{{ count }}</span>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Versions + where it runs -->
+  <div class="col-lg-8">
+    {% for version, instances in versions.items %}
+    <div class="card mb-3">
+      <div class="card-header">
+        <h3 class="card-title">
+          v{{ version }}
+          <span class="text-muted fs-5 ms-2">{{ instances|length }} instances</span>
+        </h3>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-vcenter table-sm mb-0">
+          <thead>
+            <tr>
+              <th>Cluster</th>
+              <th>Namespace</th>
+              <th>Resource</th>
+              <th>Image</th>
+              <th>Last seen</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for c in instances %}
+            <tr>
+              <td>{{ c.cluster.name }}</td>
+              <td class="text-muted">{{ c.namespace|default:"—" }}</td>
+              <td class="text-muted">{{ c.resource_name|default:"—" }}</td>
+              <td class="text-muted" {% if c.image|length > 50 %}title="{{ c.image }}"{% endif %}>{{ c.image|truncatechars:50 }}</td>
+              <td class="text-muted">{{ c.last_seen|date:"Y-m-d" }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,77 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "kubeposture-import.fullname" . }}
+  labels:
+    {{- include "kubeposture-import.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.schedule | quote }}
+  concurrencyPolicy: Forbid
+  failedJobsHistoryLimit: 3
+  successfulJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ .Values.activeDeadlineSeconds }}
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            {{- include "kubeposture-import.selectorLabels" . | nindent 12 }}
+        spec:
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          serviceAccountName: {{ include "kubeposture-import.serviceAccountName" . }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+          restartPolicy: Never
+          containers:
+            - name: import
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command:
+                - python
+                - scripts/import-cluster.py
+                - {{ required "clusterName is required" .Values.clusterName }}
+                - $(KUBEPOSTURE_TOKEN)
+                - --in-cluster
+                {{- if and .Values.import.trivy (not .Values.import.kyverno) }}
+                - --trivy
+                {{- end }}
+                {{- if and .Values.import.kyverno (not .Values.import.trivy) }}
+                - --kyverno
+                {{- end }}
+              env:
+                - name: KUBEPOSTURE_URL
+                  value: {{ .Values.kubepostureUrl | quote }}
+                - name: KUBEPOSTURE_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.secretName }}
+                      key: token
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+              resources:
+                {{- toYaml .Values.resources | nindent 16 }}
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}

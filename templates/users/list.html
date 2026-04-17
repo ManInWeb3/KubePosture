@@ -1,0 +1,111 @@
+{% extends "settings/index.html" %}
+
+{% block title %}Users — KubePosture{% endblock %}
+
+{% block settings_content %}
+{% if messages %}
+{% for msg in messages %}
+<div class="alert alert-{{ msg.tags }} alert-dismissible">{{ msg }}
+  <a class="btn-close" data-bs-dismiss="alert"></a>
+</div>
+{% endfor %}
+{% endif %}
+
+<!-- Closable explanation -->
+<div class="alert alert-info alert-dismissible" role="alert">
+  <div class="d-flex">
+    <div>
+      <h4 class="alert-title">User Roles</h4>
+      <div class="text-secondary">
+        <ul class="mb-0">
+          <li><strong>viewer</strong> — read all findings, compliance data, and components. Download reports.</li>
+          <li><strong>operator</strong> — everything viewer can do, plus acknowledge findings and perform bulk actions.</li>
+          <li><strong>admin</strong> — everything operator can do, plus risk acceptance, user management, cluster configuration, and report generation.</li>
+        </ul>
+        Service accounts (<code>svc-*</code>) are used for scanner ingest and are hidden from this list.
+      </div>
+    </div>
+  </div>
+  <a class="btn-close" data-bs-dismiss="alert" aria-label="Close"></a>
+</div>
+
+<div class="card mb-3">
+  <div class="card-body py-2">
+    <form method="get" class="d-flex gap-2 align-items-center">
+      <input type="text" name="search" class="form-control form-control-sm" style="max-width:300px"
+             placeholder="Search username, email, name..." value="{{ request.GET.search }}">
+      <select name="role" class="form-select form-select-sm" style="width:auto" onchange="this.form.submit()">
+        <option value="">All roles</option>
+        {% for g in groups %}
+        <option value="{{ g.name }}" {% if request.GET.role == g.name %}selected{% endif %}>{{ g.name }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="btn btn-sm btn-outline-secondary">Filter</button>
+      {% if request.GET.search or request.GET.role %}
+      <a href="{% url 'user-list' %}" class="btn btn-sm btn-outline-secondary">Clear</a>
+      {% endif %}
+      <a href="{% url 'user-create' %}" class="btn btn-sm btn-primary ms-auto">+ New user</a>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table table-hover">
+      <thead>
+        <tr>
+          <th>Username</th>
+          <th>Name</th>
+          <th>Email</th>
+          <th>Roles</th>
+          <th>Status</th>
+          <th>Last login</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in users %}
+        <tr>
+          <td><a href="{% url 'user-edit' u.pk %}">{{ u.username }}</a></td>
+          <td>{{ u.get_full_name|default:"—" }}</td>
+          <td class="text-muted">{{ u.email|default:"—" }}</td>
+          <td>
+            {% for g in u.groups.all %}
+              <span class="badge bg-blue-lt text-blue">{{ g.name }}</span>
+            {% empty %}
+              <span class="text-muted">none</span>
+            {% endfor %}
+            {% if u.is_superuser %}<span class="badge bg-danger-lt text-danger">superuser</span>{% endif %}
+          </td>
+          <td>
+            {% if u.is_active %}
+              <span class="badge bg-success-lt text-success">Active</span>
+            {% else %}
+              <span class="badge bg-secondary-lt text-secondary">Inactive</span>
+            {% endif %}
+          </td>
+          <td class="text-muted">{{ u.last_login|date:"Y-m-d H:i"|default:"Never" }}</td>
+          <td>
+            <div class="d-flex gap-1">
+              <a href="{% url 'user-edit' u.pk %}" class="btn btn-sm btn-outline-primary">Edit</a>
+              {% if u != request.user %}
+              <form method="post" action="{% url 'user-toggle-active' u.pk %}" class="d-inline">
+                {% csrf_token %}
+                {% if u.is_active %}
+                <button type="submit" class="btn btn-sm btn-outline-warning" onclick="return confirm('Deactivate {{ u.username }}?')">Deactivate</button>
+                {% else %}
+                <button type="submit" class="btn btn-sm btn-outline-success">Activate</button>
+                {% endif %}
+              </form>
+              {% endif %}
+            </div>
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="7" class="text-center text-muted py-4">No users found.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

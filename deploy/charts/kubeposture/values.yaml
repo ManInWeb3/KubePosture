@@ -1,0 +1,275 @@
+# -- KubePosture Helm chart values
+# Database is NOT included — use CNPG (CloudNativePG) or any external PostgreSQL 16+.
+# Provide DATABASE_URL via the secret referenced by secretName.
+
+# -- Secret containing DATABASE_URL and SECRET_KEY
+secretName: kubeposture-secret
+
+# -- Cluster name parsing overrides for clusters whose names don't follow conventions.
+#
+# Standard naming conventions are auto-parsed with no config needed:
+#   myapp-prd-usw2-eks   → provider=eks, environment=prod, region=us-west-2, project=myapp
+#   azure-prod-eastus-01 → provider=aks, environment=prod, region=eastus
+#   myapps-fra1-do       → provider=do, region=fra1
+#
+# Only add entries here for non-standard exception clusters.
+# Keys are exact cluster names as reported by the Trivy/Kyverno scanner.
+#
+# Fields per entry:
+#   provider    – ovh | eks | aks | do | gke | unknown
+#   environment – prod | staging | dev | unknown
+#   region      – cloud region string
+#   project     – logical grouping / team name
+#
+# After changing this, run:
+#   manage.py sync_cluster_meta [--cluster NAME] [--dry-run]
+# to apply updated parsing to already-registered clusters without waiting
+# for the next ingest.
+#
+# Examples (uncomment and adjust):
+#
+# clusterNameParsingOverrides:
+#   central-cluster:
+#     provider: ovh
+#     environment: prod
+#     region: eu-west-par
+#     project: central
+#
+#   legacy-payments:
+#     provider: eks
+#     environment: prod
+#     region: us-east-1
+#     project: payments
+#
+#   dev-sandbox-do:
+#     provider: do
+#     environment: dev
+#     region: fra1
+#     project: sandbox
+#
+# When empty, no ConfigMap or env var is created — purely additive.
+clusterNameParsingOverrides: {}
+
+# -- Application environment variables (non-sensitive)
+app:
+  env:
+    DEBUG: "False"
+    ALLOWED_HOSTS: "*"
+    LOG_LEVEL: "INFO"
+    INGEST_QUEUE_MAX_ATTEMPTS: "3"
+
+# -- Compliance framework fixture files to load (paths relative to /app/fixtures/)
+# These are loaded by the post-install/upgrade job.
+frameworkFixtures:
+  - "k8s-cis-1.23-sample.yaml"
+
+# ── Web Deployment ──────────────────────────────────────────────
+
+web:
+  replicaCount: 2
+  command:
+    - gunicorn
+    - kubeposture.wsgi:application
+    - --bind
+    - 0.0.0.0:8000
+    - --workers
+    - "2"
+    - --access-logfile
+    - "-"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  livenessProbe:
+    httpGet:
+      path: /healthz/
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 15
+    timeoutSeconds: 3
+  readinessProbe:
+    httpGet:
+      path: /healthz/
+      port: http
+    initialDelaySeconds: 3
+    periodSeconds: 10
+    timeoutSeconds: 3
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 80
+
+# ── Queue Worker CronJob ────────────────────────────────────────
+
+worker:
+  enabled: true
+  schedule: "*/3 * * * *"       # every 3 minutes
+  concurrencyPolicy: Allow      # allow overlap during heavy imports
+  parallelism: 1                # pods per job (increase for burst processing)
+  activeDeadlineSeconds: 300
+  command:
+    - python
+    - manage.py
+    - process_ingest_queue
+    - --batch-size
+    - "10"
+    - --once
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# ── Init: DB migrations ────────────────────────────────────────
+
+migration:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# ── CronJobs ───────────────────────────────────────────────────
+
+cronJobs:
+  enrichEpss:
+    enabled: true
+    schedule: "15 3 * * *"      # daily 03:15 UTC
+    command: ["python", "manage.py", "enrich_epss"]
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    activeDeadlineSeconds: 600
+
+  enrichKev:
+    enabled: true
+    schedule: "30 3 * * *"      # daily 03:30 UTC
+    command: ["python", "manage.py", "enrich_kev"]
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+    activeDeadlineSeconds: 300
+
+  expireRiskAcceptances:
+    enabled: true
+    schedule: "0 4 * * *"       # daily 04:00 UTC
+    command: ["python", "manage.py", "expire_risk_acceptances"]
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+    activeDeadlineSeconds: 120
+
+  cleanupIngestQueue:
+    enabled: true
+    schedule: "0 5 * * *"       # daily 05:00 UTC
+    command: ["python", "manage.py", "cleanup_ingest_queue", "--days", "7"]
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+    activeDeadlineSeconds: 120
+
+  recalculatePriorities:
+    enabled: true
+    schedule: "0 6 * * 0"       # weekly Sunday 06:00 UTC
+    command: ["python", "manage.py", "recalculate_priorities"]
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 1000m
+        memory: 512Mi
+    activeDeadlineSeconds: 1800
+
+# ── Default admin user (created on first install, skipped if exists) ─
+
+adminUser:
+  username: admin
+  password: admin
+  email: admin@kubeposture.local
+
+# ── Post-install/upgrade Job ───────────────────────────────────
+
+setupJob:
+  # Runs: migrate, setup_roles, load_frameworks, ensure_adminuser (all idempotent)
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# ── Image ──────────────────────────────────────────────────────
+
+image:
+  repository: ""          # set per environment
+  pullPolicy: IfNotPresent
+  tag: ""                 # set per environment
+
+imagePullSecrets: []
+
+# ── Naming ─────────────────────────────────────────────────────
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ── Service Account ────────────────────────────────────────────
+
+serviceAccount:
+  create: true
+  automount: true
+  annotations: {}
+  name: ""
+
+# ── Service ────────────────────────────────────────────────────
+
+service:
+  type: ClusterIP
+  port: 8000
+
+# ── Ingress ────────────────────────────────────────────────────
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: kubeposture.central.someorg.xyz
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# ── Pod config ─────────────────────────────────────────────────
+
+podAnnotations: {}
+podLabels: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

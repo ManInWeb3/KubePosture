@@ -1,0 +1,72 @@
+name: Release Helm Chart
+
+# Triggered by chart release tags matching the project convention:
+#   helm-{chart-name}-v{semver}
+#
+# Examples:
+#   helm-kubeposture-v0.1.0          → packages deploy/charts/kubeposture
+#   helm-kubeposture-import-v0.1.0   → packages deploy/charts/kubeposture-import
+#
+# Charts are stored as OCI artifacts in the same ghcr.io registry as the Docker image.
+# Install:
+#   helm install kubeposture oci://ghcr.io/<owner>/<repo>/charts/kubeposture --version 0.1.0
+
+on:
+  push:
+    tags:
+      - 'helm-kubeposture-v[0-9]*'
+      - 'helm-kubeposture-import-v[0-9]*'
+
+permissions:
+  contents: read
+  packages: write   # push OCI artifact to ghcr.io
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Parse tag ──────────────────────────────────────────────────
+      # Tag format:  helm-{chart-name}-v{version}
+      # Examples:    helm-kubeposture-v0.1.0  →  chart=kubeposture,        version=0.1.0
+      #              helm-kubeposture-import-v0.1.0  →  chart=kubeposture-import, version=0.1.0
+      - name: Parse tag
+        id: tag
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          REMAINDER="${TAG#helm-}"      # strip leading "helm-"
+          VERSION="${REMAINDER##*-v}"   # everything after the last "-v"
+          CHART_NAME="${REMAINDER%-v*}" # everything before the last "-v"
+          echo "chart=${CHART_NAME}"   >> "${GITHUB_OUTPUT}"
+          echo "version=${VERSION}"    >> "${GITHUB_OUTPUT}"
+          echo "Parsed → chart=${CHART_NAME}  version=${VERSION}"
+
+      # ── Package & push ─────────────────────────────────────────────
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint chart
+        run: helm lint deploy/charts/${{ steps.tag.outputs.chart }}
+
+      - name: Package chart
+        run: |
+          helm package \
+            deploy/charts/${{ steps.tag.outputs.chart }} \
+            --version     ${{ steps.tag.outputs.version }} \
+            --app-version ${{ steps.tag.outputs.version }} \
+            --destination /tmp/helm-packages
+
+      - name: Log in to GHCR
+        run: |
+          helm registry login ghcr.io \
+            --username ${{ github.actor }} \
+            --password ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push chart to GHCR
+        run: |
+          helm push \
+            /tmp/helm-packages/${{ steps.tag.outputs.chart }}-${{ steps.tag.outputs.version }}.tgz \
+            oci://ghcr.io/${{ github.repository }}/charts
