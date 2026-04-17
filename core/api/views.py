@@ -7,7 +7,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core.api.filters import FindingFilter
-from core.api.permissions import IsAdmin, IsOperator
+from core.api.permissions import IsAdmin, IsOperator, IsServiceAccount
 from core.api.serializers import FindingSerializer
 from core.models import Finding
 from core.services.queue import enqueue
@@ -21,6 +21,7 @@ class IngestView(APIView):
 
     Accepts raw CRD JSON (Trivy or Kyverno). Routes by `kind` field to parser.
     Cluster identified via X-Cluster-Name header or CRD metadata.
+    Restricted to service accounts (username prefix svc-*).
 
     Always queues: INSERT into IngestQueue → return 202 Accepted (~2ms).
     Queue processor (manage.py process_ingest_queue) handles parsing/dedup.
@@ -30,7 +31,7 @@ class IngestView(APIView):
     """
 
     authentication_classes = [TokenAuthentication]
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsServiceAccount]
 
     def post(self, request):
         cluster_name = request.headers.get("X-Cluster-Name")
@@ -87,6 +88,7 @@ class IngestView(APIView):
 class FindingListView(generics.ListAPIView):
     """GET /api/v1/findings/ — filtered, paginated finding list."""
 
+    permission_classes = [IsAuthenticated]
     serializer_class = FindingSerializer
     filterset_class = FindingFilter
     queryset = Finding.objects.select_related("cluster").all()
@@ -95,6 +97,7 @@ class FindingListView(generics.ListAPIView):
 class FindingDetailView(generics.RetrieveAPIView):
     """GET /api/v1/findings/{id}/ — single finding detail."""
 
+    permission_classes = [IsAuthenticated]
     serializer_class = FindingSerializer
     queryset = Finding.objects.select_related("cluster").all()
 

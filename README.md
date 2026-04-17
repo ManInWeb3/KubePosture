@@ -2,6 +2,33 @@
 
 K8s security posture management platform. Aggregates vulnerability and compliance findings from Trivy Operator and Kyverno across all clusters into a single database with lifecycle tracking, effective priority scoring, and compliance reporting.
 
+## Who Uses This
+
+KubePosture is the **security team's tool**. Not everyone involved in fixing security issues needs an account.
+
+### Direct access (create accounts)
+
+| Role | Django group | What they do |
+|---|---|---|
+| Security lead / CISO | `admin` | Approve risk acceptance, manage cluster config, user management, compliance sign-off |
+| DevSecOps engineer | `operator` | Triage findings, acknowledge, bulk actions, propose risk acceptance |
+| Compliance officer / auditor | `viewer` | Read compliance matrix, download PDF reports |
+| On-call engineer | `viewer` | Look up a CVE or misconfiguration during an incident |
+
+### No direct access needed — sync to Linear instead
+
+| Person | Why no account | How they engage |
+|---|---|---|
+| Developer | Doesn't need CVSS, EPSS, or compliance context — just needs a ticket | Linear issue synced from the finding |
+| Product manager | Schedules security work in sprints, not raw CVE triage | Linear issue as backlog item |
+| Engineering manager | Wants team-level security work visible, not a security dashboard | Linear issues in team board |
+
+The sync boundary: KubePosture decides **what** needs fixing and **how urgent** (IMMEDIATE → Urgent, OUT-OF-CYCLE → High, SCHEDULED → Medium, DEFER → Low). Linear is where engineering tracks **when** they'll fix it. Linear integration is planned for Phase 5H.
+
+### Risk acceptance
+
+"Accept Risk" requires admin role — it's a compliance act with an auditable paper trail (reason + expiry date required). A propose/approve workflow (operator proposes, admin approves in one click) is planned for Phase 4.
+
 ## Quick Start (Local Development)
 
 ### Prerequisites
@@ -223,6 +250,57 @@ helm install kubeposture \
 > OCI charts do not use `helm repo add` — reference the full OCI URL directly.
 
 ---
+
+## User Management
+
+### Default admin user
+
+`manage.py ensure_adminuser` (run by the setup Job on every deploy) creates a plain application admin — in the `admin` group, no Django admin access, no superuser flag. Change the credentials in Helm values:
+
+```yaml
+adminUser:
+  username: admin
+  password: changeme
+  email: security@example.com
+```
+
+### Assign a role to an existing user
+
+```bash
+python manage.py shell -c "
+from django.contrib.auth.models import User, Group
+u = User.objects.get(username='jane')
+u.groups.set([Group.objects.get(name='operator')])  # viewer | operator | admin
+"
+```
+
+### Grant Django admin access (platform operator / superuser)
+
+Django admin (`/admin/`) is separate from application roles. Only needed for the platform operator who fixes data via Django admin (cluster metadata corrections, framework management, etc.). Keep this to one or two people.
+
+```bash
+python manage.py shell -c "
+from django.contrib.auth.models import User
+u = User.objects.get(username='jane')
+u.is_staff = True       # grants /admin/ login
+u.is_superuser = True   # bypasses all permission checks in /admin/
+u.save()
+"
+```
+
+To revoke:
+
+```bash
+python manage.py shell -c "
+from django.contrib.auth.models import User
+u = User.objects.get(username='jane')
+u.is_staff = False
+u.is_superuser = False
+u.save()
+"
+```
+
+> Superusers bypass `has_role()` checks in the application too — they can do everything any role can do.
 
 ## Running Tests
 
