@@ -4,10 +4,10 @@
 # -- Django SECRET_KEY — provide either a plaintext value or a secret reference.
 # If secretRef is set it takes precedence over value.
 secretKey:
-  value: ""                        # plaintext (not recommended for production)
+  value: "SomeStrongSecret"    # plaintext (not recommended for production)
   secretRef:
-    name: kubeposture-secret       # K8s secret name
-    key: SECRET_KEY                # key inside that secret
+    name: null       # K8s secret name
+    key: null                # key inside that secret
 
 # -- Database URL secret (e.g. CNPG-generated secret)
 db:

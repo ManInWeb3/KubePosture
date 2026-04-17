@@ -46,8 +46,6 @@ spec:
               python manage.py migrate --noinput
               echo "==> Setting up roles..."
               python manage.py setup_roles
-              echo "==> Syncing cluster name parsing overrides..."
-              python manage.py sync_cluster_meta
               echo "==> Init complete."
           env:
             {{- include "kubeposture.env" . | nindent 12 }}
