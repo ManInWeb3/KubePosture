@@ -71,10 +71,14 @@ Common environment variables shared across web, worker, cronjobs.
       name: {{ .Values.db.secretName }}
       key: {{ .Values.db.urlKey }}
 - name: SECRET_KEY
+{{- if .Values.secretKey.secretRef.name }}
   valueFrom:
     secretKeyRef:
-      name: {{ .Values.secretName }}
-      key: SECRET_KEY
+      name: {{ .Values.secretKey.secretRef.name }}
+      key: {{ .Values.secretKey.secretRef.key }}
+{{- else }}
+  value: {{ .Values.secretKey.value | quote }}
+{{- end }}
 {{- range $key, $value := .Values.app.env }}
 - name: {{ $key }}
   value: {{ $value | quote }}
