@@ -67,6 +67,7 @@ jobs:
 
       - name: Push chart to GHCR
         run: |
+          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           helm push \
             /tmp/helm-packages/${{ steps.tag.outputs.chart }}-${{ steps.tag.outputs.version }}.tgz \
-            oci://ghcr.io/${{ github.repository }}/charts
+            oci://ghcr.io/${REPO_LC}/charts
