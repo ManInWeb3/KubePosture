@@ -1,0 +1,15 @@
+__pycache__
+*.py[cod]
+*.egg-info
+.git
+.gitignore
+.env
+*.sqlite3
+staticfiles
+.vscode
+.idea
+docker-compose.yml
+.dockerignore
+Dockerfile
+README.md
+requirements-dev.txt
