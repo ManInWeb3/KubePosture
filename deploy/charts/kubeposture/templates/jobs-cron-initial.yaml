@@ -1,13 +1,11 @@
 {{/*
-Run each enabled cron job once on install/upgrade so the app has fresh data
-(EPSS, KEV, priorities) immediately instead of waiting for the first scheduled tick.
+Run a cron once on install/upgrade so the app has data immediately instead of
+waiting for the first scheduled tick. Opt-in per cron via cronJobs.<name>.initialRun: true.
 
-These Jobs share the same pod spec as the CronJob template. Hook-weight 1 makes
-them run after the setup job (weight 0). Set cronJobs.<name>.initialRun: false
-to skip a specific cron's initial run.
+Hook-weight 1 makes these run after the setup job (weight 0).
 */}}
 {{- range $name, $job := .Values.cronJobs }}
-{{- if and $job.enabled (ne $job.initialRun false) }}
+{{- if and $job.enabled $job.initialRun }}
 ---
 apiVersion: batch/v1
 kind: Job
