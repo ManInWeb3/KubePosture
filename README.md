@@ -137,6 +137,67 @@ KUBEPOSTURE_URL=https://kubeposture.someorg.xyz \
   python scripts/import-cluster.py cluster-name-1 <token>
 ```
 
+## How-To: Mitigating CVEs via Findings
+
+Playbook for reducing *Immediate* and *Out-of-Cycle* findings. Work top-down;
+ignore *Scheduled* and *Defer* until the top two buckets are empty.
+
+1. **Configure cluster context first.** In Settings → Clusters, set each cluster's
+   environment (prod/staging/dev), internet-exposed flag, and sensitive-data flag.
+   Without this, effective priority degrades and everything lands in *Defer*.
+2. **Triage Immediate findings.** Findings → filter `priority=immediate`, `status=active`.
+   This is the KEV + high-EPSS + critical + exposed-prod intersection — the weekly work queue.
+3. **Group by image.** Most CVEs cluster in a few base images. Open the Images tab,
+   sort by Critical count. One base-image bump (e.g. `python:3.11-slim` → `3.12-slim`)
+   typically closes 20–200 findings at once.
+4. **Choose the fix per finding.** Click a finding — the `fixed_version` field tells you if a patch exists.
+   - **Patch available** → bump the dependency/image, rebuild, redeploy.
+   - **No patch, exposed + KEV** → compensate with NetworkPolicy, WAF rule, or disable the feature.
+   - **Vendor image, unpatched** → Accept Risk with a short expiry (≤ 90 days) + tracking ticket.
+   - **False positive** → mark as False Positive with a reason (audit trail matters).
+5. **Ship & verify.** After the new image rolls out, the next scan dedups by hash.
+   Fixed findings auto-transition to RESOLVED; unchanged ones stay ACTIVE. Verify by
+   filtering `status=resolved` for that cluster/image.
+6. **Prevent recurrence (shift left).** Dependabot/Renovate on source repos,
+   Trivy in CI to fail builds on new Criticals, pin base images to hardened/distroless.
+7. **Measure.** Track *time-to-fix for Immediate* and *open Immediate at week end* — not raw finding counts.
+
+## How-To: Making Clusters Compliant
+
+Goal: pass framework audits (CIS Kubernetes Benchmark, NSA Hardening, SOC2, PCI DSS)
+and keep them passing. Core loop: **Trivy detects existing violations → you fix them →
+Kyverno prevents new violations**.
+
+1. **Pick a framework.** Compliance → Trivy Frameworks. Start with CIS Kubernetes Benchmark
+   (widest coverage). Add SOC2/PCI DSS/HIPAA only if you have a regulatory requirement.
+   Frameworks are loaded from fixture YAMLs listed in `frameworkFixtures` in Helm values
+   via `manage.py load_frameworks`.
+2. **Read the matrix.** Click a framework card → View Matrix. Rows = controls, columns = clusters.
+   **FAIL** cells are your work; **MISSING** means no scan data (check the scanner is installed).
+3. **Fix the easy wins.** Most CIS failures are config issues in Helm values:
+   - Missing `resources.requests`/`resources.limits` → add them.
+   - `allowPrivilegeEscalation: true` → set to false.
+   - Running as root → set `runAsNonRoot: true` + non-zero `runAsUser`.
+   - Writable root filesystem → `readOnlyRootFilesystem: true`, mount writable paths as `emptyDir`.
+   - Missing NetworkPolicy → add default-deny per namespace + explicit allows.
+   - Wide cluster-admin bindings → scope down to namespaces or specific resources.
+   - Default ServiceAccount in use → create per-workload SA, set `automountServiceAccountToken: false` where unused.
+4. **Deploy Kyverno policies in audit mode.** Once a control is green, deploy the matching
+   Kyverno policy with `validationFailureAction: Audit`. Violations show up on
+   Compliance → Kyverno Policies without blocking deployments.
+5. **Promote to enforce.** Watch for 1–2 weeks. When the audit-mode policy has zero fails
+   across all clusters, flip to `validationFailureAction: Enforce`. New violations get
+   blocked at admission — the control is self-enforcing.
+6. **Document exceptions.** Legitimate exceptions (e.g. a vendor operator needing cluster-admin)
+   get a Risk Acceptance on the finding with reason + expiry. Auditors accept documented
+   exceptions; they don't accept undocumented ones.
+7. **Prepare for audit.** You need four things:
+   detection evidence (matrix PASS/FAIL), enforcement evidence (Kyverno in enforce mode),
+   remediation evidence (finding history shows who fixed what, when), documented exceptions.
+8. **Stay compliant.** Weekly: no new red cells. Monthly: review risk acceptances.
+   Quarterly: reload framework fixtures (`manage.py load_frameworks`) in case CIS/SOC2
+   released new versions.
+
 ## Daily Cron Jobs
 
 These should run as K8s CronJobs in production:
