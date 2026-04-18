@@ -11,23 +11,19 @@
 {% endfor %}
 {% endif %}
 
-<!-- Closable explanation -->
-<div class="alert alert-info alert-dismissible" role="alert">
-  <div class="d-flex">
-    <div>
-      <h4 class="alert-title">User Roles</h4>
-      <div class="text-secondary">
-        <ul class="mb-0">
-          <li><strong>viewer</strong> — read all findings, compliance data, and components. Download reports.</li>
-          <li><strong>operator</strong> — everything viewer can do, plus acknowledge findings and perform bulk actions.</li>
-          <li><strong>admin</strong> — everything operator can do, plus risk acceptance, user management, cluster configuration, and report generation.</li>
-        </ul>
-        Service accounts (<code>svc-*</code>) are used for scanner ingest and are hidden from this list.
-      </div>
-    </div>
-  </div>
-  <a class="btn-close" data-bs-dismiss="alert" aria-label="Close"></a>
-</div>
+{% load help_tags %}
+{% help "Users & Roles" %}
+  <p>Manage who can log in and what they can do. Click <strong>+ New User</strong> to add
+  someone, or click a row to edit roles, reset password, or deactivate.</p>
+  <p><strong>Roles (cumulative):</strong></p>
+  <ul>
+    <li><strong>viewer</strong> — read all findings, compliance data, and components. Download reports.</li>
+    <li><strong>operator</strong> — everything viewer can do, plus acknowledge findings and run bulk actions.</li>
+    <li><strong>admin</strong> — everything operator can do, plus risk acceptance, user management, cluster config, report generation.</li>
+  </ul>
+  <p class="mb-0">Service accounts (<code>svc-*</code>) are used for scanner ingest and are hidden from this list —
+  create them with <code>manage.py create_service_token</code>.</p>
+{% endhelp %}
 
 <div class="card mb-3">
   <div class="card-body py-2">

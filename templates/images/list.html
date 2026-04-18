@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% load findings_tags %}
+{% load help_tags %}
 
 {% block title %}Images — KubePosture{% endblock %}
 {% block pretitle %}Vulnerability Posture{% endblock %}
@@ -9,6 +10,14 @@
 {% endblock %}
 
 {% block content %}
+{% help "Images" %}
+  <p>Container images rolled up from all Trivy <em>VulnerabilityReports</em> — one row per
+  image, with its CVE counts by severity and effective priority. Data is populated automatically;
+  images appear the moment their workloads are scanned.</p>
+  <p class="mb-0"><strong>How to use:</strong> sort by Critical or Immediate to find the highest-leverage
+  image to patch — fixing one base image often closes hundreds of findings across workloads.
+  Click the image to see every CVE and the clusters it's running on.</p>
+{% endhelp %}
 <!-- Filters (same order as columns) -->
 <div class="card mb-3">
   <div class="card-body py-2">

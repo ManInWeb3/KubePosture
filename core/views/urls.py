@@ -12,6 +12,7 @@ from core.views.findings import (
 from core.views.dashboard import dashboard
 from core.views.images import image_detail, image_list
 from core.views.settings import cluster_edit, cluster_list
+from core.views.tokens import token_create, token_delete, token_list, token_regenerate
 from core.views.users import user_create, user_edit, user_list, user_toggle_active
 
 urlpatterns = [
@@ -40,4 +41,8 @@ urlpatterns = [
     path("settings/users/<int:pk>/toggle-active/", user_toggle_active, name="user-toggle-active"),
     path("settings/clusters/", cluster_list, name="settings-clusters"),
     path("settings/clusters/<int:pk>/", cluster_edit, name="settings-cluster-edit"),
+    path("settings/tokens/", token_list, name="token-list"),
+    path("settings/tokens/create/", token_create, name="token-create"),
+    path("settings/tokens/<str:username>/regenerate/", token_regenerate, name="token-regenerate"),
+    path("settings/tokens/<str:username>/delete/", token_delete, name="token-delete"),
 ]

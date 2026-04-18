@@ -82,7 +82,6 @@ worker:
     - process_ingest_queue
     - --batch-size
     - "10"
-    - --once
   resources:
     requests:
       cpu: 100m
@@ -104,9 +103,13 @@ migration:
 
 # ── CronJobs ───────────────────────────────────────────────────
 
+# Every cron runs once as a post-install/upgrade Job (initial seed of EPSS/KEV
+# data, priorities, etc.) and then follows its schedule. Set initialRun: false
+# on a specific cron to skip the one-shot run.
 cronJobs:
   enrichEpss:
     enabled: true
+    initialRun: true
     schedule: "15 3 * * *"      # daily 03:15 UTC
     command: ["python", "manage.py", "enrich_epss"]
     resources:

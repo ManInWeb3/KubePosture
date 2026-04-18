@@ -35,6 +35,7 @@ class IngestView(APIView):
 
     def post(self, request):
         cluster_name = request.headers.get("X-Cluster-Name")
+        k8s_version = request.headers.get("X-Cluster-K8s-Version", "").strip()
         payload = request.data
 
         if not isinstance(payload, dict):
@@ -52,6 +53,13 @@ class IngestView(APIView):
                 {"error": "X-Cluster-Name header required or cluster name must be in CRD metadata"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        # Keep cluster.k8s_version in sync with the cluster's actual API version
+        if k8s_version:
+            from core.models import Cluster
+            Cluster.objects.filter(name=cluster_name).exclude(
+                k8s_version=k8s_version
+            ).update(k8s_version=k8s_version)
 
         item = enqueue(cluster_name=cluster_name, raw_json=payload)
 
@@ -138,6 +146,8 @@ class AcceptRiskView(_FindingActionView):
     permission_classes = [IsAuthenticated, IsAdmin]
 
     def post(self, request, pk):
+        import datetime
+
         from core.services.lifecycle import LifecycleError, accept_risk
 
         reason = request.data.get("reason", "")
@@ -150,9 +160,21 @@ class AcceptRiskView(_FindingActionView):
             return Response(
                 {"error": "until (expiry date) is required"}, status=status.HTTP_400_BAD_REQUEST
             )
+        try:
+            until_date = datetime.date.fromisoformat(str(until))
+        except ValueError:
+            return Response(
+                {"error": "until must be a valid date (YYYY-MM-DD)"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if until_date <= datetime.date.today():
+            return Response(
+                {"error": "until must be in the future"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
-            finding = accept_risk(pk, request.user, reason, until)
+            finding = accept_risk(pk, request.user, reason, until_date)
         except Finding.DoesNotExist:
             return Response({"error": "Finding not found"}, status=status.HTTP_404_NOT_FOUND)
         except LifecycleError as e:

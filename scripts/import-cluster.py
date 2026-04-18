@@ -54,13 +54,13 @@ except ImportError:
 TRIVY_GROUP = "aquasecurity.github.io"
 TRIVY_VERSION = "v1alpha1"
 TRIVY_CRDS = [
-    ("vulnerabilityreports", True),       # namespaced
-    ("configauditreports", True),
-    ("exposedsecretreports", True),
-    ("rbacassessmentreports", True),
-    ("infraassessmentreports", True),
-    ("clustercompliancereports", False),  # cluster-scoped
-    ("sbomreports", True),
+    ("vulnerabilityreports", True, "VulnerabilityReport"),
+    ("configauditreports", True, "ConfigAuditReport"),
+    ("exposedsecretreports", True, "ExposedSecretReport"),
+    ("rbacassessmentreports", True, "RbacAssessmentReport"),
+    ("infraassessmentreports", True, "InfraAssessmentReport"),
+    ("clustercompliancereports", False, "ClusterComplianceReport"),
+    ("sbomreports", True, "SbomReport"),
 ]
 
 # ── Kyverno CRD types ────────────────────────────────────────
@@ -68,8 +68,8 @@ TRIVY_CRDS = [
 KYVERNO_GROUP = "wgpolicyk8s.io"
 KYVERNO_VERSION = "v1alpha2"
 KYVERNO_CRDS = [
-    ("policyreports", True),              # namespaced
-    ("clusterpolicyreports", False),      # cluster-scoped
+    ("policyreports", True, "PolicyReport"),
+    ("clusterpolicyreports", False, "ClusterPolicyReport"),
 ]
 
 
@@ -94,15 +94,23 @@ def list_crds(
     version: str,
     plural: str,
     namespaced: bool,
+    kind: str,
 ) -> list[dict]:
-    """List CRD items from the cluster. Returns empty list on 404 (CRD not installed)."""
+    """List CRD items from the cluster. Returns empty list on 404 (CRD not installed).
+
+    Injects `kind` on each item — the Kubernetes list API omits it on individual
+    items (only the list wrapper has kind: FooList), but the ingest parser requires it.
+    """
     try:
         result = api.list_cluster_custom_object(
             group=group,
             version=version,
             plural=plural,
         )
-        return result.get("items", [])
+        items = result.get("items", [])
+        for item in items:
+            item.setdefault("kind", kind)
+        return items
     except client.ApiException as e:
         if e.status == 404:
             print(f"    CRD {group}/{plural} not found (not installed)", file=sys.stderr)
@@ -113,19 +121,17 @@ def list_crds(
 
 # ── KubePosture API ─────────────────────────────────────────────
 
-def post_crd(item: dict, url: str, token: str, cluster: str) -> tuple[bool, str]:
+def post_crd(item: dict, url: str, token: str, cluster: str, k8s_version: str = "") -> tuple[bool, str]:
     """Post a single CRD to KubePosture ingest API."""
     body = json.dumps(item).encode()
-    req = Request(
-        url,
-        data=body,
-        headers={
-            "Authorization": f"Token {token}",
-            "Content-Type": "application/json",
-            "X-Cluster-Name": cluster,
-        },
-        method="POST",
-    )
+    headers = {
+        "Authorization": f"Token {token}",
+        "Content-Type": "application/json",
+        "X-Cluster-Name": cluster,
+    }
+    if k8s_version:
+        headers["X-Cluster-K8s-Version"] = k8s_version
+    req = Request(url, data=body, headers=headers, method="POST")
     try:
         with urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read())
@@ -146,13 +152,14 @@ def import_crds(
     token: str,
     cluster: str,
     source_name: str,
+    k8s_version: str = "",
 ) -> tuple[int, int]:
     """Import a set of CRD types. Returns (ok_count, err_count)."""
     total_ok = 0
     total_err = 0
 
-    for plural, namespaced in crds:
-        items = list_crds(api, group, version, plural, namespaced)
+    for plural, namespaced, kind in crds:
+        items = list_crds(api, group, version, plural, namespaced, kind)
         print(f"  {plural}: {len(items)} items")
 
         for item in items:
@@ -161,7 +168,7 @@ def import_crds(
             ns = meta.get("namespace", "")
             label = f"{ns}/{name}" if ns else name
 
-            ok, detail = post_crd(item, ingest_url, token, cluster)
+            ok, detail = post_crd(item, ingest_url, token, cluster, k8s_version)
             if ok:
                 print(f"    + {label}: {detail}")
                 total_ok += 1
@@ -223,6 +230,15 @@ def main():
     load_k8s_config(args.kubeconfig, args.in_cluster)
     api = client.CustomObjectsApi()
 
+    # Fetch server version — sent as X-Cluster-K8s-Version header on each post
+    k8s_version = ""
+    try:
+        vinfo = client.VersionApi().get_code()
+        k8s_version = vinfo.git_version or ""
+        print(f"Cluster K8s version: {k8s_version}")
+    except Exception as e:
+        print(f"Warning: could not fetch K8s version: {e}", file=sys.stderr)
+
     total_ok = 0
     total_err = 0
 
@@ -230,7 +246,7 @@ def main():
         print(f"\n== Trivy ({len(TRIVY_CRDS)} CRD types) ==")
         ok, err = import_crds(
             api, TRIVY_GROUP, TRIVY_VERSION, TRIVY_CRDS,
-            ingest_url, token, cluster, "Trivy",
+            ingest_url, token, cluster, "Trivy", k8s_version,
         )
         total_ok += ok
         total_err += err
@@ -239,7 +255,7 @@ def main():
         print(f"\n== Kyverno ({len(KYVERNO_CRDS)} CRD types) ==")
         ok, err = import_crds(
             api, KYVERNO_GROUP, KYVERNO_VERSION, KYVERNO_CRDS,
-            ingest_url, token, cluster, "Kyverno",
+            ingest_url, token, cluster, "Kyverno", k8s_version,
         )
         total_ok += ok
         total_err += err

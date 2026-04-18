@@ -1,23 +1,17 @@
-<!-- Closable explanation -->
-<div class="alert alert-info alert-dismissible" role="alert" id="cluster-help">
-  <div class="d-flex">
-    <div>
-      <h4 class="alert-title">Cluster Exposure Settings</h4>
-      <div class="text-secondary">
-        These flags feed the <strong>effective priority</strong> decision tree. A CRITICAL CVE on an internet-exposed
-        production cluster gets <strong>Immediate</strong> priority, while the same CVE on an isolated dev cluster
-        gets <strong>Scheduled</strong>.
-        <ul class="mt-2 mb-0">
-          <li><strong>Internet Exposed</strong> — cluster has services reachable from the public internet (ingress, LoadBalancer). Increases priority for findings on this cluster.</li>
-          <li><strong>Sensitive Data</strong> — cluster processes PII, financial, or regulated data. Findings on HIGH/MEDIUM severity get elevated to Scheduled instead of Defer.</li>
-          <li><strong>Namespace Overrides</strong> — for mixed clusters where some namespaces are exposed and others are internal. Overrides inherit cluster defaults when not set.</li>
-          <li><strong>Environment</strong> — auto-detected from cluster name on first ingest. Production clusters get higher priority than dev/staging.</li>
-        </ul>
-      </div>
-    </div>
-  </div>
-  <a class="btn-close" data-bs-dismiss="alert" aria-label="Close"></a>
-</div>
+{% load help_tags %}
+{% help "Clusters" %}
+  <p>Clusters are <strong>auto-registered on first ingest</strong> — when the <code>kubeposture-import</code>
+  CronJob POSTs scan data with a new cluster name, a row appears here. You never create clusters manually.</p>
+  <p><strong>What to set:</strong> after a cluster appears, edit it to mark exposure flags — these feed the
+  effective-priority decision tree. A CRITICAL CVE on an internet-exposed production cluster becomes
+  <strong>Immediate</strong>; the same CVE on an isolated dev cluster becomes <strong>Scheduled</strong>.</p>
+  <ul class="mb-0">
+    <li><strong>Internet Exposed</strong> — services reachable from the public internet (ingress, LoadBalancer).</li>
+    <li><strong>Sensitive Data</strong> — processes PII, financial, or regulated data. HIGH/MEDIUM findings escalate from Defer to Scheduled.</li>
+    <li><strong>Namespace Overrides</strong> — for mixed clusters where only some namespaces are exposed.</li>
+    <li><strong>Environment</strong> — auto-detected from cluster name; production outranks dev/staging.</li>
+  </ul>
+{% endhelp %}
 
 <div class="card">
   <div class="table-responsive">

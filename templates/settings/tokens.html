@@ -1,0 +1,110 @@
+{% extends "settings/index.html" %}
+{% load help_tags %}
+
+{% block title %}Service Tokens — KubePosture{% endblock %}
+
+{% block settings_content %}
+{% if messages %}
+{% for msg in messages %}
+<div class="alert alert-{{ msg.tags }} alert-dismissible">{{ msg }}
+  <a class="btn-close" data-bs-dismiss="alert"></a>
+</div>
+{% endfor %}
+{% endif %}
+
+{% help "Service Tokens" %}
+  <p>API tokens for scanner ingest. The <code>kubeposture-import</code> CronJob on each target
+  cluster uses a token to POST Trivy/Kyverno CRDs to <code>/api/v1/ingest/</code>.</p>
+  <p><strong>How to add a cluster:</strong> create a token here, copy it, paste it into the cluster's
+  <code>values.yaml</code> under <code>token.value</code> (or create a Kubernetes secret and reference it),
+  then run <code>helm install kubeposture-import</code>. The cluster auto-registers on first ingest.</p>
+  <p class="mb-0"><strong>Rotate:</strong> click <em>Regenerate</em> to invalidate the old token and
+  issue a new one. <strong>Revoke:</strong> click <em>Delete</em> to remove the service account entirely.
+  The token value is only shown once — copy it immediately.</p>
+{% endhelp %}
+
+<!-- Create token form -->
+<div class="card mb-3">
+  <div class="card-header"><h3 class="card-title">Create Token</h3></div>
+  <div class="card-body">
+    <form method="post" action="{% url 'token-create' %}" class="d-flex gap-2 align-items-end">
+      {% csrf_token %}
+      <div class="flex-fill">
+        <label class="form-label">Name</label>
+        <input type="text" name="name" class="form-control" required
+               pattern="[a-zA-Z0-9_-]+"
+               placeholder="e.g. cluster-name-1 (will be prefixed with 'svc-')">
+        <small class="form-hint">Alphanumeric, dashes, underscores. Typically the cluster name.</small>
+      </div>
+      <button type="submit" class="btn btn-primary">Create</button>
+    </form>
+  </div>
+</div>
+
+<!-- Existing tokens -->
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table">
+      <thead>
+        <tr>
+          <th>Service Account</th>
+          <th>Token</th>
+          <th>Created</th>
+          <th>Status</th>
+          <th class="w-1">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in tokens %}
+        <tr>
+          <td><code>{{ t.username }}</code></td>
+          <td>
+            {% if t.new_key %}
+              <div class="d-flex align-items-center gap-2">
+                <code class="text-success">{{ t.new_key }}</code>
+                <button type="button" class="btn btn-sm btn-outline-success"
+                        onclick="navigator.clipboard.writeText('{{ t.new_key }}')">Copy</button>
+              </div>
+              <small class="text-warning d-block mt-1">Save this now — it won't be shown again.</small>
+            {% elif t.key %}
+              <code class="text-muted">{{ t.key|slice:":8" }}…{{ t.key|slice:"-4:" }}</code>
+              <small class="text-muted d-block">Regenerate to see the full value again.</small>
+            {% else %}
+              <span class="text-muted">— no token —</span>
+            {% endif %}
+          </td>
+          <td class="text-secondary">{{ t.created|date:"Y-m-d H:i"|default:"—" }}</td>
+          <td>
+            {% if t.is_active %}
+              <span class="badge bg-green-lt text-green">active</span>
+            {% else %}
+              <span class="badge bg-secondary-lt text-secondary">disabled</span>
+            {% endif %}
+          </td>
+          <td>
+            <div class="d-flex gap-1">
+              <form method="post" action="{% url 'token-regenerate' t.username %}" class="d-inline"
+                    onsubmit="return confirm('Regenerate token for {{ t.username }}? The old token will stop working immediately.');">
+                {% csrf_token %}
+                <button type="submit" class="btn btn-sm btn-outline-warning">Regenerate</button>
+              </form>
+              <form method="post" action="{% url 'token-delete' t.username %}" class="d-inline"
+                    onsubmit="return confirm('Delete service account {{ t.username }}? This is permanent.');">
+                {% csrf_token %}
+                <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+        {% empty %}
+        <tr>
+          <td colspan="5" class="text-center text-muted py-4">
+            No service tokens yet. Create one above to enable cluster ingest.
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

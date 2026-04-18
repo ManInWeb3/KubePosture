@@ -1,0 +1,71 @@
+{{/*
+Run each enabled cron job once on install/upgrade so the app has fresh data
+(EPSS, KEV, priorities) immediately instead of waiting for the first scheduled tick.
+
+These Jobs share the same pod spec as the CronJob template. Hook-weight 1 makes
+them run after the setup job (weight 0). Set cronJobs.<name>.initialRun: false
+to skip a specific cron's initial run.
+*/}}
+{{- range $name, $job := .Values.cronJobs }}
+{{- if and $job.enabled (ne $job.initialRun false) }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "kubeposture.fullname" $ }}-{{ $name | kebabcase }}-init-{{ $.Release.Revision }}
+  labels:
+    {{- include "kubeposture.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: cronjob-initial
+    kubeposture/cronjob: {{ $name | kebabcase }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "1"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: {{ $job.activeDeadlineSeconds | default 300 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kubeposture.selectorLabels" $ | nindent 8 }}
+        app.kubernetes.io/component: cronjob-initial
+        kubeposture/cronjob: {{ $name | kebabcase }}
+    spec:
+      {{- with $.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "kubeposture.serviceAccountName" $ }}
+      securityContext:
+        {{- include "kubeposture.podSecurityContext" $ | nindent 8 }}
+      restartPolicy: Never
+      initContainers:
+        {{- include "kubeposture.waitForDb" $ | nindent 8 }}
+      containers:
+        - name: {{ $name | kebabcase }}
+          image: "{{ $.Values.image.repository }}:{{ $.Values.image.tag | default $.Chart.AppVersion }}"
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          command:
+            {{- toYaml $job.command | nindent 12 }}
+          env:
+            {{- include "kubeposture.env" $ | nindent 12 }}
+          securityContext:
+            {{- include "kubeposture.securityContext" $ | nindent 12 }}
+          resources:
+            {{- toYaml $job.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with $.Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $.Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}

@@ -1,10 +1,32 @@
 {% extends "base.html" %}
+{% load help_tags %}
 
 {% block title %}License Overview — KubePosture{% endblock %}
-{% block pretitle %}<a href="{% url 'components-list' %}" class="text-decoration-none">Components</a>{% endblock %}
-{% block page_title %}License Overview <span class="text-muted fs-5 ms-2">{{ total_components }} components</span>{% endblock %}
+{% block pretitle %}SBOM{% endblock %}
+{% block page_title %}
+  Components
+  <span class="text-muted fs-5 ms-2">{{ total_components }} components</span>
+{% endblock %}
 
 {% block content %}
+<!-- Tabs -->
+<ul class="nav nav-bordered mb-3">
+  <li class="nav-item">
+    <a class="nav-link" href="{% url 'components-list' %}">Components</a>
+  </li>
+  <li class="nav-item">
+    <a class="nav-link active" href="{% url 'license-overview' %}">License Overview</a>
+  </li>
+</ul>
+
+{% help "License Overview" %}
+  <p>Every open-source license found across your software inventory, with component counts and
+  fast-filters into the underlying packages. Data comes from Trivy <em>SbomReports</em>.</p>
+  <p class="mb-0"><strong>Use it to:</strong> spot restrictive (GPL/AGPL) licenses in production,
+  audit your top licenses for compliance obligations, and jump to the exact components for any
+  license with one click. The <em>Restrictive in Production</em> card highlights the highest-risk
+  packages to review first.</p>
+{% endhelp %}
 <div class="row row-cards">
   <!-- Restrictive in production -->
   {% if prod_restrictive %}

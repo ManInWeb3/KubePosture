@@ -104,9 +104,11 @@ def kyverno_overview(request):
 
         for snap in snapshots:
             for r in snap.raw_json.get("results", []):
-                r["cluster_name"] = snap.cluster.name
-                r["cluster_id"] = cluster_id
-                all_results.append(r)
+                all_results.append({
+                    **r,
+                    "cluster_name": snap.cluster.name,
+                    "cluster_id": cluster_id,
+                })
 
     # Count totals before filtering (for badge counts)
     total_pass = sum(1 for r in all_results if r.get("result") == "pass")

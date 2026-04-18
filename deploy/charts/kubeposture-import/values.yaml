@@ -23,6 +23,10 @@ import:
   trivy: true
   kyverno: true
 
+# -- Run the import once on install/upgrade, then follow the schedule.
+# Set to false to only run on the schedule.
+initialRun: true
+
 # -- CronJob schedule (default: every 6 hours)
 schedule: "0 */6 * * *"
 

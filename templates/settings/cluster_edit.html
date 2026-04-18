@@ -1,4 +1,5 @@
 {% extends "settings/index.html" %}
+{% load help_tags %}
 
 {% block title %}Configure {{ cluster.name }} — KubePosture{% endblock %}
 {% block pretitle %}<a href="{% url 'settings-clusters' %}" class="text-decoration-none">Settings / Clusters</a>{% endblock %}
@@ -18,38 +19,53 @@
     <form method="post" action="{% url 'settings-cluster-edit' cluster.pk %}">
       {% csrf_token %}
 
-      <!-- Cluster info (read-only) -->
+      <!-- Cluster info -->
       <div class="card mb-3">
         <div class="card-header"><h3 class="card-title">Cluster Info</h3></div>
         <div class="card-body">
-          <div class="datagrid">
-            <div class="datagrid-item">
-              <div class="datagrid-title">Name</div>
-              <div class="datagrid-content"><code>{{ cluster.name }}</code></div>
-            </div>
-            <div class="datagrid-item">
-              <div class="datagrid-title">Environment</div>
-              <div class="datagrid-content">
-                {% if cluster.environment == "prod" %}
-                  <span class="badge bg-danger-lt text-danger">prod</span>
-                {% elif cluster.environment == "staging" %}
-                  <span class="badge bg-warning-lt text-warning">staging</span>
-                {% else %}
-                  <span class="badge bg-azure-lt text-azure">{{ cluster.environment }}</span>
+          {% help "Cluster Info" %}
+            <p class="mb-0"><strong>Name</strong> is set at first ingest and is immutable.
+            <strong>Environment</strong> is auto-detected from the cluster name (prod/staging/dev) —
+            correct it here if the auto-detect is wrong. <strong>K8s version</strong> is auto-refreshed
+            by the import script on every run (ground truth from the cluster's API). Other fields are
+            free-form metadata you maintain.</p>
+          {% endhelp %}
+
+          <div class="mb-3">
+            <label class="form-label">Name</label>
+            <input type="text" class="form-control font-monospace" value="{{ cluster.name }}" disabled>
+          </div>
+
+          <div class="row g-2">
+            <div class="col-md-6 mb-3">
+              <label class="form-label">Environment</label>
+              <select name="environment" class="form-select" required>
+                {% if cluster.environment not in "prod,staging,dev"|cut:"," %}
+                <option value="" disabled selected>— choose —</option>
                 {% endif %}
-              </div>
+                <option value="prod"    {% if cluster.environment == "prod" %}selected{% endif %}>prod</option>
+                <option value="staging" {% if cluster.environment == "staging" %}selected{% endif %}>staging</option>
+                <option value="dev"     {% if cluster.environment == "dev" %}selected{% endif %}>dev</option>
+              </select>
+              <small class="form-hint">Used to compute finding priority — pick the closest match.</small>
             </div>
-            <div class="datagrid-item">
-              <div class="datagrid-title">Provider</div>
-              <div class="datagrid-content">{{ cluster.provider }}</div>
+
+            <div class="col-md-6 mb-3">
+              <label class="form-label">Provider</label>
+              <input type="text" name="provider" class="form-control" value="{{ cluster.provider }}"
+                     placeholder="eks, aks, gke, ovh, do, onprem, unknown">
             </div>
-            <div class="datagrid-item">
-              <div class="datagrid-title">Region</div>
-              <div class="datagrid-content">{{ cluster.region|default:"—" }}</div>
+
+            <div class="col-md-6 mb-3">
+              <label class="form-label">Region</label>
+              <input type="text" name="region" class="form-control" value="{{ cluster.region }}"
+                     placeholder="e.g. eu-west-1, us-central1">
             </div>
-            <div class="datagrid-item">
-              <div class="datagrid-title">K8s Version</div>
-              <div class="datagrid-content">{{ cluster.k8s_version|default:"—" }}</div>
+
+            <div class="col-md-6 mb-3">
+              <label class="form-label">K8s Version</label>
+              <input type="text" class="form-control" value="{{ cluster.k8s_version|default:'—' }}" disabled>
+              <small class="form-hint">Read-only — auto-updated by the import script on every run.</small>
             </div>
           </div>
         </div>
@@ -59,11 +75,12 @@
       <div class="card mb-3">
         <div class="card-header"><h3 class="card-title">Exposure Context</h3></div>
         <div class="card-body">
-          <div class="alert alert-info alert-dismissible mb-3">
-            These settings determine the <strong>effective priority</strong> of findings on this cluster.
-            Changing them will recalculate priorities for all active findings.
-            <a class="btn-close" data-bs-dismiss="alert"></a>
-          </div>
+          {% help "Exposure Context" %}
+            <p class="mb-0">These flags determine the <strong>effective priority</strong> of findings
+            on this cluster. Saving recalculates priorities for all active findings — a CRITICAL CVE
+            on an internet-exposed cluster jumps to <em>Immediate</em>, the same CVE on an isolated
+            cluster stays <em>Scheduled</em>.</p>
+          {% endhelp %}
 
           <div class="mb-3">
             <label class="form-check">
@@ -99,11 +116,11 @@
       <div class="card mb-3">
         <div class="card-header"><h3 class="card-title">Namespace Overrides</h3></div>
         <div class="card-body">
-          <div class="alert alert-info alert-dismissible mb-3">
-            For mixed clusters where some namespaces are internet-exposed and others are internal.
-            Namespaces not listed here inherit the cluster defaults above.
-            <a class="btn-close" data-bs-dismiss="alert"></a>
-          </div>
+          {% help "Namespace Overrides" %}
+            <p class="mb-0">For mixed clusters where some namespaces are internet-exposed and others
+            are internal — list them as JSON below. Namespaces not listed inherit the cluster
+            defaults above.</p>
+          {% endhelp %}
 
           <div class="mb-2">
             <label class="form-label">Overrides (JSON)</label>

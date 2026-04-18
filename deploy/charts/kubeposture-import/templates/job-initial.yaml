@@ -1,0 +1,88 @@
+{{/*
+Run the import once on install/upgrade so findings appear immediately,
+instead of waiting for the first scheduled tick. Shares the same pod spec
+as the CronJob. Set initialRun: false in values to skip.
+*/}}
+{{- if ne .Values.initialRun false }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "kubeposture-import.fullname" . }}-init-{{ .Release.Revision }}
+  labels:
+    {{- include "kubeposture-import.labels" . | nindent 4 }}
+    app.kubernetes.io/component: import-initial
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "1"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: {{ .Values.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "kubeposture-import.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: import-initial
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "kubeposture-import.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      restartPolicy: Never
+      containers:
+        - name: import
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - python
+            - scripts/import-cluster.py
+            - {{ required "clusterName is required" .Values.clusterName }}
+            - $(KUBEPOSTURE_TOKEN)
+            - --in-cluster
+            {{- if and .Values.import.trivy (not .Values.import.kyverno) }}
+            - --trivy
+            {{- end }}
+            {{- if and .Values.import.kyverno (not .Values.import.trivy) }}
+            - --kyverno
+            {{- end }}
+          env:
+            - name: KUBEPOSTURE_URL
+              value: {{ .Values.kubepostureUrl | quote }}
+            - name: KUBEPOSTURE_TOKEN
+            {{- if .Values.token.secretRef.name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.token.secretRef.name }}
+                  key: {{ .Values.token.secretRef.key }}
+            {{- else }}
+              value: {{ .Values.token.value | quote }}
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

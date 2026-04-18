@@ -26,6 +26,8 @@ spec:
       securityContext:
         {{- include "kubeposture.podSecurityContext" . | nindent 8 }}
       restartPolicy: OnFailure
+      initContainers:
+        {{- include "kubeposture.waitForDb" . | nindent 8 }}
       containers:
         - name: setup
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"

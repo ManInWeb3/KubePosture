@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load help_tags %}
 
 {% block title %}Findings — KubePosture{% endblock %}
 {% block pretitle %}Security Findings{% endblock %}
@@ -8,6 +9,16 @@
 {% endblock %}
 
 {% block content %}
+{% help "Findings" %}
+  <p>Every row is one security issue detected by a scanner — a CVE, misconfig, exposed secret,
+  risky RBAC binding, or failed Kyverno policy. <strong>Findings are never added manually</strong>;
+  they appear automatically when Trivy or Kyverno ingest data for your clusters.</p>
+  <p><strong>Effective Priority</strong> is what to act on — it combines severity + EPSS + KEV +
+  cluster exposure flags. Filter by <em>Immediate</em> first, then <em>Out-of-Cycle</em>.</p>
+  <p class="mb-0"><strong>Actions:</strong> click a finding to open details, view the raw scan payload,
+  accept risk (admin only, with expiry + reason), or mark as fixed. Status changes are auditable in
+  the history table on the detail page.</p>
+{% endhelp %}
 <!-- Filters -->
 <div class="card mb-3">
   <div class="card-body">

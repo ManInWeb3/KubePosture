@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load help_tags %}
 
 {% block title %}{{ framework.name }} — Compliance Matrix{% endblock %}
 {% block pretitle %}
@@ -23,6 +24,16 @@
 {% endblock %}
 
 {% block content %}
+{% help "Compliance Matrix" %}
+  <p>Rows are controls from the framework; columns are clusters. Each cell is the latest Trivy
+  compliance result (<strong>PASS</strong> / <strong>FAIL</strong> / <strong>MISSING</strong>).</p>
+  <p><strong>Where the mapping comes from:</strong> the framework fixture YAML declares which
+  Trivy check IDs (AVD-*) roll up into each control, plus the Kyverno policies that enforce it.
+  Load or refresh fixtures with <code>manage.py load_frameworks</code>.</p>
+  <p class="mb-0"><strong>Use it to:</strong> prove compliance to an auditor, find controls failing
+  on a specific cluster, or see which controls still have no data (MISSING — add Trivy/Kyverno
+  coverage for them).</p>
+{% endhelp %}
 <!-- Summary bar -->
 <div class="row mb-3">
   {% for cluster in clusters %}

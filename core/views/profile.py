@@ -5,21 +5,32 @@ from django.contrib.auth.decorators import login_required
 from django.contrib.auth.forms import PasswordChangeForm
 from django.shortcuts import redirect, render
 
+from core.models import UserPreference
+
 
 @login_required
 def profile_view(request):
+    pref, _ = UserPreference.objects.get_or_create(user=request.user)
+
     if request.method == "POST":
-        user = request.user
-        user.first_name = request.POST.get("first_name", "").strip()
-        user.last_name = request.POST.get("last_name", "").strip()
-        user.email = request.POST.get("email", "").strip()
-        user.save(update_fields=["first_name", "last_name", "email"])
-        messages.success(request, "Profile updated.")
+        form = request.POST.get("form", "info")
+        if form == "preferences":
+            pref.show_help = request.POST.get("show_help") == "on"
+            pref.save(update_fields=["show_help"])
+            messages.success(request, "Preferences saved.")
+        else:
+            user = request.user
+            user.first_name = request.POST.get("first_name", "").strip()
+            user.last_name = request.POST.get("last_name", "").strip()
+            user.email = request.POST.get("email", "").strip()
+            user.save(update_fields=["first_name", "last_name", "email"])
+            messages.success(request, "Profile updated.")
         return redirect("profile")
 
     groups = list(request.user.groups.values_list("name", flat=True))
     return render(request, "auth/profile.html", {
         "groups": groups,
+        "preference": pref,
         "nav": "profile",
     })
 

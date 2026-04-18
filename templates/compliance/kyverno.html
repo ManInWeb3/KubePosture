@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load help_tags %}
 
 {% block title %}Kyverno Compliance — KubePosture{% endblock %}
 {% block pretitle %}Compliance{% endblock %}
@@ -19,15 +20,18 @@
   </li>
 </ul>
 
-<!-- Info -->
-<div class="alert alert-info alert-dismissible mb-3" role="alert">
-  <div class="text-secondary">
-    <strong>Kyverno</strong> evaluates workloads against admission policies deployed in each cluster.
-    This shows results for <strong>deployed policies only</strong> — if a policy isn't installed, it won't appear here.
-    To improve coverage, deploy more policies in <strong>audit mode</strong> first, then switch to enforce after fixing violations.
-  </div>
-  <a class="btn-close" data-bs-dismiss="alert" aria-label="Close"></a>
-</div>
+{% help "Kyverno Policies" %}
+  <p>Every result from every PolicyReport and ClusterPolicyReport ingested from your clusters,
+  broken out by policy + resource.</p>
+  <p><strong>How it arrives:</strong> the <code>kubeposture-import</code> CronJob on each target cluster
+  reads <code>wgpolicyk8s.io/PolicyReport</code> CRDs and POSTs them. Each PolicyReport also produces a
+  cluster-level <em>PolicyComplianceSnapshot</em> (pass/fail totals) for trend tracking.</p>
+  <p><strong>Filter</strong> by result (fail/warn/pass) and cluster to narrow down. Failures are
+  also available as individual Findings on the Findings page.</p>
+  <p class="mb-0"><strong>Improve coverage:</strong> deploy more policies in <em>audit</em> mode first,
+  review violations here, then switch to <em>enforce</em> once workloads are clean — only deployed
+  policies produce reports, so uninstalled ones won't appear.</p>
+{% endhelp %}
 
 <!-- Filters -->
 <div class="card mb-3">

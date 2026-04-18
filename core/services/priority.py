@@ -34,6 +34,9 @@ def _is_sensitive(cluster, namespace):
     return cluster.contains_sensitive_data
 
 
+VALID_ENVIRONMENTS = ("prod", "staging", "dev")
+
+
 def compute_priority(finding, cluster):
     """
     SSVC-inspired decision tree for action priority.
@@ -52,6 +55,13 @@ def compute_priority(finding, cluster):
     """
     if cluster is None:
         return Priority.SCHEDULED
+
+    if cluster.environment not in VALID_ENVIRONMENTS:
+        logger.warning(
+            "Cluster %s has unconfigured environment '%s' — priorities will degrade. "
+            "Set it in Settings → Clusters.",
+            cluster.name, cluster.environment,
+        )
 
     # Threat signals (per-finding, automatic)
     kev = finding.kev_listed or False

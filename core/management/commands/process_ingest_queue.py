@@ -1,14 +1,14 @@
 """
-Process the ingest queue — continuous worker loop.
+Process the ingest queue.
 
 Usage:
-  python manage.py process_ingest_queue                  # continuous loop
-  python manage.py process_ingest_queue --once            # single batch, then exit
-  python manage.py process_ingest_queue --batch-size 5    # claim 5 items per cycle
-  python manage.py process_ingest_queue --sleep 2         # sleep 2s when queue empty
+  python manage.py process_ingest_queue                       # drain queue and exit
+  python manage.py process_ingest_queue --continuous          # loop forever (K8s Deployment)
+  python manage.py process_ingest_queue --batch-size 5        # claim 5 items per cycle
+  python manage.py process_ingest_queue --continuous --sleep 2  # sleep 2s when queue empty
 
-Production: K8s Deployment with replicas: 2
-  command: ["python", "manage.py", "process_ingest_queue", "--batch-size", "5"]
+Production (Deployment): ["python", "manage.py", "process_ingest_queue", "--continuous"]
+CronJob: ["python", "manage.py", "process_ingest_queue", "--batch-size", "10"]
 """
 import signal
 import time
@@ -19,7 +19,7 @@ from core.services.queue import get_queue_stats, process_batch, recover_stuck
 
 
 class Command(BaseCommand):
-    help = "Process the ingest queue (continuous worker loop)"
+    help = "Process the ingest queue (drain and exit, or continuous loop with --continuous)"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -33,33 +33,31 @@ class Command(BaseCommand):
             help="Number of items to claim per cycle (default: 1)",
         )
         parser.add_argument(
-            "--once",
+            "--continuous",
             action="store_true",
-            help="Process one batch and exit (for testing)",
+            help="Keep running when queue is empty instead of exiting",
         )
         parser.add_argument(
             "--sleep",
             type=float,
             default=1.0,
-            help="Seconds to sleep when queue is empty (default: 1.0)",
+            help="Seconds to sleep when queue is empty in --continuous mode (default: 1.0)",
         )
 
     def handle(self, *args, **options):
         batch_size = options["batch_size"]
-        once = options["once"]
+        continuous = options["continuous"]
         sleep_seconds = options["sleep"]
 
-        # Graceful shutdown on SIGTERM/SIGINT
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
 
         self.stdout.write(
             f"Queue processor started (batch_size={batch_size}, "
-            f"sleep={sleep_seconds}s, once={once})"
+            f"continuous={continuous}, sleep={sleep_seconds}s)"
         )
 
         while not self._shutdown:
-            # Recover stuck items first
             recovered = recover_stuck()
             if recovered:
                 self.stdout.write(f"Recovered {recovered} stuck items")
@@ -72,16 +70,14 @@ class Command(BaseCommand):
                     f"({result['failed']} failed)"
                 )
             else:
-                # Queue empty — sleep before next check
+                if not continuous:
+                    break
                 time.sleep(sleep_seconds)
-
-            if once:
-                break
 
         stats = get_queue_stats()
         self.stdout.write(
             self.style.SUCCESS(
-                f"Shutting down. Queue: {stats['pending']} pending, "
+                f"Done. Queue: {stats['pending']} pending, "
                 f"{stats['processing']} processing, {stats['failed']} failed"
             )
         )

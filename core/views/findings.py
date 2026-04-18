@@ -7,11 +7,14 @@ Convention U3: URL-driven filters — every filter state in URL.
 """
 import datetime
 
+from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.paginator import Paginator
+from django.db import transaction
 from django.db.models import Q
 from django.http import HttpResponseBadRequest, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
+from django.utils import timezone
 
 from core.api.permissions import has_role
 from core.constants import Category, Priority, Severity, Source, Status
@@ -145,21 +148,44 @@ def finding_accept_risk(request, pk):
     if not reason or not until:
         return HttpResponseBadRequest("reason and until are required")
 
+    try:
+        until_date = datetime.date.fromisoformat(until)
+    except ValueError:
+        return HttpResponseBadRequest("until must be a valid date (YYYY-MM-DD)")
+    if until_date <= datetime.date.today():
+        return HttpResponseBadRequest("until must be in the future")
+
     from core.services.lifecycle import LifecycleError, accept_risk
 
     try:
-        accept_risk(pk, request.user, reason, until)
+        accept_risk(pk, request.user, reason, until_date)
     except LifecycleError:
         pass
 
     return redirect("findings-detail", pk=pk)
 
 
+BULK_ACTIONS = {
+    "acknowledge": {
+        "from_statuses": [Status.ACTIVE],
+        "to_status": Status.ACKNOWLEDGED,
+        "comment": "Bulk acknowledge",
+    },
+    "resolve": {
+        "from_statuses": [Status.ACTIVE, Status.ACKNOWLEDGED],
+        "to_status": Status.RESOLVED,
+        "comment": "Bulk resolve",
+    },
+}
+
+
 @login_required
 def finding_bulk_action(request):
-    """POST: bulk action on selected findings."""
+    """POST: bulk action on selected findings. Operator+."""
     if request.method != "POST":
         return HttpResponseBadRequest("POST required")
+    if not has_role(request.user, "operator"):
+        return HttpResponseForbidden("Operator role required")
 
     action = request.POST.get("action", "")
     finding_ids = request.POST.getlist("finding_ids")
@@ -167,29 +193,37 @@ def finding_bulk_action(request):
     if not action or not finding_ids:
         return redirect("findings-list")
 
-    if action == "acknowledge" and has_role(request.user, "operator"):
-        updated = Finding.objects.filter(
-            pk__in=finding_ids, status=Status.ACTIVE
-        ).update(status=Status.ACKNOWLEDGED)
-        # Create history only for findings that were actually updated
-        actual_ids = Finding.objects.filter(
-            pk__in=finding_ids, status=Status.ACKNOWLEDGED
-        ).values_list("pk", flat=True)
-        for fid in actual_ids:
-            FindingHistory.objects.create(
-                finding_id=fid,
-                user=request.user,
-                old_status=Status.ACTIVE,
-                new_status=Status.ACKNOWLEDGED,
-                comment="Bulk acknowledge",
-            )
+    cfg = BULK_ACTIONS.get(action)
+    if cfg is None:
+        messages.error(request, f"Unknown action: {action}")
+        return redirect("findings-list")
 
-    elif action == "resolve" and has_role(request.user, "operator"):
-        from django.utils import timezone
-
-        Finding.objects.filter(
+    with transaction.atomic():
+        matched = Finding.objects.select_for_update().filter(
             pk__in=finding_ids,
-            status__in=[Status.ACTIVE, Status.ACKNOWLEDGED],
-        ).update(status=Status.RESOLVED, resolved_at=timezone.now())
+            status__in=cfg["from_statuses"],
+        )
+        rows = list(matched.values("pk", "status"))
 
+        if not rows:
+            messages.warning(request, "No eligible findings in the selection.")
+            return redirect("findings-list")
+
+        update_kwargs = {"status": cfg["to_status"]}
+        if cfg["to_status"] == Status.RESOLVED:
+            update_kwargs["resolved_at"] = timezone.now()
+        matched.update(**update_kwargs)
+
+        FindingHistory.objects.bulk_create([
+            FindingHistory(
+                finding_id=row["pk"],
+                user=request.user,
+                old_status=row["status"],
+                new_status=cfg["to_status"],
+                comment=cfg["comment"],
+            )
+            for row in rows
+        ])
+
+    messages.success(request, f"{len(rows)} finding(s) {action}d.")
     return redirect("findings-list")

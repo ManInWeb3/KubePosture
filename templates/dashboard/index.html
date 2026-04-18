@@ -1,11 +1,21 @@
 {% extends "base.html" %}
 {% load findings_tags %}
+{% load help_tags %}
 
 {% block title %}Dashboard — KubePosture{% endblock %}
 {% block pretitle %}Overview{% endblock %}
 {% block page_title %}Security Dashboard{% endblock %}
 
 {% block content %}
+{% help "Security Dashboard" %}
+  <p>Top-level posture view across all your clusters. Cards show active findings, images
+  affected, KEV-listed exploits, and trends week-over-week.</p>
+  <p><strong>Where does the data come from?</strong> Trivy Operator scans (via webhook) and
+  Kyverno PolicyReports (via the <code>kubeposture-import</code> CronJob deployed on each target cluster).
+  New clusters appear automatically on first ingest.</p>
+  <p class="mb-0"><strong>How to use:</strong> scan the Immediate/Out-of-Cycle counts first — those are
+  what to fix this week. Click any card to drill into the filtered Findings list.</p>
+{% endhelp %}
 <!-- Top summary row -->
 <div class="row row-deck row-cards mb-3">
   <div class="col-sm-6 col-lg-3">

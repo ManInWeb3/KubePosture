@@ -1,14 +1,32 @@
 {% extends "base.html" %}
+{% load help_tags %}
 
 {% block title %}Components — KubePosture{% endblock %}
 {% block pretitle %}SBOM{% endblock %}
 {% block page_title %}
-  Component Inventory
+  Components
   <span class="text-muted fs-5 ms-2">{{ page_obj.paginator.count }} components</span>
-  <a href="{% url 'license-overview' %}" class="btn btn-sm btn-outline-secondary ms-3">License Overview</a>
 {% endblock %}
 
 {% block content %}
+<!-- Tabs -->
+<ul class="nav nav-bordered mb-3">
+  <li class="nav-item">
+    <a class="nav-link active" href="{% url 'components-list' %}">Components</a>
+  </li>
+  <li class="nav-item">
+    <a class="nav-link" href="{% url 'license-overview' %}">License Overview</a>
+  </li>
+</ul>
+
+{% help "Components" %}
+  <p>Every software package — OS library, language dependency, binary — discovered across all
+  container images, keyed by <code>purl</code> (Package URL). Data comes from Trivy
+  <em>SbomReports</em>; components appear as soon as their images are scanned.</p>
+  <p class="mb-0"><strong>Use it to answer:</strong> "which images use <code>log4j 2.14</code>?",
+  "which GPL-licensed packages are in production?", "where is this CVE's affected component
+  actually deployed?" Switch to the <strong>License Overview</strong> tab for a license compliance summary.</p>
+{% endhelp %}
 <!-- Filters -->
 <div class="card mb-3">
   <div class="card-body">

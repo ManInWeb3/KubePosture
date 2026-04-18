@@ -52,6 +52,13 @@ def cluster_edit(request, pk):
     if request.method == "POST":
         cluster.internet_exposed = request.POST.get("internet_exposed") == "on"
         cluster.contains_sensitive_data = request.POST.get("contains_sensitive_data") == "on"
+        env = request.POST.get("environment", "").strip()
+        if env not in ("prod", "staging", "dev"):
+            messages.error(request, "Environment must be prod, staging, or dev.")
+            return _render_cluster_form(request, cluster)
+        cluster.environment = env
+        cluster.provider = request.POST.get("provider", "unknown").strip() or "unknown"
+        cluster.region = request.POST.get("region", "").strip()
 
         # Parse namespace overrides JSON
         overrides_raw = request.POST.get("namespace_overrides", "").strip()
@@ -70,6 +77,7 @@ def cluster_edit(request, pk):
 
         cluster.save(update_fields=[
             "internet_exposed", "contains_sensitive_data", "namespace_overrides",
+            "environment", "provider", "region",
         ])
 
         # Recalculate priorities for this cluster

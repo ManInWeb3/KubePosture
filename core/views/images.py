@@ -77,21 +77,24 @@ def image_detail(request, image_ref):
         details__image=image_ref,
     ).select_related("cluster").order_by("-severity", "-epss_score")
 
-    total = findings.count()
-    critical = findings.filter(severity=Severity.CRITICAL).count()
-    high = findings.filter(severity=Severity.HIGH).count()
-    fixable = findings.exclude(details__fixed_version="").filter(
-        details__fixed_version__isnull=False,
-    ).count()
+    stats = findings.aggregate(
+        total=Count("pk"),
+        critical=Count("pk", filter=Q(severity=Severity.CRITICAL)),
+        high=Count("pk", filter=Q(severity=Severity.HIGH)),
+        fixable=Count(
+            "pk",
+            filter=~Q(details__fixed_version="") & Q(details__fixed_version__isnull=False),
+        ),
+    )
 
     context = {
         "image_ref": image_ref,
         "short_image": _short_image(image_ref),
         "findings": findings[:200],
-        "total": total,
-        "critical": critical,
-        "high": high,
-        "fixable": fixable,
+        "total": stats["total"],
+        "critical": stats["critical"],
+        "high": stats["high"],
+        "fixable": stats["fixable"],
         "nav": "images",
     }
     return render(request, "images/detail.html", context)

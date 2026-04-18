@@ -71,18 +71,23 @@ def user_create(request):
         selected_groups = request.POST.getlist("groups")
         is_active = request.POST.get("is_active") == "on"
 
+        ctx = {"groups": groups, "nav": "settings", "settings_tab": "users"}
         if not username:
             messages.error(request, "Username is required.")
-            return render(request, "users/form.html", {"groups": groups, "nav": "settings", "settings_tab": "users"})
+            return render(request, "users/form.html", ctx)
+
+        if not password or len(password) < 8:
+            messages.error(request, "Password is required and must be at least 8 characters.")
+            return render(request, "users/form.html", ctx)
 
         if User.objects.filter(username=username).exists():
             messages.error(request, f"Username '{username}' already exists.")
-            return render(request, "users/form.html", {"groups": groups, "nav": "settings", "settings_tab": "users"})
+            return render(request, "users/form.html", ctx)
 
         user = User.objects.create_user(
             username=username,
             email=email,
-            password=password or None,
+            password=password,
             first_name=first_name,
             last_name=last_name,
         )

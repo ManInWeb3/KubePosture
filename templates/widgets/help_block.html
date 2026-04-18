@@ -1,0 +1,12 @@
+<div class="alert alert-info mb-4" role="alert">
+  <div class="d-flex">
+    <div class="me-3 pt-1">
+      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9 9a3 3 0 1 1 4 2.83V14"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+    </div>
+    <div class="flex-fill">
+      {% if title %}<h4 class="alert-title mb-2">{{ title }}</h4>{% endif %}
+      <div class="text-secondary help-body">{{ body|safe }}</div>
+      <div class="mt-2"><a href="{% url 'profile' %}" class="text-muted small">Hide help blocks →</a></div>
+    </div>
+  </div>
+</div>

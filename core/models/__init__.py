@@ -6,6 +6,7 @@ from core.models.kyverno import PolicyComplianceSnapshot
 from core.models.queue import IngestQueue
 from core.models.raw_report import RawReport
 from core.models.sbom import Component
+from core.models.user_preference import UserPreference
 
 __all__ = [
     "Cluster",
@@ -20,4 +21,5 @@ __all__ = [
     "PolicyComplianceSnapshot",
     "RawReport",
     "Component",
+    "UserPreference",
 ]
