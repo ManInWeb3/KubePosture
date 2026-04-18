@@ -196,9 +196,9 @@ setupJob:
 # ── Image ──────────────────────────────────────────────────────
 
 image:
-  repository: ""          # set per environment
+  repository: ghcr.io/maninweb3/kubeposture
   pullPolicy: IfNotPresent
-  tag: ""                 # set per environment
+  tag: ""                 # empty = use Chart.yaml appVersion
 
 imagePullSecrets: []
 

@@ -35,9 +35,9 @@ activeDeadlineSeconds: 900
 
 # -- Image containing the import script + kubernetes Python client
 image:
-  repository: ""          # set per environment (same image as kubeposture app)
+  repository: ghcr.io/maninweb3/kubeposture   # same image as the main app
   pullPolicy: IfNotPresent
-  tag: ""
+  tag: ""                                     # empty = use Chart.yaml appVersion
 
 imagePullSecrets: []
 
