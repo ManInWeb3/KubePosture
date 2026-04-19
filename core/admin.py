@@ -257,6 +257,7 @@ class NamespaceAdmin(admin.ModelAdmin):
         "exposure_is_manual",
         "contains_sensitive_data",
         "sensitive_is_manual",
+        "network_policy_count",
         "last_seen",
         "deactivated_at",
     ]
@@ -270,7 +271,9 @@ class NamespaceAdmin(admin.ModelAdmin):
     search_fields = ["name", "cluster__name"]
     readonly_fields = [
         "active",
-        "first_seen", "last_seen", "deactivated_at", "labels", "annotations",
+        "first_seen", "last_seen", "deactivated_at",
+        "network_policy_count",
+        "labels", "annotations",
     ]
 
     def save_model(self, request, obj, form, change):

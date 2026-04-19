@@ -122,6 +122,10 @@
           is auto-detected from K8s state (Services of type LoadBalancer/NodePort, Ingresses).
           <strong>Sensitive Data</strong> is always manual — admin declares which namespaces
           process PII / financial / regulated data.</p>
+          <p><strong>PSS</strong> shows the <code>pod-security.kubernetes.io/enforce</code> label
+          (restricted / baseline / privileged). Missing label defaults to privileged semantically.
+          <strong>NetPols</strong> counts NetworkPolicy resources — zero indicates no pod-to-pod
+          traffic restriction, widening the blast radius of any compromise.</p>
           <p class="mb-0">Namespaces marked <span class="badge bg-danger-lt text-danger">deleted</span>
           were not present in the most recent complete cluster snapshot; their active findings were
           auto-resolved.</p>
@@ -134,6 +138,8 @@
               <tr>
                 <th>Name</th>
                 <th>Active findings</th>
+                <th title="Pod Security Standards enforce label on the namespace">PSS</th>
+                <th title="NetworkPolicy resources in this namespace — zero = wide blast radius">NetPols</th>
                 <th>Last seen</th>
                 <th>Internet exposed</th>
                 <th>Sensitive data</th>

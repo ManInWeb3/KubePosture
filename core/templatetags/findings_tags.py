@@ -102,6 +102,45 @@ def dict_get(d, key):
     return d.get(key, "")
 
 
+_PSS_COLORS = {
+    "restricted": "bg-success-lt text-success",
+    "baseline": "bg-warning-lt text-warning",
+    "privileged": "bg-danger-lt text-danger",
+}
+_PSS_DESCRIPTIONS = {
+    "restricted": "Most restrictive policy — no privileged containers, enforced non-root.",
+    "baseline": "Prevents known privilege escalations while permitting baseline workloads.",
+    "privileged": "No restrictions — any workload, including privileged pods, can run.",
+    "": "No pod-security.kubernetes.io/enforce label — K8s treats as privileged.",
+}
+
+
+@register.simple_tag
+def pss_badge(level):
+    """Render a Pod Security Standards level as a badge."""
+    key = (level or "").lower()
+    css = _PSS_COLORS.get(key, "bg-secondary-lt text-secondary")
+    desc = _PSS_DESCRIPTIONS.get(key, _PSS_DESCRIPTIONS[""])
+    label = key or "unlabeled"
+    return format_html('<span class="badge {}" title="{}">{}</span>', css, desc, label)
+
+
+@register.simple_tag
+def network_policy_badge(count):
+    """Render NetworkPolicy count; zero is a risk signal."""
+    try:
+        n = int(count)
+    except (TypeError, ValueError):
+        n = 0
+    if n == 0:
+        css = "bg-danger-lt text-danger"
+        desc = "No NetworkPolicies — pod-to-pod traffic is unrestricted."
+    else:
+        css = "bg-success-lt text-success"
+        desc = f"{n} NetworkPolicy resource(s) in this namespace."
+    return format_html('<span class="badge {}" title="{}">{}</span>', css, desc, n)
+
+
 @register.simple_tag
 def epss_badge(score):
     if score is None:

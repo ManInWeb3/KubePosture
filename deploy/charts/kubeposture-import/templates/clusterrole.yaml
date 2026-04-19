@@ -5,6 +5,21 @@ metadata:
   labels:
     {{- include "kubeposture-import.labels" . | nindent 4 }}
 rules:
+  # Cluster-metadata auto-detect — feeds /api/v1/cluster-metadata/sync/.
+  # Without these the script can't discover K8s version, provider/region,
+  # or per-namespace internet exposure (Services LB/NodePort + Ingresses),
+  # and complete_snapshot stays False (deactivation sweep is skipped).
+  - apiGroups: [""]
+    resources:
+      - namespaces
+      - nodes
+      - services
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+      - networkpolicies
+    verbs: ["get", "list"]
   {{- if .Values.import.trivy }}
   # Trivy Operator CRDs (7 types)
   - apiGroups: ["aquasecurity.github.io"]

@@ -1,3 +1,4 @@
+{% load findings_tags %}
 <tr id="ns-row-{{ ns.pk }}" {% if not ns.active %}class="table-secondary text-muted" title="Namespace no longer present in the cluster at last sync"{% endif %}>
   <td>
     <code>{{ ns.name }}</code>
@@ -7,6 +8,8 @@
     {% endif %}
   </td>
   <td class="text-muted">{{ ns.finding_count }}</td>
+  <td>{% pss_badge ns.pss_enforce %}</td>
+  <td>{% network_policy_badge ns.network_policy_count %}</td>
   <td class="text-muted">
     {% if not ns.active and ns.deactivated_at %}
       <span title="Deactivated at">{{ ns.deactivated_at|date:"Y-m-d H:i" }}</span>

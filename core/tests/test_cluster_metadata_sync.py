@@ -334,6 +334,62 @@ class TestNamespaceDeactivation:
         c2 = Cluster.objects.get(pk=c.pk)
         assert c2.has_public_exposure is True
 
+    def test_network_policy_count_synced_when_provided(self, authed_client):
+        authed_client.post(
+            self.URL,
+            {
+                "cluster_name": "c-np",
+                "complete_snapshot": True,
+                "namespaces": [
+                    {"name": "locked", "network_policy_count": 3},
+                    {"name": "open", "network_policy_count": 0},
+                ],
+            },
+            format="json",
+        )
+        locked = Namespace.objects.get(cluster__name="c-np", name="locked")
+        opened = Namespace.objects.get(cluster__name="c-np", name="open")
+        assert locked.network_policy_count == 3
+        assert opened.network_policy_count == 0
+
+    def test_network_policy_count_omitted_key_leaves_value(self, authed_client):
+        """An older import script without the new field must not zero it out."""
+        c = Cluster.objects.create(name="c-np-old", environment="prod")
+        ns = Namespace.objects.create(cluster=c, name="api", network_policy_count=5)
+
+        authed_client.post(
+            self.URL,
+            {
+                "cluster_name": "c-np-old",
+                "complete_snapshot": True,
+                "namespaces": [{"name": "api", "internet_exposed": False}],
+            },
+            format="json",
+        )
+        ns.refresh_from_db()
+        assert ns.network_policy_count == 5
+
+    def test_pss_enforce_extracted_from_labels(self, authed_client):
+        authed_client.post(
+            self.URL,
+            {
+                "cluster_name": "c-pss",
+                "complete_snapshot": True,
+                "namespaces": [
+                    {
+                        "name": "hardened",
+                        "labels": {"pod-security.kubernetes.io/enforce": "restricted"},
+                    },
+                    {"name": "unlabeled", "labels": {}},
+                ],
+            },
+            format="json",
+        )
+        hardened = Namespace.objects.get(name="hardened")
+        unlabeled = Namespace.objects.get(name="unlabeled")
+        assert hardened.pss_enforce == "restricted"
+        assert unlabeled.pss_enforce == ""
+
     def test_full_lifecycle_delete_then_recreate_reactivates_finding(self, authed_client):
         """End-to-end: namespace present → deleted (cascade resolve) → recreated →
         scanner re-ingests same finding → dedup reactivates it in place.

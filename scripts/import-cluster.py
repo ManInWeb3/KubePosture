@@ -214,10 +214,25 @@ def discover_cluster_metadata(core_api, net_api) -> dict:
     except Exception as e:
         print(f"Warning: could not list ingresses: {e}", file=sys.stderr)
 
+    # NetworkPolicy count per namespace — 0 means wide blast radius.
+    # Counts all policies regardless of selector; a namespace with at least
+    # one NetworkPolicy is assumed to be thinking about network scope.
+    netpol_by_ns: dict[str, int] = {}
+    try:
+        for np in net_api.list_network_policy_for_all_namespaces().items:
+            ns_name = np.metadata.namespace
+            netpol_by_ns[ns_name] = netpol_by_ns.get(ns_name, 0) + 1
+    except client.ApiException as e:
+        if e.status != 404:
+            print(f"Warning: could not list networkpolicies: {e.reason}", file=sys.stderr)
+    except Exception as e:
+        print(f"Warning: could not list networkpolicies: {e}", file=sys.stderr)
+
     for ns in ns_list:
         meta["namespaces"].append({
             "name": ns.metadata.name,
             "internet_exposed": exposed_by_ns.get(ns.metadata.name, False),
+            "network_policy_count": netpol_by_ns.get(ns.metadata.name, 0),
             "labels": dict(ns.metadata.labels or {}),
             "annotations": dict(ns.metadata.annotations or {}),
         })
@@ -363,11 +378,19 @@ def main():
     # Failure here is non-fatal — findings ingest still proceeds.
     print("\n== Cluster metadata auto-detect ==")
     meta = discover_cluster_metadata(core_api, net_api)
+    exposed_count = sum(1 for ns in meta["namespaces"] if ns["internet_exposed"])
     print(
         f"  k8s_version={meta['k8s_version']}  provider={meta['provider']}  "
         f"region={meta['region'] or '—'}  namespaces={len(meta['namespaces'])}  "
-        f"complete_snapshot={meta['complete_snapshot']}"
+        f"exposed={exposed_count}  complete_snapshot={meta['complete_snapshot']}"
     )
+    if not meta["complete_snapshot"]:
+        print(
+            "  WARN: complete_snapshot=False — server will NOT deactivate "
+            "missing namespaces. Likely cause: missing RBAC on core "
+            "namespaces/services/ingresses. Check earlier warnings.",
+            file=sys.stderr,
+        )
     ok, detail = post_cluster_metadata_sync(base_url, token, cluster, meta)
     if ok:
         print(f"  sync: {detail}")

@@ -51,6 +51,14 @@ class Namespace(models.Model):
         help_text="Mirrored from K8s namespace.metadata.annotations.",
     )
 
+    network_policy_count = models.PositiveIntegerField(
+        default=0,
+        help_text=(
+            "Number of NetworkPolicy resources in this namespace at the last sync. "
+            "Zero indicates no network segmentation — a finding here has a wider blast radius."
+        ),
+    )
+
     active = models.BooleanField(
         default=True,
         help_text=(
@@ -89,3 +97,15 @@ class Namespace(models.Model):
 
     def __str__(self):
         return f"{self.cluster.name}/{self.name}"
+
+    @property
+    def pss_enforce(self) -> str:
+        """Pod Security Standards enforce level (restricted/baseline/privileged).
+
+        Derived from the K8s-standard label `pod-security.kubernetes.io/enforce`.
+        Returns "" when the namespace is unlabeled — K8s treats that as
+        "privileged" semantically, but callers can decide how to display it.
+        """
+        if not isinstance(self.labels, dict):
+            return ""
+        return str(self.labels.get("pod-security.kubernetes.io/enforce", "")).lower()

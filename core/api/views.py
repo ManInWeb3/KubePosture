@@ -188,6 +188,14 @@ class ClusterMetadataSyncView(APIView):
             exposed = bool(entry.get("internet_exposed", False))
             labels = entry.get("labels") or {}
             annotations = entry.get("annotations") or {}
+            # Default None (not 0) so a payload that omits the key leaves the
+            # existing value untouched — older import scripts won't zero it out.
+            netpol_raw = entry.get("network_policy_count")
+            netpol_count = (
+                max(0, int(netpol_raw))
+                if isinstance(netpol_raw, (int, float)) and not isinstance(netpol_raw, bool)
+                else None
+            )
 
             ns, created = Namespace.objects.get_or_create(
                 cluster=cluster, name=name,
@@ -222,6 +230,9 @@ class ClusterMetadataSyncView(APIView):
             if annotations != ns.annotations:
                 ns.annotations = annotations
                 fields_to_update.append("annotations")
+            if netpol_count is not None and netpol_count != ns.network_policy_count:
+                ns.network_policy_count = netpol_count
+                fields_to_update.append("network_policy_count")
 
             ns.save(update_fields=fields_to_update)
 
