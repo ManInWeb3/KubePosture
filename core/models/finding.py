@@ -30,9 +30,22 @@ class Finding(models.Model):
         null=True,
         blank=True,
     )
-    namespace = models.CharField(max_length=253, blank=True)
+    namespace = models.ForeignKey(
+        "core.Namespace",
+        on_delete=models.SET_NULL,
+        related_name="findings",
+        null=True,
+        blank=True,
+        help_text="NULL for cluster-scoped resources (ClusterRole, etc.).",
+    )
     resource_kind = models.CharField(max_length=100, blank=True)
     resource_name = models.CharField(max_length=253, blank=True)
+
+    @property
+    def namespace_name(self) -> str:
+        """String form of the namespace — empty for cluster-scoped findings.
+        Used for dedup hashing and legacy string APIs."""
+        return self.namespace.name if self.namespace_id else ""
 
     # ── Finding Core (columns — most displayed/searched) ────────
     title = models.CharField(max_length=500)

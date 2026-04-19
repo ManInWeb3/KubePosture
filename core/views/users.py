@@ -52,15 +52,32 @@ def user_list(request):
         "users": page_obj,
         "page_obj": page_obj,
         "groups": groups,
-        "nav": "settings",
+        "nav": "access",
         "settings_tab": "users",
     }
     return render(request, "users/list.html", context)
 
 
+_ROLE_CHOICES = {"viewer", "operator", "admin"}
+
+
+def _highest_role(user_obj) -> str:
+    """Pick the highest role a user currently has.
+
+    Roles are hierarchical (viewer ⊆ operator ⊆ admin), so one group is
+    enough to express permission. Legacy multi-group users collapse to
+    their highest role on next edit.
+    """
+    names = set(user_obj.groups.values_list("name", flat=True))
+    for role in ("admin", "operator", "viewer"):
+        if role in names:
+            return role
+    return ""
+
+
 @admin_required
 def user_create(request):
-    groups = Group.objects.order_by("name")
+    groups = Group.objects.filter(name__in=_ROLE_CHOICES).order_by("name")
 
     if request.method == "POST":
         username = request.POST.get("username", "").strip()
@@ -68,16 +85,25 @@ def user_create(request):
         password = request.POST.get("password", "")
         first_name = request.POST.get("first_name", "").strip()
         last_name = request.POST.get("last_name", "").strip()
-        selected_groups = request.POST.getlist("groups")
+        role = request.POST.get("role", "").strip()
         is_active = request.POST.get("is_active") == "on"
 
-        ctx = {"groups": groups, "nav": "settings", "settings_tab": "users"}
+        ctx = {
+            "groups": groups,
+            "selected_role": role,
+            "nav": "access",
+            "settings_tab": "users",
+        }
         if not username:
             messages.error(request, "Username is required.")
             return render(request, "users/form.html", ctx)
 
         if not password or len(password) < 8:
             messages.error(request, "Password is required and must be at least 8 characters.")
+            return render(request, "users/form.html", ctx)
+
+        if role not in _ROLE_CHOICES:
+            messages.error(request, "A role is required.")
             return render(request, "users/form.html", ctx)
 
         if User.objects.filter(username=username).exists():
@@ -93,19 +119,23 @@ def user_create(request):
         )
         user.is_active = is_active
         user.save(update_fields=["is_active"])
-        user.groups.set(Group.objects.filter(name__in=selected_groups))
+        user.groups.set(Group.objects.filter(name=role))
 
-        messages.success(request, f"User '{username}' created.")
+        messages.success(request, f"User '{username}' created as {role}.")
         return redirect("user-list")
 
-    return render(request, "users/form.html", {"groups": groups, "nav": "settings", "settings_tab": "users"})
+    return render(request, "users/form.html", {
+        "groups": groups,
+        "selected_role": "",
+        "nav": "access",
+        "settings_tab": "users",
+    })
 
 
 @admin_required
 def user_edit(request, pk):
     user_obj = get_object_or_404(User, pk=pk)
-    groups = Group.objects.order_by("name")
-    user_groups = set(user_obj.groups.values_list("name", flat=True))
+    groups = Group.objects.filter(name__in=_ROLE_CHOICES).order_by("name")
 
     if request.method == "POST":
         user_obj.first_name = request.POST.get("first_name", "").strip()
@@ -114,8 +144,9 @@ def user_edit(request, pk):
         user_obj.is_active = request.POST.get("is_active") == "on"
         user_obj.save(update_fields=["first_name", "last_name", "email", "is_active"])
 
-        selected_groups = request.POST.getlist("groups")
-        user_obj.groups.set(Group.objects.filter(name__in=selected_groups))
+        role = request.POST.get("role", "").strip()
+        if role in _ROLE_CHOICES:
+            user_obj.groups.set(Group.objects.filter(name=role))
 
         # Password change (optional)
         new_password = request.POST.get("new_password", "")
@@ -129,8 +160,8 @@ def user_edit(request, pk):
     context = {
         "edit_user": user_obj,
         "groups": groups,
-        "user_groups": user_groups,
-        "nav": "settings",
+        "selected_role": _highest_role(user_obj),
+        "nav": "access",
         "settings_tab": "users",
     }
     return render(request, "users/form.html", context)

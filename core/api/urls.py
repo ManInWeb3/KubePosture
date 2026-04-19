@@ -3,6 +3,7 @@ from django.urls import path
 from core.api.views import (
     AcceptRiskView,
     AcknowledgeView,
+    ClusterMetadataSyncView,
     FalsePositiveView,
     FindingDetailView,
     FindingListView,
@@ -12,6 +13,11 @@ from core.api.views import (
 
 urlpatterns = [
     path("ingest/", IngestView.as_view(), name="ingest"),
+    path(
+        "cluster-metadata/sync/",
+        ClusterMetadataSyncView.as_view(),
+        name="cluster-metadata-sync",
+    ),
     path("findings/", FindingListView.as_view(), name="finding-list"),
     path("findings/<int:pk>/", FindingDetailView.as_view(), name="finding-detail"),
     # Lifecycle actions (Convention A2: explicit endpoints, not generic PATCH)

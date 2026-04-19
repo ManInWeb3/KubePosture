@@ -6,6 +6,7 @@
         <tr>
           <th class="w-1"><input type="checkbox" class="form-check-input" id="select-all"></th>
           <th class="sortable" data-col="cluster">Cluster</th>
+          <th class="sortable" data-col="namespace" title="K8s namespace — drives per-namespace exposure signal for priority">Namespace</th>
           <th class="sortable" data-col="priority" title="Effective priority — contextual action urgency based on severity, threat intel, and deployment exposure">Priority</th>
           <th class="sortable" data-col="severity">Severity</th>
           <th class="sortable" data-col="epss" title="Exploit Prediction Scoring System — probability of exploitation in next 30 days">EPSS</th>
@@ -21,6 +22,17 @@
         <tr>
           <td><input type="checkbox" class="form-check-input finding-check" name="finding_ids" value="{{ finding.pk }}"></td>
           <td>{{ finding.cluster.name|default:"—" }}</td>
+          <td class="text-muted">
+            {% if finding.namespace %}
+              <a href="?cluster={{ finding.cluster_id }}&namespace={{ finding.namespace.name }}"
+                 title="Filter to this namespace">{{ finding.namespace.name }}</a>
+              {% if finding.namespace.internet_exposed %}
+                <span class="badge bg-danger-lt text-danger ms-1" title="Namespace is internet-exposed — elevates priority">exposed</span>
+              {% endif %}
+            {% else %}
+              <span class="text-secondary" title="Cluster-scoped resource (e.g. ClusterRole)">— cluster —</span>
+            {% endif %}
+          </td>
           <td>{% priority_badge finding.effective_priority %}</td>
           <td>{% severity_badge finding.severity %}</td>
           <td>
@@ -36,10 +48,10 @@
             </a>
           </td>
           <td><a href="{% url 'findings-detail' finding.pk %}">{{ finding.title }}</a></td>
-          <td class="text-muted">{{ finding.details.component_name|default:"" }}</td>
+          <td class="text-muted">{{ finding.details|dict_get:"component_name" }}</td>
         </tr>
         {% empty %}
-        <tr><td colspan="10" class="text-center text-muted py-4">No findings match the current filters.</td></tr>
+        <tr><td colspan="11" class="text-center text-muted py-4">No findings match the current filters.</td></tr>
         {% endfor %}
       </tbody>
     </table>

@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 
-{% block title %}Settings — KubePosture{% endblock %}
+{% block title %}Access — KubePosture{% endblock %}
 {% block pretitle %}Administration{% endblock %}
-{% block page_title %}Settings{% endblock %}
+{% block page_title %}Access{% endblock %}
 
 {% block content %}
 {% if messages %}
@@ -26,16 +26,6 @@
     </a>
   </li>
   <li class="nav-item">
-    <a class="nav-link{% if settings_tab == 'clusters' %} active{% endif %}" href="{% url 'settings-clusters' %}">
-      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
-           stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-1">
-        <rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/>
-        <line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/>
-      </svg>
-      Clusters
-    </a>
-  </li>
-  <li class="nav-item">
     <a class="nav-link{% if settings_tab == 'tokens' %} active{% endif %}" href="{% url 'token-list' %}">
       <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-1">
@@ -46,8 +36,5 @@
   </li>
 </ul>
 
-<!-- Tab content -->
-{% block settings_content %}
-{% include "settings/_clusters.html" %}
-{% endblock %}
+{% block settings_content %}{% endblock %}
 {% endblock %}

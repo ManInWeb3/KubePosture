@@ -9,6 +9,7 @@ from core.models import (
     FindingHistory,
     Framework,
     IngestQueue,
+    Namespace,
     PolicyComplianceSnapshot,
     RawReport,
     ScanStatus,
@@ -57,7 +58,7 @@ class FindingAdmin(admin.ModelAdmin):
         "cluster",
         "kev_listed",
     ]
-    search_fields = ["title", "vuln_id", "namespace", "resource_name"]
+    search_fields = ["title", "vuln_id", "namespace__name", "resource_name"]
     readonly_fields = [
         "origin",
         "cluster",
@@ -172,6 +173,25 @@ class FindingAdmin(admin.ModelAdmin):
         return queryset, use_distinct
 
 
+class NamespaceInline(admin.TabularInline):
+    model = Namespace
+    extra = 0
+    fields = [
+        "name",
+        "active",
+        "internet_exposed",
+        "exposure_is_manual",
+        "contains_sensitive_data",
+        "sensitive_is_manual",
+        "deactivated_at",
+        "last_seen",
+    ]
+    # active / deactivated_at are owned by the sync endpoint — editing them
+    # here would bypass the cascade (finding deactivation on flip-off).
+    readonly_fields = ["active", "deactivated_at", "last_seen"]
+    ordering = ["-active", "name"]
+
+
 @admin.register(Cluster)
 class ClusterAdmin(admin.ModelAdmin):
     list_display = [
@@ -179,23 +199,24 @@ class ClusterAdmin(admin.ModelAdmin):
         "provider",
         "environment",
         "region",
-        "internet_exposed",
-        "contains_sensitive_data",
+        "k8s_version",
     ]
-    list_filter = ["provider", "environment", "internet_exposed", "contains_sensitive_data"]
+    list_filter = ["provider", "environment"]
     search_fields = ["name"]
+    inlines = [NamespaceInline]
     fieldsets = [
         (None, {"fields": ["name", "provider", "environment", "region", "project", "k8s_version"]}),
         (
-            "Exposure Context (for effective priority)",
+            "Manual overrides",
             {
-                "fields": ["internet_exposed", "contains_sensitive_data", "namespace_overrides"],
+                "fields": [
+                    "provider_is_manual",
+                    "environment_is_manual",
+                    "region_is_manual",
+                ],
                 "description": (
-                    "These flags feed the effective priority decision tree. "
-                    "Saving any of these fields automatically recalculates priorities for all "
-                    "active findings in this cluster. "
-                    "Namespace overrides inherit cluster defaults when not set. "
-                    'Format: {"namespace": {"internet_exposed": true/false, "contains_sensitive_data": true/false}}'
+                    "When True, the field was set manually in the UI or admin — "
+                    "subsequent auto-detect runs from the import script will skip it."
                 ),
             },
         ),
@@ -203,7 +224,7 @@ class ClusterAdmin(admin.ModelAdmin):
     actions = ["recalculate_priorities"]
 
     # Fields whose changes require a priority recalculation.
-    _PRIORITY_FIELDS = {"environment", "internet_exposed", "contains_sensitive_data", "namespace_overrides"}
+    _PRIORITY_FIELDS = {"environment"}
 
     def save_model(self, request, obj, form, change):
         super().save_model(request, obj, form, change)
@@ -224,6 +245,51 @@ class ClusterAdmin(admin.ModelAdmin):
         for cluster in queryset:
             total += recalculate_cluster_priorities(cluster)
         self.message_user(request, f"Recalculated priorities: {total} findings updated.")
+
+
+@admin.register(Namespace)
+class NamespaceAdmin(admin.ModelAdmin):
+    list_display = [
+        "cluster",
+        "name",
+        "active",
+        "internet_exposed",
+        "exposure_is_manual",
+        "contains_sensitive_data",
+        "sensitive_is_manual",
+        "last_seen",
+        "deactivated_at",
+    ]
+    list_filter = [
+        "active",
+        "cluster",
+        "internet_exposed",
+        "exposure_is_manual",
+        "contains_sensitive_data",
+    ]
+    search_fields = ["name", "cluster__name"]
+    readonly_fields = [
+        "active",
+        "first_seen", "last_seen", "deactivated_at", "labels", "annotations",
+    ]
+
+    def save_model(self, request, obj, form, change):
+        # Admin edits to exposure/sensitivity flip the *_is_manual flags so
+        # auto-detect doesn't stomp the admin's intent on next sync.
+        if change and form.changed_data:
+            if "internet_exposed" in form.changed_data:
+                obj.exposure_is_manual = True
+            if "contains_sensitive_data" in form.changed_data:
+                obj.sensitive_is_manual = True
+        super().save_model(request, obj, form, change)
+        if change and set(form.changed_data) & {"internet_exposed", "contains_sensitive_data"}:
+            from core.services.priority import recalculate_cluster_priorities
+
+            count = recalculate_cluster_priorities(obj.cluster)
+            self.message_user(
+                request,
+                f"Priorities recalculated: {count} finding(s) updated.",
+            )
 
 
 @admin.register(ScanStatus)

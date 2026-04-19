@@ -119,9 +119,138 @@ def list_crds(
         return []
 
 
+# ── Cluster metadata auto-detection ─────────────────────────────
+
+_AWS_PROVIDER_PREFIXES = ("aws://",)
+_GCP_PROVIDER_PREFIXES = ("gce://",)
+_AZURE_PROVIDER_PREFIXES = ("azure://",)
+
+
+def _classify_provider(provider_id: str, node_labels: dict) -> str:
+    """Map K8s node .spec.provider_id + labels to a short provider name."""
+    pid = (provider_id or "").lower()
+    if any(pid.startswith(p) for p in _AWS_PROVIDER_PREFIXES):
+        if any(k.startswith("eks.amazonaws.com/") for k in node_labels):
+            return "eks"
+        return "aws"
+    if any(pid.startswith(p) for p in _GCP_PROVIDER_PREFIXES):
+        if any(k.startswith("cloud.google.com/gke-") for k in node_labels):
+            return "gke"
+        return "gcp"
+    if any(pid.startswith(p) for p in _AZURE_PROVIDER_PREFIXES):
+        if any(k.startswith("kubernetes.azure.com/") for k in node_labels):
+            return "aks"
+        return "azure"
+    return "onprem"
+
+
+def discover_cluster_metadata(core_api, net_api) -> dict:
+    """Return a single dict describing the cluster for /cluster-metadata/sync/.
+
+    Auto-detects:
+      - k8s_version from VersionApi
+      - provider / region from the first node
+      - per-namespace exposure from Services (LB/NodePort) + Ingresses
+
+    Defaults to safe values when K8s API calls fail; never aborts.
+    """
+    # complete_snapshot=False until we confirm every discovery step that
+    # feeds deactivation on the server succeeded. If list_namespace() fails
+    # we must not let the server treat this as a full snapshot, or it would
+    # deactivate surviving namespaces.
+    meta = {
+        "k8s_version": "",
+        "provider": "onprem",
+        "region": "",
+        "namespaces": [],
+        "complete_snapshot": False,
+    }
+
+    # K8s version
+    try:
+        meta["k8s_version"] = (client.VersionApi().get_code().git_version or "")
+    except Exception as e:
+        print(f"Warning: could not fetch K8s version: {e}", file=sys.stderr)
+
+    # Provider + region from the first node
+    try:
+        nodes = core_api.list_node(limit=1)
+        if nodes.items:
+            node = nodes.items[0]
+            labels = node.metadata.labels or {}
+            meta["provider"] = _classify_provider(node.spec.provider_id or "", labels)
+            meta["region"] = (
+                labels.get("topology.kubernetes.io/region")
+                or labels.get("failure-domain.beta.kubernetes.io/region")
+                or ""
+            )
+    except Exception as e:
+        print(f"Warning: could not inspect nodes: {e}", file=sys.stderr)
+
+    # Per-namespace exposure
+    ns_list = []
+    try:
+        ns_list = core_api.list_namespace().items
+    except Exception as e:
+        print(f"Warning: could not list namespaces: {e}", file=sys.stderr)
+        return meta
+
+    # Bucket services by namespace — LB/NodePort means exposed
+    exposed_by_ns = {}
+    try:
+        for svc in core_api.list_service_for_all_namespaces().items:
+            if svc.spec and svc.spec.type in ("LoadBalancer", "NodePort"):
+                exposed_by_ns[svc.metadata.namespace] = True
+    except Exception as e:
+        print(f"Warning: could not list services: {e}", file=sys.stderr)
+
+    # Any Ingress in a namespace also means exposed
+    try:
+        for ing in net_api.list_ingress_for_all_namespaces().items:
+            exposed_by_ns[ing.metadata.namespace] = True
+    except client.ApiException as e:
+        if e.status != 404:
+            print(f"Warning: could not list ingresses: {e.reason}", file=sys.stderr)
+    except Exception as e:
+        print(f"Warning: could not list ingresses: {e}", file=sys.stderr)
+
+    for ns in ns_list:
+        meta["namespaces"].append({
+            "name": ns.metadata.name,
+            "internet_exposed": exposed_by_ns.get(ns.metadata.name, False),
+            "labels": dict(ns.metadata.labels or {}),
+            "annotations": dict(ns.metadata.annotations or {}),
+        })
+
+    # Namespace listing succeeded above; safe to assert this is the
+    # authoritative snapshot the server can act on for deactivation.
+    meta["complete_snapshot"] = True
+    return meta
+
+
+def post_cluster_metadata_sync(
+    base_url: str, token: str, cluster: str, meta: dict
+) -> tuple[bool, str]:
+    """POST auto-detected metadata to /api/v1/cluster-metadata/sync/."""
+    url = f"{base_url.rstrip('/')}/api/v1/cluster-metadata/sync/"
+    body = json.dumps({"cluster_name": cluster, **meta}).encode()
+    headers = {
+        "Authorization": f"Token {token}",
+        "Content-Type": "application/json",
+    }
+    req = Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urlopen(req, timeout=30) as resp:
+            return True, resp.read().decode()[:200]
+    except HTTPError as e:
+        return False, f"HTTP {e.code}: {e.read().decode()[:100]}"
+    except URLError as e:
+        return False, f"connection error: {e.reason}"
+
+
 # ── KubePosture API ─────────────────────────────────────────────
 
-def post_crd(item: dict, url: str, token: str, cluster: str, k8s_version: str = "") -> tuple[bool, str]:
+def post_crd(item: dict, url: str, token: str, cluster: str) -> tuple[bool, str]:
     """Post a single CRD to KubePosture ingest API."""
     body = json.dumps(item).encode()
     headers = {
@@ -129,8 +258,6 @@ def post_crd(item: dict, url: str, token: str, cluster: str, k8s_version: str = 
         "Content-Type": "application/json",
         "X-Cluster-Name": cluster,
     }
-    if k8s_version:
-        headers["X-Cluster-K8s-Version"] = k8s_version
     req = Request(url, data=body, headers=headers, method="POST")
     try:
         with urlopen(req, timeout=30) as resp:
@@ -147,12 +274,11 @@ def import_crds(
     api: client.CustomObjectsApi,
     group: str,
     version: str,
-    crds: list[tuple[str, bool]],
+    crds: list[tuple[str, bool, str]],
     ingest_url: str,
     token: str,
     cluster: str,
     source_name: str,
-    k8s_version: str = "",
 ) -> tuple[int, int]:
     """Import a set of CRD types. Returns (ok_count, err_count)."""
     total_ok = 0
@@ -168,7 +294,7 @@ def import_crds(
             ns = meta.get("namespace", "")
             label = f"{ns}/{name}" if ns else name
 
-            ok, detail = post_crd(item, ingest_url, token, cluster, k8s_version)
+            ok, detail = post_crd(item, ingest_url, token, cluster)
             if ok:
                 print(f"    + {label}: {detail}")
                 total_ok += 1
@@ -228,16 +354,25 @@ def main():
 
     # Load K8s config
     load_k8s_config(args.kubeconfig, args.in_cluster)
-    api = client.CustomObjectsApi()
+    custom_api = client.CustomObjectsApi()
+    core_api = client.CoreV1Api()
+    net_api = client.NetworkingV1Api()
 
-    # Fetch server version — sent as X-Cluster-K8s-Version header on each post
-    k8s_version = ""
-    try:
-        vinfo = client.VersionApi().get_code()
-        k8s_version = vinfo.git_version or ""
-        print(f"Cluster K8s version: {k8s_version}")
-    except Exception as e:
-        print(f"Warning: could not fetch K8s version: {e}", file=sys.stderr)
+    # Auto-detect k8s version, provider, region, and per-namespace exposure,
+    # then push everything to /api/v1/cluster-metadata/sync/ in one call.
+    # Failure here is non-fatal — findings ingest still proceeds.
+    print("\n== Cluster metadata auto-detect ==")
+    meta = discover_cluster_metadata(core_api, net_api)
+    print(
+        f"  k8s_version={meta['k8s_version']}  provider={meta['provider']}  "
+        f"region={meta['region'] or '—'}  namespaces={len(meta['namespaces'])}  "
+        f"complete_snapshot={meta['complete_snapshot']}"
+    )
+    ok, detail = post_cluster_metadata_sync(base_url, token, cluster, meta)
+    if ok:
+        print(f"  sync: {detail}")
+    else:
+        print(f"  sync FAILED: {detail} (continuing with findings ingest)", file=sys.stderr)
 
     total_ok = 0
     total_err = 0
@@ -245,8 +380,8 @@ def main():
     if import_trivy:
         print(f"\n== Trivy ({len(TRIVY_CRDS)} CRD types) ==")
         ok, err = import_crds(
-            api, TRIVY_GROUP, TRIVY_VERSION, TRIVY_CRDS,
-            ingest_url, token, cluster, "Trivy", k8s_version,
+            custom_api, TRIVY_GROUP, TRIVY_VERSION, TRIVY_CRDS,
+            ingest_url, token, cluster, "Trivy",
         )
         total_ok += ok
         total_err += err
@@ -254,8 +389,8 @@ def main():
     if import_kyverno:
         print(f"\n== Kyverno ({len(KYVERNO_CRDS)} CRD types) ==")
         ok, err = import_crds(
-            api, KYVERNO_GROUP, KYVERNO_VERSION, KYVERNO_CRDS,
-            ingest_url, token, cluster, "Kyverno", k8s_version,
+            custom_api, KYVERNO_GROUP, KYVERNO_VERSION, KYVERNO_CRDS,
+            ingest_url, token, cluster, "Kyverno",
         )
         total_ok += ok
         total_err += err

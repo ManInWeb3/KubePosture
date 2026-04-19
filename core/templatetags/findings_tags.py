@@ -95,6 +95,13 @@ def priority_badge(priority):
     return format_html('<span class="badge {}" title="{}">{}</span>', css, desc, label)
 
 
+@register.filter
+def dict_get(d, key):
+    if not isinstance(d, dict):
+        return ""
+    return d.get(key, "")
+
+
 @register.simple_tag
 def epss_badge(score):
     if score is None:

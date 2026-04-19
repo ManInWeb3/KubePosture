@@ -28,6 +28,8 @@ from core.services.lifecycle import (
 
 @pytest.fixture
 def active_finding(cluster, db):
+    from core.models import Namespace
+    ns, _ = Namespace.objects.get_or_create(cluster=cluster, name="default")
     return Finding.objects.create(
         origin=Origin.CLUSTER,
         cluster=cluster,
@@ -38,7 +40,7 @@ def active_finding(cluster, db):
         source=Source.TRIVY,
         status=Status.ACTIVE,
         hash_code="testhash1234",
-        namespace="default",
+        namespace=ns,
         resource_kind="Deployment",
         resource_name="backend",
     )

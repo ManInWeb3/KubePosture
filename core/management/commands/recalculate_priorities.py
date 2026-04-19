@@ -54,8 +54,8 @@ class Command(BaseCommand):
             self.stdout.write(
                 f"  {cluster.name}: {updated} findings "
                 f"{'would be ' if dry_run else ''}updated"
-                f" (env={cluster.environment}, exposed={cluster.internet_exposed},"
-                f" sensitive={cluster.contains_sensitive_data})"
+                f" (env={cluster.environment}, exposed={cluster.has_public_exposure},"
+                f" sensitive={cluster.has_sensitive_data})"
             )
             total_updated += updated
 

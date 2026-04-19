@@ -24,6 +24,7 @@ def compute_hash(finding_dict: dict) -> str:
 
     hash = sha256(source|title|severity|vuln_id|namespace|resource_kind|resource_name)
     All inputs are column fields (not from JSONB details).
+    `namespace` is the namespace *string* (empty for cluster-scoped findings).
     """
     parts = "|".join(
         [
@@ -37,6 +38,31 @@ def compute_hash(finding_dict: dict) -> str:
         ]
     )
     return hashlib.sha256(parts.encode()).hexdigest()
+
+
+def _resolve_namespace_cache(cluster, finding_dicts: list[dict]) -> dict:
+    """Build a {name: Namespace} cache for this batch, creating rows lazily.
+
+    Keeps ingest O(1) lookups regardless of how many findings share the same
+    namespace. Empty-string namespace means cluster-scoped → skipped (None FK).
+    """
+    from core.models import Namespace
+
+    needed = {fd.get("namespace", "") for fd in finding_dicts if fd.get("namespace")}
+    if not needed:
+        return {}
+
+    existing = {
+        ns.name: ns
+        for ns in Namespace.objects.filter(cluster=cluster, name__in=needed)
+    }
+    missing = needed - existing.keys()
+    for name in missing:
+        # Create with defaults — auto-detect from the sync endpoint will
+        # later update internet_exposed if found.
+        ns, _ = Namespace.objects.get_or_create(cluster=cluster, name=name)
+        existing[name] = ns
+    return existing
 
 
 def upsert_findings(cluster, source: str, finding_dicts: list[dict]) -> dict:
@@ -56,6 +82,8 @@ def upsert_findings(cluster, source: str, finding_dicts: list[dict]) -> dict:
     stats = {"created": 0, "updated": 0, "reactivated": 0}
     seen_hashes = set()
 
+    ns_cache = _resolve_namespace_cache(cluster, finding_dicts)
+
     # Extract scope from first finding — all findings in a CRD share the same resource
     scope = {}
     if finding_dicts:
@@ -71,6 +99,9 @@ def upsert_findings(cluster, source: str, finding_dicts: list[dict]) -> dict:
         hash_code = compute_hash(fd)
         seen_hashes.add(hash_code)
 
+        ns_name = fd.get("namespace", "")
+        ns_obj = ns_cache.get(ns_name) if ns_name else None
+
         with transaction.atomic():
             try:
                 existing = Finding.objects.select_for_update().get(
@@ -82,20 +113,24 @@ def upsert_findings(cluster, source: str, finding_dicts: list[dict]) -> dict:
                     existing.resolved_at = None
                     existing.last_seen = now
                     existing.details = fd.get("details", {})
+                    existing.namespace = ns_obj
                     existing.effective_priority = compute_priority(existing, cluster)
                     existing.save(
                         update_fields=[
                             "status", "resolved_at", "last_seen", "details",
-                            "effective_priority",
+                            "namespace", "effective_priority",
                         ]
                     )
                     stats["reactivated"] += 1
                 elif existing.status in (Status.ACTIVE, Status.ACKNOWLEDGED):
                     existing.last_seen = now
                     existing.details = fd.get("details", {})
+                    existing.namespace = ns_obj
                     existing.effective_priority = compute_priority(existing, cluster)
                     existing.save(
-                        update_fields=["last_seen", "details", "effective_priority"]
+                        update_fields=[
+                            "last_seen", "details", "namespace", "effective_priority"
+                        ]
                     )
                     stats["updated"] += 1
                 else:
@@ -109,7 +144,7 @@ def upsert_findings(cluster, source: str, finding_dicts: list[dict]) -> dict:
                     finding = Finding(
                         origin=Origin.CLUSTER,
                         cluster=cluster,
-                        namespace=fd.get("namespace", ""),
+                        namespace=ns_obj,
                         resource_kind=fd.get("resource_kind", ""),
                         resource_name=fd.get("resource_name", ""),
                         title=fd["title"],
@@ -170,7 +205,7 @@ def resolve_stale(cluster, source: str, current_hashes: set[str], scope: dict) -
         origin=Origin.CLUSTER,
         cluster=cluster,
         source=source,
-        namespace=scope["namespace"],
+        namespace__name=scope["namespace"],
         resource_kind=scope["resource_kind"],
         resource_name=scope["resource_name"],
         category=scope["category"],

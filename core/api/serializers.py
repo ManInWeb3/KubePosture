@@ -5,6 +5,11 @@ from core.models import Finding
 
 class FindingSerializer(serializers.ModelSerializer):
     cluster_name = serializers.CharField(source="cluster.name", read_only=True)
+    # Preserve the external API shape — namespace remains a string, sourced
+    # from the FK. Empty string for cluster-scoped findings (namespace=NULL).
+    namespace = serializers.CharField(
+        source="namespace.name", default="", read_only=True, allow_blank=True
+    )
 
     class Meta:
         model = Finding

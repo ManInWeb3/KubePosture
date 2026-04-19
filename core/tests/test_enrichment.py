@@ -49,6 +49,8 @@ SAMPLE_KEV_JSON = json.dumps({
 
 
 def _create_cve_finding(cluster, vuln_id, **kwargs):
+    from core.models import Namespace
+    ns, _ = Namespace.objects.get_or_create(cluster=cluster, name="default")
     defaults = {
         "origin": Origin.CLUSTER,
         "cluster": cluster,
@@ -59,7 +61,7 @@ def _create_cve_finding(cluster, vuln_id, **kwargs):
         "source": Source.TRIVY,
         "status": Status.ACTIVE,
         "hash_code": f"hash_{vuln_id}",
-        "namespace": "default",
+        "namespace": ns,
         "resource_kind": "Deployment",
         "resource_name": "test",
     }

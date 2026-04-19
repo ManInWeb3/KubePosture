@@ -18,16 +18,17 @@ from django.utils import timezone
 
 from core.api.permissions import has_role
 from core.constants import Category, Priority, Severity, Source, Status
-from core.models import Cluster, Finding, FindingHistory
+from core.models import Cluster, Finding, FindingHistory, Namespace
 
 
 @login_required
 def finding_list(request):
     """Finding list with filters, search, pagination. HTMX partial support."""
-    qs = Finding.objects.select_related("cluster").all()
+    qs = Finding.objects.select_related("cluster", "namespace").all()
 
     # Filters
     cluster = request.GET.get("cluster")
+    namespace_filter = request.GET.get("namespace", "").strip()
     severity = request.GET.get("severity")
     priority_filter = request.GET.get("priority")
     status_filter = request.GET.get("status")
@@ -37,6 +38,8 @@ def finding_list(request):
 
     if cluster:
         qs = qs.filter(cluster_id=cluster)
+    if namespace_filter:
+        qs = qs.filter(namespace__name=namespace_filter)
     if severity:
         qs = qs.filter(severity=severity)
     if priority_filter:
@@ -54,7 +57,7 @@ def finding_list(request):
         qs = qs.filter(
             Q(title__icontains=search)
             | Q(vuln_id__icontains=search)
-            | Q(namespace__icontains=search)
+            | Q(namespace__name__icontains=search)
             | Q(resource_name__icontains=search)
             | Q(details__component_name__icontains=search)
             | Q(details__image__icontains=search)
@@ -69,11 +72,29 @@ def finding_list(request):
     filter_params.pop("page", None)
     filter_querystring = filter_params.urlencode()
 
+    # Namespace dropdown — scoped to the selected cluster when present,
+    # otherwise all clusters. Collapse duplicate names across clusters,
+    # treating a name as active if ANY cluster still has it active.
+    # DISTINCT ON (name) with ORDER BY name, active DESC picks the
+    # active row whenever both exist. Active entries sort first; inactive
+    # ones render with a "(DELETED)" suffix in the template.
+    ns_qs = Namespace.objects.all()
+    if cluster:
+        ns_qs = ns_qs.filter(cluster_id=cluster)
+    unique_by_name = (
+        ns_qs.order_by("name", "-active")
+        .distinct("name")
+        .values("name", "active")
+    )
+    namespaces = sorted(unique_by_name, key=lambda x: (not x["active"], x["name"]))
+
     context = {
         "findings": page_obj,
         "page_obj": page_obj,
         "nav": "findings",
         "clusters": Cluster.objects.order_by("name"),
+        "namespaces": namespaces,
+        "selected_namespace": namespace_filter,
         "severity_choices": Severity.choices,
         "priority_choices": Priority.choices,
         "status_choices": Status.choices,
@@ -92,7 +113,7 @@ def finding_list(request):
 def finding_detail(request, pk):
     """Finding detail with resource context, JSONB details, audit trail."""
     finding = get_object_or_404(
-        Finding.objects.select_related("cluster", "accepted_by"), pk=pk
+        Finding.objects.select_related("cluster", "namespace", "accepted_by"), pk=pk
     )
     history = FindingHistory.objects.filter(finding=finding).select_related("user")
 

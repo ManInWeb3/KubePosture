@@ -48,7 +48,7 @@ def token_list(request):
 
     context = {
         "tokens": tokens,
-        "nav": "settings",
+        "nav": "access",
         "settings_tab": "tokens",
     }
     return render(request, "settings/tokens.html", context)

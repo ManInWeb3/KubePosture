@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block title %}{% if edit_user %}Edit {{ edit_user.username }}{% else %}New User{% endif %} — KubePosture{% endblock %}
-{% block pretitle %}<a href="{% url 'user-list' %}" class="text-decoration-none">Settings / Users</a>{% endblock %}
+{% block pretitle %}<a href="{% url 'user-list' %}" class="text-decoration-none">Access / Users</a>{% endblock %}
 {% block page_title %}{% if edit_user %}Edit {{ edit_user.username }}{% else %}Create User{% endif %}{% endblock %}
 
 {% block content %}
@@ -24,22 +24,26 @@
               {% if edit_user %}
               <input type="text" class="form-control" value="{{ edit_user.username }}" disabled>
               {% else %}
-              <input type="text" name="username" class="form-control" required placeholder="username" value="{{ edit_user.username|default:'' }}">
+              <input type="text" name="username" class="form-control" required placeholder="username">
               {% endif %}
             </div>
             <div class="col-md-6 mb-3">
               <label class="form-label">Email</label>
-              <input type="email" name="email" class="form-control" value="{{ edit_user.email|default:'' }}" placeholder="user@example.com">
+              <input type="email" name="email" class="form-control"
+                     value="{% if edit_user %}{{ edit_user.email }}{% endif %}"
+                     placeholder="user@example.com">
             </div>
           </div>
           <div class="row">
             <div class="col-md-6 mb-3">
               <label class="form-label">First name</label>
-              <input type="text" name="first_name" class="form-control" value="{{ edit_user.first_name|default:'' }}">
+              <input type="text" name="first_name" class="form-control"
+                     value="{% if edit_user %}{{ edit_user.first_name }}{% endif %}">
             </div>
             <div class="col-md-6 mb-3">
               <label class="form-label">Last name</label>
-              <input type="text" name="last_name" class="form-control" value="{{ edit_user.last_name|default:'' }}">
+              <input type="text" name="last_name" class="form-control"
+                     value="{% if edit_user %}{{ edit_user.last_name }}{% endif %}">
             </div>
           </div>
           <div class="mb-3">
@@ -49,7 +53,7 @@
           <div class="mb-3">
             <label class="form-check">
               <input type="checkbox" name="is_active" class="form-check-input"
-                     {% if edit_user.is_active or not edit_user %}checked{% endif %}>
+                     {% if not edit_user or edit_user.is_active %}checked{% endif %}>
               <span class="form-check-label">Active</span>
             </label>
           </div>
@@ -57,18 +61,21 @@
       </div>
 
       <div class="card mb-3">
-        <div class="card-header"><h3 class="card-title">Roles</h3></div>
+        <div class="card-header"><h3 class="card-title">Role</h3></div>
         <div class="card-body">
           <p class="text-muted mb-3">
-            <strong>viewer</strong> — read everything, download reports.
-            <strong>operator</strong> — acknowledge findings, bulk actions.
-            <strong>admin</strong> — risk acceptance, user management, reports.
+            Roles are hierarchical — a higher role inherits the lower ones.
           </p>
           {% for g in groups %}
           <label class="form-check">
-            <input type="checkbox" name="groups" value="{{ g.name }}" class="form-check-input"
-                   {% if g.name in user_groups %}checked{% endif %}>
-            <span class="form-check-label">{{ g.name }}</span>
+            <input type="radio" name="role" value="{{ g.name }}" class="form-check-input" required
+                   {% if g.name == selected_role %}checked{% endif %}>
+            <span class="form-check-label">
+              <strong>{{ g.name }}</strong>
+              {% if g.name == "viewer" %}— read everything, download reports.{% endif %}
+              {% if g.name == "operator" %}— viewer + acknowledge findings, bulk actions.{% endif %}
+              {% if g.name == "admin" %}— operator + risk acceptance, user management.{% endif %}
+            </span>
           </label>
           {% endfor %}
         </div>

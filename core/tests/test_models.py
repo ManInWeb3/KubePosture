@@ -21,8 +21,8 @@ class TestCluster:
 
     def test_defaults(self):
         cluster = Cluster.objects.create(name="bare-cluster")
-        assert cluster.provider == "unknown"
-        assert cluster.environment == "unknown"
+        assert cluster.provider == "onprem"
+        assert cluster.environment == ""
         assert cluster.region == ""
 
 
@@ -59,10 +59,12 @@ class TestScanStatus:
 @pytest.mark.django_db
 class TestFinding:
     def _make_finding(self, cluster, **overrides):
+        from core.models import Namespace
+        ns, _ = Namespace.objects.get_or_create(cluster=cluster, name="prod-app")
         defaults = {
             "origin": Origin.CLUSTER,
             "cluster": cluster,
-            "namespace": "prod-app",
+            "namespace": ns,
             "resource_kind": "Deployment",
             "resource_name": "backend",
             "title": "CVE-2024-1234 in openssl",

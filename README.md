@@ -89,21 +89,42 @@ python manage.py process_ingest_queue
 
 This continuously processes incoming scanner data. Must be running for ingested data to appear.
 
-## Importing Scanner Data
+## How to connect a new cluster
 
-### Create a service token
+End-to-end flow for adding a new target cluster to an already-running KubePosture:
 
-```bash
-python manage.py create_service_token cluster-name-1
-# Output: Token: ac9999bc1aXXXXXXXXXXXc795ca7c2
-```
+1. **Create a service token.** In the UI: Settings → Tokens → **+ Create token**. Enter a name
+   (e.g. `cluster-prod-1`) and copy the value shown — it's only displayed once.
+   CLI equivalent: `python manage.py create_service_token cluster-prod-1`.
 
-### Import from a cluster
+2. **Install the import chart on the target cluster.** Point it at your KubePosture URL and paste the token:
+   ```bash
+   helm install kubeposture-import oci://ghcr.io/maninweb3/kubeposture/charts/kubeposture-import \
+     --set clusterName=cluster-prod-1 \
+     --set token.value=<paste-token-here> \
+     --set kubepostureUrl=https://kubeposture.example.com
+   ```
+   The initial-run Job fires immediately; findings appear in KubePosture within minutes.
+   Use `secretRef` in values instead of `token.value` for production secret hygiene.
+
+3. **That's it.** The import script auto-detects on every run:
+   - Cluster **provider** (aws/eks/gcp/gke/azure/aks/onprem) from node provider_id + labels
+   - **Region** from node label `topology.kubernetes.io/region`
+   - **K8s version** from the API server
+   - **Namespaces** — all of them, with `internet_exposed=true` on any namespace that has a
+     Service of type LoadBalancer/NodePort or an Ingress
+
+   The cluster registers itself on first contact; namespaces populate on the first sync call
+   (`POST /api/v1/cluster-metadata/sync/`). You only visit Settings → Clusters → Configure to
+   refine — mark sensitive-data namespaces (can't be auto-detected) or override anything the
+   auto-detector got wrong.
+
+### Ad-hoc import (no Helm)
 
 Import everything (Trivy + Kyverno):
 
 ```bash
-python scripts/import-cluster.py cluster-name-1 <token>
+python scripts/import-cluster.py cluster-prod-1 <token>
 ```
 
 Import Trivy only:

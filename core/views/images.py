@@ -28,13 +28,13 @@ def image_list(request):
     if cluster_id:
         qs = qs.filter(cluster_id=cluster_id)
     if namespace:
-        qs = qs.filter(namespace__icontains=namespace)
+        qs = qs.filter(namespace__name__icontains=namespace)
     if search:
         qs = qs.filter(details__image__icontains=search)
 
     # Aggregate by cluster + namespace + image
     image_stats = (
-        qs.values("cluster__name", "namespace", "details__image")
+        qs.values("cluster__name", "namespace__name", "details__image")
         .annotate(
             total_cves=Count("id"),
             critical=Count("id", filter=Q(severity=Severity.CRITICAL)),
@@ -54,6 +54,8 @@ def image_list(request):
     for stat in image_stats:
         stat["image"] = stat["details__image"]
         stat["short_image"] = _short_image(stat["details__image"])
+        # Keep the old key name for template compatibility
+        stat["namespace"] = stat.pop("namespace__name") or ""
 
     # Collect unique namespaces for filter dropdown
     namespaces = sorted(set(s["namespace"] for s in image_stats if s["namespace"]))

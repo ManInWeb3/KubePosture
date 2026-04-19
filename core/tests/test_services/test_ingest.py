@@ -113,8 +113,13 @@ class TestIngestScan:
         ingest_scan(payload, cluster_name_header="cluster-name-1")
 
         cluster = Cluster.objects.get(name="cluster-name-1")
-        assert cluster.provider == "ovh"
-        assert cluster.environment == "dev"
+        # Auto-register seeds defaults; provider/region come from the
+        # /cluster-metadata/sync/ endpoint (not ingest). Environment is
+        # parsed from the cluster name — "cluster-name-1" has no keyword
+        # so it stays "unknown" until the admin sets it or the sync
+        # endpoint runs with a name containing prod/staging/dev.
+        assert cluster.provider == "onprem"  # default
+        assert cluster.environment == "unknown"
 
     def test_dedup_on_rescan(self):
         payload = _load_fixture("vulnerability_report.json")

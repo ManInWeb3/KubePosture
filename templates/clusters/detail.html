@@ -1,0 +1,221 @@
+{% extends "base.html" %}
+{% load help_tags %}
+
+{% block title %}{{ cluster.name }} — Clusters — KubePosture{% endblock %}
+{% block pretitle %}<a href="{% url 'cluster-list' %}" class="text-decoration-none">Clusters</a>{% endblock %}
+{% block page_title %}{{ cluster.name }}{% endblock %}
+
+{% block content %}
+{% if messages %}
+{% for msg in messages %}
+<div class="alert alert-{{ msg.tags }} alert-dismissible">{{ msg }}
+  <a class="btn-close" data-bs-dismiss="alert"></a>
+</div>
+{% endfor %}
+{% endif %}
+
+<div class="row">
+  <div class="col-lg-8">
+
+    <!-- Cluster info -->
+    <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title">Cluster Info</h3></div>
+      <div class="card-body">
+        {% help "Cluster Info" %}
+          <p class="mb-0"><strong>Name</strong> is set at first ingest and is immutable.
+          <strong>Environment</strong> is auto-detected from the cluster name (prod/staging/dev).
+          <strong>Provider</strong> and <strong>region</strong> are auto-detected from node metadata
+          by the import script on every run, unless an admin overrides them. <strong>K8s version</strong>
+          is always refreshed from the cluster's API.</p>
+        {% endhelp %}
+
+        {% if is_admin %}
+        <form method="post" action="{% url 'cluster-detail' cluster.pk %}">
+          {% csrf_token %}
+          <div class="mb-3">
+            <label class="form-label">Name</label>
+            <input type="text" class="form-control font-monospace" value="{{ cluster.name }}" disabled>
+          </div>
+          <div class="row g-2">
+            <div class="col-md-6 mb-3">
+              <label class="form-label">Environment</label>
+              <select name="environment" class="form-select" required>
+                {% if cluster.environment not in "prod,staging,dev"|cut:"," %}
+                <option value="" disabled selected>— choose —</option>
+                {% endif %}
+                <option value="prod"    {% if cluster.environment == "prod" %}selected{% endif %}>prod</option>
+                <option value="staging" {% if cluster.environment == "staging" %}selected{% endif %}>staging</option>
+                <option value="dev"     {% if cluster.environment == "dev" %}selected{% endif %}>dev</option>
+              </select>
+              <small class="form-hint">Used to compute finding priority — pick the closest match.</small>
+            </div>
+            <div class="col-md-6 mb-3">
+              <label class="form-label">
+                Provider
+                {% if cluster.provider_is_manual %}<span class="badge bg-orange-lt text-orange ms-1">manual</span>{% endif %}
+              </label>
+              <input type="text" name="provider" class="form-control" value="{{ cluster.provider }}"
+                     placeholder="aws, eks, gcp, gke, azure, aks, onprem">
+            </div>
+            <div class="col-md-6 mb-3">
+              <label class="form-label">
+                Region
+                {% if cluster.region_is_manual %}<span class="badge bg-orange-lt text-orange ms-1">manual</span>{% endif %}
+              </label>
+              <input type="text" name="region" class="form-control" value="{{ cluster.region }}"
+                     placeholder="e.g. eu-west-1, us-central1">
+            </div>
+            <div class="col-md-6 mb-3">
+              <label class="form-label">K8s Version</label>
+              <input type="text" class="form-control" value="{{ cluster.k8s_version|default:'—' }}" disabled>
+              <small class="form-hint">Read-only — auto-updated by the import script on every run.</small>
+            </div>
+          </div>
+          <div class="d-flex gap-2">
+            <button type="submit" class="btn btn-primary">Save and recalculate priorities</button>
+            <a href="{% url 'cluster-list' %}" class="btn btn-outline-secondary">Cancel</a>
+          </div>
+        </form>
+        {% else %}
+        <div class="datagrid">
+          <div class="datagrid-item">
+            <div class="datagrid-title">Name</div>
+            <div class="datagrid-content"><code>{{ cluster.name }}</code></div>
+          </div>
+          <div class="datagrid-item">
+            <div class="datagrid-title">Environment</div>
+            <div class="datagrid-content">
+              {% if cluster.environment == "prod" %}
+                <span class="badge bg-danger-lt text-danger">prod</span>
+              {% elif cluster.environment == "staging" %}
+                <span class="badge bg-warning-lt text-warning">staging</span>
+              {% elif cluster.environment == "dev" %}
+                <span class="badge bg-azure-lt text-azure">dev</span>
+              {% else %}
+                <span class="badge bg-secondary-lt text-secondary">unset</span>
+              {% endif %}
+            </div>
+          </div>
+          <div class="datagrid-item">
+            <div class="datagrid-title">Provider</div>
+            <div class="datagrid-content">{{ cluster.provider }}</div>
+          </div>
+          <div class="datagrid-item">
+            <div class="datagrid-title">Region</div>
+            <div class="datagrid-content">{{ cluster.region|default:"—" }}</div>
+          </div>
+          <div class="datagrid-item">
+            <div class="datagrid-title">K8s Version</div>
+            <div class="datagrid-content">{{ cluster.k8s_version|default:"—" }}</div>
+          </div>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Namespaces table -->
+    <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title">Namespaces</h3></div>
+      <div class="card-body">
+        {% help "Namespaces" %}
+          <p>Each row is a namespace discovered by the import CronJob. <strong>Internet Exposed</strong>
+          is auto-detected from K8s state (Services of type LoadBalancer/NodePort, Ingresses).
+          <strong>Sensitive Data</strong> is always manual — admin declares which namespaces
+          process PII / financial / regulated data.</p>
+          <p class="mb-0">Namespaces marked <span class="badge bg-danger-lt text-danger">deleted</span>
+          were not present in the most recent complete cluster snapshot; their active findings were
+          auto-resolved.</p>
+        {% endhelp %}
+
+        {% if namespaces %}
+        <div class="table-responsive">
+          <table class="table table-sm table-vcenter">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Active findings</th>
+                <th>Last seen</th>
+                <th>Internet exposed</th>
+                <th>Sensitive data</th>
+                {% if is_admin %}<th class="text-end"></th>{% endif %}
+              </tr>
+            </thead>
+            <tbody>
+              {% for ns in namespaces %}
+                {% include "clusters/_namespace_row.html" %}
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="text-muted mb-0">
+          No namespaces discovered yet. Run the <code>kubeposture-import</code> CronJob on this
+          cluster to auto-populate this list.
+        </p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Right sidebar: priority preview + rollup -->
+  <div class="col-lg-4">
+    <div class="card">
+      <div class="card-header"><h3 class="card-title">Priority Decision Tree</h3></div>
+      <div class="card-body">
+        <p class="text-secondary mb-3">How namespace exposure + cluster environment affect priority:</p>
+        <table class="table table-sm table-borderless">
+          <tbody>
+            <tr>
+              <td><span class="badge bg-danger-lt text-danger">Immediate</span></td>
+              <td class="text-secondary">KEV-listed, or Critical/High-EPSS on exposed prod</td>
+            </tr>
+            <tr>
+              <td><span class="badge bg-orange-lt text-orange">Out-of-Cycle</span></td>
+              <td class="text-secondary">Critical in prod, High-EPSS in prod, High on exposed prod</td>
+            </tr>
+            <tr>
+              <td><span class="badge bg-azure-lt text-azure">Scheduled</span></td>
+              <td class="text-secondary">Critical in dev, High in prod, High/Medium with sensitive data</td>
+            </tr>
+            <tr>
+              <td><span class="badge bg-secondary-lt text-secondary">Defer</span></td>
+              <td class="text-secondary">Everything else</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card mt-3">
+      <div class="card-header"><h3 class="card-title">Cluster rollup</h3></div>
+      <div class="card-body">
+        <div class="datagrid">
+          <div class="datagrid-item">
+            <div class="datagrid-title">Has public exposure</div>
+            <div class="datagrid-content">
+              {% if cluster.has_public_exposure %}
+                <span class="badge bg-success-lt text-success">yes</span>
+              {% else %}
+                <span class="badge bg-secondary-lt text-secondary">no</span>
+              {% endif %}
+            </div>
+          </div>
+          <div class="datagrid-item">
+            <div class="datagrid-title">Has sensitive data</div>
+            <div class="datagrid-content">
+              {% if cluster.has_sensitive_data %}
+                <span class="badge bg-warning-lt text-warning">yes</span>
+              {% else %}
+                <span class="badge bg-secondary-lt text-secondary">no</span>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+        <small class="d-block text-muted mt-2">
+          Derived from active namespaces. Cluster-scoped findings (ClusterRole, etc.) use these for priority.
+        </small>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

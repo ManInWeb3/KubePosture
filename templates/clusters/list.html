@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% load help_tags %}
+
+{% block title %}Clusters — KubePosture{% endblock %}
+{% block pretitle %}Inventory{% endblock %}
+{% block page_title %}Clusters{% endblock %}
+
+{% block content %}
+{% if messages %}
+{% for msg in messages %}
+<div class="alert alert-{{ msg.tags }} alert-dismissible">{{ msg }}
+  <a class="btn-close" data-bs-dismiss="alert"></a>
+</div>
+{% endfor %}
+{% endif %}
+
+{% help "Clusters" %}
+  <p>Clusters are <strong>auto-registered on first ingest</strong> — when the <code>kubeposture-import</code>
+  CronJob POSTs scan data with a new cluster name, a row appears here. You never create clusters manually.</p>
+  <p>The import script also auto-detects <strong>provider</strong>, <strong>region</strong>, K8s version
+  and per-namespace <strong>exposure</strong> (from LoadBalancer/NodePort Services and Ingresses).</p>
+  <p class="mb-0"><strong>Effective priority</strong> flows from the namespace a finding lives in —
+  a CRITICAL CVE on an internet-exposed namespace in production becomes <strong>Immediate</strong>;
+  the same CVE on an isolated dev namespace becomes <strong>Scheduled</strong>.</p>
+{% endhelp %}
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table table-hover">
+      <thead>
+        <tr>
+          <th>Cluster</th>
+          <th title="prod / staging / dev — auto-detected from name, admin can override">Environment</th>
+          <th>Provider</th>
+          <th>Region</th>
+          <th title="Exposed active namespaces / total active namespaces">Exposed NS</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in clusters %}
+        <tr>
+          <td><a href="{% url 'cluster-detail' c.pk %}"><strong>{{ c.name }}</strong></a></td>
+          <td>
+            {% if c.environment == "prod" %}
+              <span class="badge bg-danger-lt text-danger">prod</span>
+            {% elif c.environment == "staging" %}
+              <span class="badge bg-warning-lt text-warning">staging</span>
+            {% elif c.environment == "dev" %}
+              <span class="badge bg-azure-lt text-azure">dev</span>
+            {% else %}
+              <span class="badge bg-secondary-lt text-secondary">unset</span>
+            {% endif %}
+          </td>
+          <td class="text-muted">{{ c.provider }}</td>
+          <td class="text-muted">{{ c.region|default:"—" }}</td>
+          <td>
+            {% if c.namespace_count %}
+              <span class="badge bg-blue-lt text-blue">{{ c.exposed_count }} / {{ c.namespace_count }}</span>
+            {% else %}
+              <span class="text-muted">—</span>
+            {% endif %}
+          </td>
+          <td>
+            <a href="{% url 'cluster-detail' c.pk %}" class="btn btn-sm btn-outline-secondary">View</a>
+            {% if is_admin %}
+            <a href="{% url 'cluster-detail' c.pk %}" class="btn btn-sm btn-outline-primary">Configure</a>
+            {% endif %}
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="6" class="text-center text-muted py-4">No clusters registered. Clusters appear after first data ingest.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,96 @@
+<tr id="ns-row-{{ ns.pk }}" {% if not ns.active %}class="table-secondary text-muted" title="Namespace no longer present in the cluster at last sync"{% endif %}>
+  <td>
+    <code>{{ ns.name }}</code>
+    {% if not ns.active %}
+      <span class="badge bg-danger-lt text-danger ms-1"
+            title="Namespace not present in the most recent complete cluster snapshot — its active/acknowledged findings were auto-resolved.">deleted</span>
+    {% endif %}
+  </td>
+  <td class="text-muted">{{ ns.finding_count }}</td>
+  <td class="text-muted">
+    {% if not ns.active and ns.deactivated_at %}
+      <span title="Deactivated at">{{ ns.deactivated_at|date:"Y-m-d H:i" }}</span>
+    {% else %}
+      {{ ns.last_seen|date:"Y-m-d H:i" }}
+    {% endif %}
+  </td>
+  <td>
+    {% if is_admin %}
+    <form method="post"
+          hx-post="{% url 'namespace-toggle' cluster.pk ns.pk %}"
+          hx-vals='{"field":"internet_exposed"}'
+          hx-target="#ns-row-{{ ns.pk }}"
+          hx-swap="outerHTML"
+          class="m-0">
+      {% csrf_token %}
+      <label class="form-check form-check-inline m-0">
+        <input type="checkbox"
+               class="form-check-input"
+               {% if ns.internet_exposed %}checked{% endif %}
+               {% if not ns.active %}disabled title="Namespace is inactive"{% endif %}
+               onclick="this.form.requestSubmit()">
+      </label>
+      {% if ns.exposure_is_manual %}
+        <span class="badge bg-orange-lt text-orange ms-1">manual</span>
+      {% else %}
+        <span class="badge bg-azure-lt text-azure ms-1">auto</span>
+      {% endif %}
+    </form>
+    {% else %}
+      {% if ns.internet_exposed %}
+        <span class="badge bg-success-lt text-success">yes</span>
+      {% else %}
+        <span class="badge bg-secondary-lt text-secondary">no</span>
+      {% endif %}
+      {% if ns.exposure_is_manual %}
+        <span class="badge bg-orange-lt text-orange ms-1" title="Set manually by admin">manual</span>
+      {% else %}
+        <span class="badge bg-azure-lt text-azure ms-1" title="Auto-detected by import script">auto</span>
+      {% endif %}
+    {% endif %}
+  </td>
+  <td>
+    {% if is_admin %}
+    <form method="post"
+          hx-post="{% url 'namespace-toggle' cluster.pk ns.pk %}"
+          hx-vals='{"field":"contains_sensitive_data"}'
+          hx-target="#ns-row-{{ ns.pk }}"
+          hx-swap="outerHTML"
+          class="m-0">
+      {% csrf_token %}
+      <label class="form-check form-check-inline m-0">
+        <input type="checkbox"
+               class="form-check-input"
+               {% if ns.contains_sensitive_data %}checked{% endif %}
+               {% if not ns.active %}disabled title="Namespace is inactive"{% endif %}
+               onclick="this.form.requestSubmit()">
+      </label>
+      {% if ns.sensitive_is_manual %}
+        <span class="badge bg-orange-lt text-orange ms-1">manual</span>
+      {% endif %}
+    </form>
+    {% else %}
+      {% if ns.contains_sensitive_data %}
+        <span class="badge bg-warning-lt text-warning">yes</span>
+      {% else %}
+        <span class="badge bg-secondary-lt text-secondary">no</span>
+      {% endif %}
+    {% endif %}
+  </td>
+  {% if is_admin %}
+  <td class="text-end">
+    {% if ns.exposure_is_manual or ns.sensitive_is_manual %}
+    <form method="post"
+          hx-post="{% url 'namespace-reset-auto' cluster.pk ns.pk %}"
+          hx-vals='{"field":"exposure"}'
+          hx-target="#ns-row-{{ ns.pk }}"
+          hx-swap="outerHTML"
+          class="d-inline m-0"
+          title="Clear the manual flag so next auto-detect takes over">
+      {% csrf_token %}
+      <button type="submit" class="btn btn-sm btn-outline-secondary">Reset</button>
+    </form>
+    {% endif %}
+  </td>
+  {% endif %}
+</tr>

@@ -33,6 +33,16 @@
           </select>
         </div>
         <div class="col-auto">
+          <select name="namespace" class="form-select form-select-sm"
+                  title="Namespace — drives per-namespace exposure signal for priority"
+                  onchange="this.form.requestSubmit()">
+            <option value="">All namespaces</option>
+            {% for ns in namespaces %}
+            <option value="{{ ns.name }}" {% if selected_namespace == ns.name %}selected{% endif %}>{{ ns.name }}{% if not ns.active %} (DELETED){% endif %}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-auto">
           <select name="priority" class="form-select form-select-sm" title="Effective priority — contextual action urgency" onchange="this.form.requestSubmit()">
             <option value="">All priorities</option>
             {% for val, label in priority_choices %}
