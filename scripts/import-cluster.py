@@ -35,7 +35,9 @@ Requirements:
 import argparse
 import json
 import os
+import socket
 import sys
+import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -47,6 +49,17 @@ except ImportError:
         file=sys.stderr,
     )
     sys.exit(1)
+
+
+# ── Network tunables ─────────────────────────────────────────
+# K8s calls: (connect, read) tuple — fail fast on unreachable apiserver,
+# allow more time for large CRD list responses.
+K8S_TIMEOUT: tuple[int, int] = (10, 60)
+# KubePosture POSTs: each attempt caps at HTTP_TIMEOUT; we retry on
+# transient URLError/5xx/timeout with exponential backoff.
+HTTP_TIMEOUT: int = 30
+HTTP_MAX_ATTEMPTS: int = 3
+HTTP_RETRY_BASE_DELAY: float = 1.5  # seconds; doubles each attempt
 
 
 # ── Trivy CRD types ──────────────────────────────────────────
@@ -106,6 +119,7 @@ def list_crds(
             group=group,
             version=version,
             plural=plural,
+            _request_timeout=K8S_TIMEOUT,
         )
         items = result.get("items", [])
         for item in items:
@@ -116,6 +130,12 @@ def list_crds(
             print(f"    CRD {group}/{plural} not found (not installed)", file=sys.stderr)
         else:
             print(f"    Error listing {plural}: {e.reason}", file=sys.stderr)
+        return []
+    except Exception as e:
+        # Covers urllib3.ReadTimeoutError, ConnectionError, DNS failures —
+        # none of which inherit from ApiException. Skip this CRD type so
+        # one hang doesn't abort the entire import run.
+        print(f"    Network error listing {plural}: {e}", file=sys.stderr)
         return []
 
 
@@ -144,6 +164,67 @@ def _classify_provider(provider_id: str, node_labels: dict) -> str:
     return "onprem"
 
 
+# Canonical K8s topology labels, in preference order.
+_REGION_LABELS = (
+    "topology.kubernetes.io/region",           # K8s 1.17+ standard, set by cloud CCMs
+    "failure-domain.beta.kubernetes.io/region",  # deprecated but still seen on older clusters
+)
+_ZONE_LABELS = (
+    "topology.kubernetes.io/zone",
+    "failure-domain.beta.kubernetes.io/zone",
+)
+
+
+def _zone_to_region(zone: str) -> str:
+    """Infer region from a zone label when the region label is absent.
+
+    Covers the three major conventions:
+      - AWS  / DO:     us-east-1a    → us-east-1   (strip trailing letter)
+      - GCP  / GKE:    us-central1-a → us-central1 (strip '-<letter>' suffix)
+      - Azure / AKS:   westeurope-1  → westeurope  (strip '-<digit>' suffix)
+    Returns the input unchanged when no pattern matches — better a noisy
+    string than empty, lets admins correct it manually in the UI.
+    """
+    if not zone:
+        return ""
+    if "-" in zone:
+        head, _, tail = zone.rpartition("-")
+        if head:
+            # Azure: trailing 1–2 digit zone number (westeurope-1, eastus2-2)
+            if tail.isdigit() and len(tail) <= 2:
+                return head
+            # GCP: trailing single letter, head has digits (us-central1-a)
+            if tail.isalpha() and len(tail) == 1 and any(c.isdigit() for c in head):
+                return head
+    # AWS: trailing single letter immediately after a digit (us-east-1a)
+    if len(zone) >= 2 and zone[-1].isalpha() and zone[-2].isdigit():
+        return zone[:-1]
+    return zone
+
+
+def _detect_region(nodes: list) -> str:
+    """Pick the first node with a usable region signal.
+
+    Iterates all provided nodes because control-plane nodes often lack
+    topology labels — we want to reach a worker. Region label wins;
+    zone-derived region is the fallback.
+    """
+    # Pass 1: explicit region labels on any node
+    for node in nodes:
+        labels = (node.metadata.labels if node and node.metadata else None) or {}
+        for key in _REGION_LABELS:
+            if labels.get(key):
+                return labels[key]
+    # Pass 2: derive from zone label
+    for node in nodes:
+        labels = (node.metadata.labels if node and node.metadata else None) or {}
+        for key in _ZONE_LABELS:
+            zone = labels.get(key, "")
+            if zone:
+                return _zone_to_region(zone)
+    return ""
+
+
 def discover_cluster_metadata(core_api, net_api) -> dict:
     """Return a single dict describing the cluster for /cluster-metadata/sync/.
 
@@ -166,31 +247,35 @@ def discover_cluster_metadata(core_api, net_api) -> dict:
         "complete_snapshot": False,
     }
 
-    # K8s version
+    # K8s version — VersionApi.get_code() accepts _request_timeout like the
+    # other client methods (passes through to the underlying REST call).
     try:
-        meta["k8s_version"] = (client.VersionApi().get_code().git_version or "")
+        meta["k8s_version"] = (
+            client.VersionApi().get_code(_request_timeout=K8S_TIMEOUT).git_version or ""
+        )
     except Exception as e:
         print(f"Warning: could not fetch K8s version: {e}", file=sys.stderr)
 
-    # Provider + region from the first node
+    # Provider from the first node's provider_id; region scans all nodes
+    # because control-plane nodes frequently lack topology labels while
+    # worker nodes carry them. `limit=20` caps the response on huge clusters.
     try:
-        nodes = core_api.list_node(limit=1)
+        nodes = core_api.list_node(limit=20, _request_timeout=K8S_TIMEOUT)
         if nodes.items:
-            node = nodes.items[0]
-            labels = node.metadata.labels or {}
-            meta["provider"] = _classify_provider(node.spec.provider_id or "", labels)
-            meta["region"] = (
-                labels.get("topology.kubernetes.io/region")
-                or labels.get("failure-domain.beta.kubernetes.io/region")
-                or ""
-            )
+            first = nodes.items[0]
+            first_labels = (first.metadata.labels if first.metadata else None) or {}
+            provider_id = (first.spec.provider_id if first.spec else "") or ""
+            meta["provider"] = _classify_provider(provider_id, first_labels)
+            meta["region"] = _detect_region(nodes.items)
     except Exception as e:
         print(f"Warning: could not inspect nodes: {e}", file=sys.stderr)
 
-    # Per-namespace exposure
+    # Per-namespace exposure. If this call fails we return early — without
+    # the namespace list there's nothing to describe (and complete_snapshot
+    # correctly stays False so the server skips deactivation).
     ns_list = []
     try:
-        ns_list = core_api.list_namespace().items
+        ns_list = core_api.list_namespace(_request_timeout=K8S_TIMEOUT).items
     except Exception as e:
         print(f"Warning: could not list namespaces: {e}", file=sys.stderr)
         return meta
@@ -198,7 +283,8 @@ def discover_cluster_metadata(core_api, net_api) -> dict:
     # Bucket services by namespace — LB/NodePort means exposed
     exposed_by_ns = {}
     try:
-        for svc in core_api.list_service_for_all_namespaces().items:
+        svcs = core_api.list_service_for_all_namespaces(_request_timeout=K8S_TIMEOUT)
+        for svc in svcs.items:
             if svc.spec and svc.spec.type in ("LoadBalancer", "NodePort"):
                 exposed_by_ns[svc.metadata.namespace] = True
     except Exception as e:
@@ -206,7 +292,8 @@ def discover_cluster_metadata(core_api, net_api) -> dict:
 
     # Any Ingress in a namespace also means exposed
     try:
-        for ing in net_api.list_ingress_for_all_namespaces().items:
+        ings = net_api.list_ingress_for_all_namespaces(_request_timeout=K8S_TIMEOUT)
+        for ing in ings.items:
             exposed_by_ns[ing.metadata.namespace] = True
     except client.ApiException as e:
         if e.status != 404:
@@ -219,7 +306,8 @@ def discover_cluster_metadata(core_api, net_api) -> dict:
     # one NetworkPolicy is assumed to be thinking about network scope.
     netpol_by_ns: dict[str, int] = {}
     try:
-        for np in net_api.list_network_policy_for_all_namespaces().items:
+        nps = net_api.list_network_policy_for_all_namespaces(_request_timeout=K8S_TIMEOUT)
+        for np in nps.items:
             ns_name = np.metadata.namespace
             netpol_by_ns[ns_name] = netpol_by_ns.get(ns_name, 0) + 1
     except client.ApiException as e:
@@ -243,6 +331,39 @@ def discover_cluster_metadata(core_api, net_api) -> dict:
     return meta
 
 
+def _urlopen_with_retry(req: Request) -> tuple[bool, str, bytes]:
+    """Send a POST with retries on transient failures.
+
+    Retries on: URLError (DNS/connect), socket.timeout, and 5xx HTTPError.
+    Does NOT retry: 4xx HTTPError — those won't succeed on retry
+    (bad token, validation, etc.).
+
+    Returns (ok, error_detail_on_failure, response_body_on_success).
+    """
+    last_error = "no attempts"
+    for attempt in range(1, HTTP_MAX_ATTEMPTS + 1):
+        try:
+            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+                return True, "", resp.read()
+        except HTTPError as e:
+            try:
+                body = e.read().decode(errors="replace")[:200]
+            except Exception:
+                body = ""
+            if 400 <= e.code < 500:
+                return False, f"HTTP {e.code}: {body}", b""
+            last_error = f"HTTP {e.code}: {body}"
+        except URLError as e:
+            last_error = f"connection error: {e.reason}"
+        except socket.timeout:
+            last_error = f"timeout after {HTTP_TIMEOUT}s"
+
+        if attempt < HTTP_MAX_ATTEMPTS:
+            delay = HTTP_RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            time.sleep(delay)
+    return False, f"{last_error} (after {HTTP_MAX_ATTEMPTS} attempts)", b""
+
+
 def post_cluster_metadata_sync(
     base_url: str, token: str, cluster: str, meta: dict
 ) -> tuple[bool, str]:
@@ -254,13 +375,10 @@ def post_cluster_metadata_sync(
         "Content-Type": "application/json",
     }
     req = Request(url, data=body, headers=headers, method="POST")
-    try:
-        with urlopen(req, timeout=30) as resp:
-            return True, resp.read().decode()[:200]
-    except HTTPError as e:
-        return False, f"HTTP {e.code}: {e.read().decode()[:100]}"
-    except URLError as e:
-        return False, f"connection error: {e.reason}"
+    ok, err, resp_body = _urlopen_with_retry(req)
+    if ok:
+        return True, resp_body.decode(errors="replace")[:200]
+    return False, err
 
 
 # ── KubePosture API ─────────────────────────────────────────────
@@ -274,15 +392,15 @@ def post_crd(item: dict, url: str, token: str, cluster: str) -> tuple[bool, str]
         "X-Cluster-Name": cluster,
     }
     req = Request(url, data=body, headers=headers, method="POST")
+    ok, err, resp_body = _urlopen_with_retry(req)
+    if not ok:
+        return False, err
     try:
-        with urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read())
-            status = data.get("status", "unknown")
-            return status in ("success", "queued", "stored_raw"), status
-    except HTTPError as e:
-        return False, f"HTTP {e.code}: {e.read().decode()[:100]}"
-    except URLError as e:
-        return False, f"connection error: {e.reason}"
+        data = json.loads(resp_body)
+        status = data.get("status", "unknown")
+    except json.JSONDecodeError:
+        return False, "invalid JSON response"
+    return status in ("success", "queued", "stored_raw"), status
 
 
 def import_crds(
