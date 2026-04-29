@@ -10,11 +10,11 @@
   <p><strong>Roles (cumulative):</strong></p>
   <ul>
     <li><strong>viewer</strong> — read all findings, compliance data, and components. Download reports.</li>
-    <li><strong>operator</strong> — everything viewer can do, plus acknowledge findings and run bulk actions.</li>
-    <li><strong>admin</strong> — everything operator can do, plus risk acceptance, user management, cluster config, report generation.</li>
+    <li><strong>SecEngineer</strong> — everything viewer can do, plus acknowledge findings, run bulk actions, and accept risks.</li>
+    <li><strong>admin</strong> — everything SecEngineer can do, plus user management, cluster config, and report generation.</li>
   </ul>
-  <p class="mb-0">Service accounts (<code>svc-*</code>) are used for scanner ingest and are hidden from this list —
-  create them with <code>manage.py create_service_token</code>.</p>
+  <p class="mb-0">Scanner ingest is authenticated separately via <a href="{% url 'token-list' %}">Ingest Tokens</a> —
+  no Django user account needed.</p>
 {% endhelp %}
 
 <div class="card mb-3">

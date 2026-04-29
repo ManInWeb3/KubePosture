@@ -26,7 +26,7 @@
   <div class="card-header d-flex align-items-center">
     <h3 class="card-title">
       CVE Trend
-      <span class="text-muted small ms-2">
+      <span id="list-trend-subtitle" class="text-muted small ms-2">
         {% if filters.cluster %}cluster <code>{{ filters.cluster }}</code>{% else %}fleet-wide{% endif %}
         — last 90 days
       </span>
@@ -40,33 +40,6 @@
     <div id="list-trend-chart" style="min-height: 280px;"></div>
   </div>
 </div>
-<script>
-  (function () {
-    var cluster = "{{ filters.cluster|escapejs }}";
-    var state = { stack: "severity" };
-    function renderTrend() {
-      renderSnapshotChart({
-        elId: "list-trend-chart",
-        scope: cluster ? "cluster" : "global",
-        stack: state.stack,
-        params: cluster ? { cluster: cluster, days: 90 } : { days: 90 },
-        height: 280,
-      });
-    }
-    var group = document.getElementById("list-trend-stack-toggle");
-    if (group) {
-      group.addEventListener("click", function (ev) {
-        var btn = ev.target.closest("button[data-stack]");
-        if (!btn) return;
-        group.querySelectorAll("button").forEach(function (b) { b.classList.remove("active"); });
-        btn.classList.add("active");
-        state.stack = btn.dataset.stack;
-        renderTrend();
-      });
-    }
-    renderTrend();
-  })();
-</script>
 
 <form id="workloads-filters" method="get" class="card mb-3"
       hx-get="{% url 'workloads-list' %}"
@@ -157,6 +130,55 @@
 {% endblock %}
 
 {% block extra_js %}
+<script>
+  (function () {
+    var initialCluster = "{{ filters.cluster|escapejs }}";
+    var state = { stack: "severity", cluster: initialCluster };
+    function renderTrend() {
+      renderSnapshotChart({
+        elId: "list-trend-chart",
+        scope: state.cluster ? "cluster" : "global",
+        stack: state.stack,
+        params: state.cluster ? { cluster: state.cluster, days: 90 } : { days: 90 },
+        height: 280,
+      });
+      var sub = document.getElementById("list-trend-subtitle");
+      if (sub) {
+        sub.innerHTML = (state.cluster
+          ? 'cluster <code></code>'
+          : 'fleet-wide') + ' — last 90 days';
+        if (state.cluster) {
+          sub.querySelector('code').textContent = state.cluster;
+        }
+      }
+    }
+    var group = document.getElementById("list-trend-stack-toggle");
+    if (group) {
+      group.addEventListener("click", function (ev) {
+        var btn = ev.target.closest("button[data-stack]");
+        if (!btn) return;
+        group.querySelectorAll("button").forEach(function (b) { b.classList.remove("active"); });
+        btn.classList.add("active");
+        state.stack = btn.dataset.stack;
+        renderTrend();
+      });
+    }
+    // Form submits HTMX-swap only the table tbody — the trend card lives
+    // outside that target, so refresh it by reading the live form value
+    // after each settle.
+    document.body.addEventListener("htmx:afterSettle", function (ev) {
+      var t = ev.detail && ev.detail.target;
+      if (!t || t.id !== "workload-rows") return;
+      var sel = document.querySelector('#workloads-filters select[name="cluster"]');
+      var next = sel ? sel.value : "";
+      if (next !== state.cluster) {
+        state.cluster = next;
+        renderTrend();
+      }
+    });
+    renderTrend();
+  })();
+</script>
 <script>
   (function() {
     var form = document.getElementById('workloads-filters');

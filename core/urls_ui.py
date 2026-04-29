@@ -6,9 +6,6 @@ A dashboard takes the root slot in a later slice.
 
 Workload detail lives at `/workloads/<kind>/<name>/`, multi-cluster-
 aggregating with optional `?cluster=<name>` narrowing.
-
-Placeholders fill in for nav items not yet wired in this slice — they
-keep `{% url %}` resolutions valid in `templates/base.html`.
 """
 from __future__ import annotations
 
@@ -22,9 +19,17 @@ from core.views_ui import (
     NamespaceToggleView,
     ProfileView,
     RootRedirectView,
+    TokenCreateView,
+    TokenDeleteView,
+    TokenListView,
+    TokenRegenerateView,
+    TokenRevokeView,
+    UserCreateView,
+    UserEditView,
+    UserListView,
+    UserToggleActiveView,
     WorkloadDetailView,
     WorkloadsListView,
-    make_placeholder,
 )
 
 urlpatterns = [
@@ -36,9 +41,6 @@ urlpatterns = [
         name="workloads-detail",
     ),
 
-    # Placeholders for nav targets that other slices will fill in.
-    path("findings/", make_placeholder("Findings", nav="findings").as_view(), name="findings-list"),
-    path("findings/<int:pk>/", make_placeholder("Finding detail").as_view(), name="findings-detail"),
     path(
         "findings/<int:pk>/panel/",
         FindingDetailPanelView.as_view(),
@@ -57,4 +59,31 @@ urlpatterns = [
         name="namespace-reset-auto",
     ),
     path("profile/", ProfileView.as_view(), name="profile"),
+
+    # Access (admin-only) — users + ingest tokens.
+    path("access/users/", UserListView.as_view(), name="user-list"),
+    path("access/users/new/", UserCreateView.as_view(), name="user-create"),
+    path("access/users/<int:pk>/edit/", UserEditView.as_view(), name="user-edit"),
+    path(
+        "access/users/<int:pk>/toggle-active/",
+        UserToggleActiveView.as_view(),
+        name="user-toggle-active",
+    ),
+    path("access/tokens/", TokenListView.as_view(), name="token-list"),
+    path("access/tokens/create/", TokenCreateView.as_view(), name="token-create"),
+    path(
+        "access/tokens/<int:pk>/regenerate/",
+        TokenRegenerateView.as_view(),
+        name="token-regenerate",
+    ),
+    path(
+        "access/tokens/<int:pk>/revoke/",
+        TokenRevokeView.as_view(),
+        name="token-revoke",
+    ),
+    path(
+        "access/tokens/<int:pk>/delete/",
+        TokenDeleteView.as_view(),
+        name="token-delete",
+    ),
 ]

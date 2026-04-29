@@ -14,9 +14,10 @@
 
 {% help "User" %}
   <p><strong>What it is:</strong> create or edit a Django user and assign them
-  to RBAC groups (<code>viewer</code> / <code>operator</code> / <code>admin</code>).
-  Group membership drives what the UI exposes — viewers can read, operators can
-  ack/reopen findings, admins can accept risks and manage tokens.</p>
+  to RBAC groups (<code>viewer</code> / <code>SecEngineer</code> / <code>admin</code>).
+  Group membership drives what the UI exposes — viewers can read, SecEngineers
+  can ack/reopen findings and accept risks, admins additionally manage users
+  and tokens.</p>
   <p class="mb-0"><strong>How to use:</strong> set username + email; pick the
   smallest group that fits the role. Passwords are set on first save; the user
   can change theirs from <code>/profile/</code>.</p>
@@ -84,8 +85,8 @@
             <span class="form-check-label">
               <strong>{{ g.name }}</strong>
               {% if g.name == "viewer" %}— read everything, download reports.{% endif %}
-              {% if g.name == "operator" %}— viewer + acknowledge findings, bulk actions.{% endif %}
-              {% if g.name == "admin" %}— operator + risk acceptance, user management.{% endif %}
+              {% if g.name == "SecEngineer" %}— viewer + acknowledge findings, bulk actions, risk acceptance.{% endif %}
+              {% if g.name == "admin" %}— SecEngineer + user management, cluster config.{% endif %}
             </span>
           </label>
           {% endfor %}

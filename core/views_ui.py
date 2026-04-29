@@ -18,8 +18,13 @@ from django.views.generic import RedirectView
 from django.contrib import messages
 from django.shortcuts import get_object_or_404, redirect
 
+from django.contrib.auth.models import Group, User
+from django.core.paginator import Paginator
+from django.utils import timezone
+
+from core.api.auth import generate_token
 from core.constants import WorkloadKind
-from core.models import Cluster, Finding, Namespace, UserPreference
+from core.models import Cluster, Finding, IngestToken, Namespace, UserPreference
 from core.services.inventory import (
     findings_for_workload_image,
     list_workload_images,
@@ -507,28 +512,273 @@ class ProfileView(LoginRequiredMixin, View):
         return redirect("profile")
 
 
-# ── Placeholder for nav items that aren't wired yet ──────────────
+# ── Access (admin-only): users + ingest tokens ───────────────────
 
 
-class PlaceholderView(LoginRequiredMixin, View):
-    """Renders a small "Not yet wired" page so existing `{% url %}`
-    calls in the navbar resolve. Replaced as each Phase C/D/F slice
-    lands.
-    """
+ROLE_GROUPS = ("viewer", "SecEngineer", "admin")
 
-    template_name = "_placeholder.html"
-    label = "This page"
 
-    def get(self, request, *args, **kwargs):
+class AdminRequiredMixin(LoginRequiredMixin):
+    """Login + `admin` role required. Returns 403 for non-admins."""
+
+    def dispatch(self, request, *args, **kwargs):
+        if not request.user.is_authenticated:
+            return self.handle_no_permission()
+        if not _is_admin(request.user):
+            return HttpResponseForbidden("Admin role required")
+        return super().dispatch(request, *args, **kwargs)
+
+
+def _role_groups_qs():
+    return Group.objects.filter(name__in=ROLE_GROUPS).order_by("name")
+
+
+class UserListView(AdminRequiredMixin, View):
+    """`/access/users/` — list all human users with role + status."""
+
+    template_name = "users/list.html"
+
+    def get(self, request):
+        search = (request.GET.get("search") or "").strip()
+        role = (request.GET.get("role") or "").strip()
+
+        qs = User.objects.prefetch_related("groups").order_by("username")
+        if search:
+            qs = qs.filter(
+                Q(username__icontains=search)
+                | Q(email__icontains=search)
+                | Q(first_name__icontains=search)
+                | Q(last_name__icontains=search)
+            )
+        if role:
+            qs = qs.filter(groups__name=role)
+
+        page = Paginator(qs, 25).get_page(request.GET.get("page", 1))
         return render(request, self.template_name, {
-            "label": self.label,
-            "nav": getattr(self, "nav_id", ""),
+            "users": page,
+            "page_obj": page,
+            "groups": _role_groups_qs(),
+            "nav": "access",
+            "settings_tab": "users",
         })
 
 
-def make_placeholder(label: str, nav: str = "") -> type[PlaceholderView]:
-    return type(
-        f"Placeholder_{label}",
-        (PlaceholderView,),
-        {"label": label, "nav_id": nav},
-    )
+class UserCreateView(AdminRequiredMixin, View):
+    """`/access/users/new/` — create a Django user, assign one role group."""
+
+    template_name = "users/form.html"
+
+    def get(self, request):
+        return render(request, self.template_name, {
+            "groups": _role_groups_qs(),
+            "selected_role": "viewer",
+            "nav": "access",
+            "settings_tab": "users",
+        })
+
+    def post(self, request):
+        username = (request.POST.get("username") or "").strip()
+        email = (request.POST.get("email") or "").strip()
+        password = request.POST.get("password") or ""
+        first_name = (request.POST.get("first_name") or "").strip()
+        last_name = (request.POST.get("last_name") or "").strip()
+        is_active = request.POST.get("is_active") == "on"
+        role = (request.POST.get("role") or "").strip()
+
+        if not username:
+            messages.error(request, "Username is required.")
+        elif User.objects.filter(username=username).exists():
+            messages.error(request, f"Username '{username}' already exists.")
+        elif role not in ROLE_GROUPS:
+            messages.error(request, "Pick a role: viewer, operator, or admin.")
+        elif not password:
+            messages.error(request, "Password is required for new users.")
+        else:
+            user = User.objects.create_user(
+                username=username,
+                email=email,
+                password=password,
+                first_name=first_name,
+                last_name=last_name,
+            )
+            user.is_active = is_active
+            user.save(update_fields=["is_active"])
+            user.groups.set(Group.objects.filter(name=role))
+            messages.success(request, f"User '{username}' created.")
+            return redirect("user-list")
+
+        return render(request, self.template_name, {
+            "groups": _role_groups_qs(),
+            "selected_role": role or "viewer",
+            "nav": "access",
+            "settings_tab": "users",
+        })
+
+
+class UserEditView(AdminRequiredMixin, View):
+    """`/access/users/<pk>/edit/` — edit profile, role, optional password."""
+
+    template_name = "users/form.html"
+
+    def _ctx(self, user_obj, selected_role):
+        return {
+            "edit_user": user_obj,
+            "groups": _role_groups_qs(),
+            "selected_role": selected_role,
+            "nav": "access",
+            "settings_tab": "users",
+        }
+
+    def get(self, request, pk):
+        user_obj = get_object_or_404(User, pk=pk)
+        current = user_obj.groups.filter(name__in=ROLE_GROUPS).first()
+        return render(request, self.template_name,
+                      self._ctx(user_obj, current.name if current else ""))
+
+    def post(self, request, pk):
+        user_obj = get_object_or_404(User, pk=pk)
+        user_obj.first_name = (request.POST.get("first_name") or "").strip()
+        user_obj.last_name = (request.POST.get("last_name") or "").strip()
+        user_obj.email = (request.POST.get("email") or "").strip()
+        user_obj.is_active = request.POST.get("is_active") == "on"
+        user_obj.save(update_fields=[
+            "first_name", "last_name", "email", "is_active",
+        ])
+
+        role = (request.POST.get("role") or "").strip()
+        if role in ROLE_GROUPS:
+            user_obj.groups.set(Group.objects.filter(name=role))
+
+        new_password = request.POST.get("new_password") or ""
+        if new_password:
+            user_obj.set_password(new_password)
+            user_obj.save(update_fields=["password"])
+
+        messages.success(request, f"User '{user_obj.username}' updated.")
+        return redirect("user-list")
+
+
+class UserToggleActiveView(AdminRequiredMixin, View):
+    """`POST /access/users/<pk>/toggle-active/` — flip `is_active`."""
+
+    def post(self, request, pk):
+        user_obj = get_object_or_404(User, pk=pk)
+        if user_obj == request.user:
+            messages.error(request, "Cannot deactivate your own account.")
+            return redirect("user-list")
+        user_obj.is_active = not user_obj.is_active
+        user_obj.save(update_fields=["is_active"])
+        verb = "activated" if user_obj.is_active else "deactivated"
+        messages.success(request, f"User '{user_obj.username}' {verb}.")
+        return redirect("user-list")
+
+
+# ── Ingest tokens ────────────────────────────────────────────────
+
+
+def _session_key(token_id: int) -> str:
+    return f"new_ingest_token:{token_id}"
+
+
+class TokenListView(AdminRequiredMixin, View):
+    """`/access/tokens/` — list ingest tokens.
+
+    A freshly-created or freshly-regenerated token's plain value is shown
+    once via the session, then popped on next render (one-shot reveal).
+    """
+
+    template_name = "settings/tokens.html"
+
+    def get(self, request):
+        rows = []
+        for tok in IngestToken.objects.order_by("-created_at"):
+            rows.append({
+                "obj": tok,
+                "new_key": request.session.pop(_session_key(tok.id), None),
+            })
+        return render(request, self.template_name, {
+            "tokens": rows,
+            "nav": "access",
+            "settings_tab": "tokens",
+        })
+
+
+class TokenCreateView(AdminRequiredMixin, View):
+    """`POST /access/tokens/create/` — create token, stash plain in session."""
+
+    def post(self, request):
+        name = (request.POST.get("name") or "").strip()
+        description = (request.POST.get("description") or "").strip()
+
+        if not name:
+            messages.error(request, "Name is required.")
+            return redirect("token-list")
+        if IngestToken.objects.filter(name=name).exists():
+            messages.error(request, f"Token '{name}' already exists.")
+            return redirect("token-list")
+
+        plain, hashed = generate_token()
+        tok = IngestToken.objects.create(
+            name=name,
+            description=description,
+            token_hash=hashed,
+        )
+        request.session[_session_key(tok.id)] = plain
+        messages.success(
+            request,
+            f"Token '{name}' created. Copy it now — it won't be shown again.",
+        )
+        return redirect("token-list")
+
+
+class TokenRegenerateView(AdminRequiredMixin, View):
+    """`POST /access/tokens/<pk>/regenerate/` — rotate the secret in place.
+
+    Overwrites `token_hash` with a fresh value and resets `last_used_at`.
+    The old token stops working immediately. `created_at` is preserved
+    (it tracks the row, not the current secret).
+    """
+
+    def post(self, request, pk):
+        tok = get_object_or_404(IngestToken, pk=pk, revoked_at__isnull=True)
+        plain, hashed = generate_token()
+        tok.token_hash = hashed
+        tok.last_used_at = None
+        tok.save(update_fields=["token_hash", "last_used_at"])
+        request.session[_session_key(tok.id)] = plain
+        messages.success(
+            request,
+            f"Token '{tok.name}' regenerated. Old token is now invalid.",
+        )
+        return redirect("token-list")
+
+
+class TokenRevokeView(AdminRequiredMixin, View):
+    """`POST /access/tokens/<pk>/revoke/` — set `revoked_at` (soft revoke)."""
+
+    def post(self, request, pk):
+        tok = get_object_or_404(IngestToken, pk=pk)
+        if tok.revoked_at is None:
+            tok.revoked_at = timezone.now()
+            tok.save(update_fields=["revoked_at"])
+            messages.success(request, f"Token '{tok.name}' revoked.")
+        else:
+            messages.info(request, f"Token '{tok.name}' was already revoked.")
+        return redirect("token-list")
+
+
+class TokenDeleteView(AdminRequiredMixin, View):
+    """`POST /access/tokens/<pk>/delete/` — hard delete the row.
+
+    Allowed regardless of revoked state — the row carries no secret value
+    that can be replayed (only a hash), so deletion is purely cosmetic.
+    """
+
+    def post(self, request, pk):
+        tok = get_object_or_404(IngestToken, pk=pk)
+        name = tok.name
+        tok.delete()
+        messages.success(request, f"Token '{name}' deleted.")
+        return redirect("token-list")
+
+

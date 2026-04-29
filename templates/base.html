@@ -1,4 +1,4 @@
-{% load static %}
+{% load static access_tags %}
 <!doctype html>
 <html lang="en">
 <head>
@@ -155,17 +155,19 @@
               </a>
             </li>
             <li class="nav-item">
-              <a class="nav-link{% if nav == 'findings' %} active{% endif %}" href="{% url 'findings-list' %}" title="Findings">
-                <span class="nav-link-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>
-                <span class="nav-link-title">Findings</span>
-              </a>
-            </li>
-            <li class="nav-item">
               <a class="nav-link{% if nav == 'clusters' %} active{% endif %}" href="{% url 'cluster-list' %}" title="Clusters — per-cluster environment, namespaces, exposure flags">
                 <span class="nav-link-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg></span>
                 <span class="nav-link-title">Clusters</span>
               </a>
             </li>
+            {% if user|is_admin %}
+            <li class="nav-item">
+              <a class="nav-link{% if nav == 'access' %} active{% endif %}" href="{% url 'user-list' %}" title="Access — admin-only: users + ingest tokens">
+                <span class="nav-link-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span>
+                <span class="nav-link-title">Access</span>
+              </a>
+            </li>
+            {% endif %}
           </ul>
           {% if user.is_authenticated %}
           <ul class="navbar-nav mt-auto pt-3 border-top border-secondary" id="sidebar-footer">

@@ -1,6 +1,6 @@
 """Role-based access control for session-authenticated views.
 
-Three roles, hierarchical: admin ⊃ operator ⊃ viewer. A user with
+Three roles, hierarchical: admin ⊃ SecEngineer ⊃ viewer. A user with
 role X passes any check requiring role Y where Y ≤ X. Django
 superusers always pass.
 
@@ -8,7 +8,7 @@ Enforcement comes in two flavours:
 
   - `@require_role(role)` — function decorator for plain Django views
     (returns 403 PermissionDenied; redirects anonymous to LOGIN_URL).
-  - `IsViewer` / `IsOperator` / `IsAdmin` — DRF permission classes
+  - `IsViewer` / `IsSecEngineer` / `IsAdmin` — DRF permission classes
     for `permission_classes = [...]` on API views.
 
 Group seeding lives in `manage.py setup_rbac`. We deliberately do
@@ -25,7 +25,7 @@ from django.core.exceptions import PermissionDenied
 from rest_framework.permissions import BasePermission
 
 
-ROLE_HIERARCHY = ["viewer", "operator", "admin"]
+ROLE_HIERARCHY = ["viewer", "SecEngineer", "admin"]
 
 
 def _has_role(user, required: str) -> bool:
@@ -76,8 +76,8 @@ class IsViewer(_IsRoleBase):
     role = "viewer"
 
 
-class IsOperator(_IsRoleBase):
-    role = "operator"
+class IsSecEngineer(_IsRoleBase):
+    role = "SecEngineer"
 
 
 class IsAdmin(_IsRoleBase):

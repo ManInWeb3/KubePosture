@@ -1,8 +1,8 @@
-"""Seed the three RBAC Groups: viewer, operator, admin.
+"""Seed the three RBAC Groups: viewer, SecEngineer, admin.
 
-The role hierarchy is admin ⊃ operator ⊃ viewer (any user with
+The role hierarchy is admin ⊃ SecEngineer ⊃ viewer (any user with
 role X can do anything X-or-below requires). Enforcement is via
-`core.api.permissions.require_role` and `IsViewer`/`IsOperator`/
+`core.api.permissions.require_role` and `IsViewer`/`IsSecEngineer`/
 `IsAdmin` DRF permission classes — both check group membership
 on the user, not Django's per-action Permission objects. Keeping
 RBAC at the group level matches the v1 three-tier model in
@@ -18,11 +18,11 @@ from django.contrib.auth.models import Group
 from django.core.management.base import BaseCommand
 
 
-_ROLES = ["viewer", "operator", "admin"]
+_ROLES = ["viewer", "SecEngineer", "admin"]
 
 
 class Command(BaseCommand):
-    help = "Create the three RBAC groups (viewer, operator, admin)."
+    help = "Create the three RBAC groups (viewer, SecEngineer, admin)."
 
     def handle(self, *args, **opts):
         for name in _ROLES:

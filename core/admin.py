@@ -89,6 +89,30 @@ class IngestTokenAdmin(admin.ModelAdmin):
     ordering = ("-created_at",)
 
 
+@admin.register(Snapshot)
+class SnapshotAdmin(admin.ModelAdmin):
+    list_display = (
+        "captured_at",
+        "scope_kind",
+        "cluster",
+        "namespace",
+        "workload",
+        "total_active",
+        "severity_counts",
+        "priority_counts",
+        "change_kind",
+    )
+    list_filter = ("scope_kind", "cluster", "namespace", "change_kind")
+    search_fields = (
+        "cluster__name",
+        "namespace__name",
+        "workload__name",
+        "import_id",
+    )
+    list_select_related = ("cluster", "namespace", "workload")
+    ordering = ("-captured_at",)
+
+
 # Bulk-register the rest with default options.
 for _model in (
     Cluster,
@@ -100,7 +124,6 @@ for _model in (
     KevEntry,
     Namespace,
     ScanInconsistency,
-    Snapshot,
     WorkloadAlias,
     WorkloadSignal,
 ):

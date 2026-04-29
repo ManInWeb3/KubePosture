@@ -103,10 +103,76 @@
     );
   }
 
+  function buildChart(el, data, opts) {
+    var stack = opts.stack || "severity";
+
+    if (!data.captured_at || !data.captured_at.length) {
+      emptyState(el);
+      return;
+    }
+    var built = buildSeries(data, stack);
+    if (!built.series.length) {
+      emptyState(el, "All series are zero in this window.");
+      return;
+    }
+    var ts = timestampSeries(data.captured_at, built.series);
+    var annotations = (opts.scope === "workload")
+      ? buildAnnotations(data.events, data.captured_at)
+      : { xaxis: [] };
+
+    var theme = document.documentElement.getAttribute("data-bs-theme");
+    var dark = theme === "dim" || theme === "dark";
+
+    el.innerHTML = "";  // clear any "Loading…" placeholder
+    var chart = new ApexCharts(el, {
+      chart: {
+        type: "area",
+        height: opts.height || 280,
+        stacked: true,
+        toolbar: { show: false },
+        zoom: { enabled: false },
+        background: "transparent",
+        animations: { enabled: false },
+      },
+      theme: { mode: dark ? "dark" : "light" },
+      series: ts,
+      colors: built.palette,
+      stroke: { curve: "stepline", width: 1 },
+      fill: {
+        type: "gradient",
+        gradient: { opacityFrom: 0.55, opacityTo: 0.15 },
+      },
+      dataLabels: { enabled: false },
+      xaxis: {
+        type: "datetime",
+        labels: { datetimeUTC: false },
+      },
+      yaxis: {
+        labels: {
+          formatter: function (v) { return Math.round(v); },
+        },
+        title: { text: "Active findings" },
+      },
+      legend: { position: "top", horizontalAlign: "right" },
+      tooltip: { x: { format: "yyyy-MM-dd HH:mm" } },
+      annotations: annotations,
+      grid: { borderColor: dark ? "#373e47" : "#e9ecef" },
+    });
+    chart.render();
+    el._snapshotChart = chart;
+  }
+
   function render(opts) {
     var el = document.getElementById(opts.elId);
     if (!el) return;
-    var stack = opts.stack || "severity";
+
+    // Tear down any prior ApexCharts instance bound to this element.
+    // Without this, repeated render() calls (stack toggle, filter
+    // change) leak listeners and produce stale tooltips.
+    if (el._snapshotChart) {
+      try { el._snapshotChart.destroy(); } catch (e) { /* ignore */ }
+      el._snapshotChart = null;
+    }
 
     var url = "/api/v1/snapshots/series/?scope=" + encodeURIComponent(opts.scope);
     Object.keys(opts.params || {}).forEach(function (k) {
@@ -114,6 +180,13 @@
       if (v === undefined || v === null || v === "") return;
       url += "&" + encodeURIComponent(k) + "=" + encodeURIComponent(v);
     });
+
+    // Stack toggles change presentation only — same URL ⇒ reuse cached
+    // payload instead of re-fetching.
+    if (el._snapshotUrl === url && el._snapshotData) {
+      buildChart(el, el._snapshotData, opts);
+      return;
+    }
 
     el.innerHTML = '<div class="text-center text-muted py-4">Loading…</div>';
 
@@ -126,58 +199,9 @@
         return r.json();
       })
       .then(function (data) {
-        if (!data.captured_at || !data.captured_at.length) {
-          emptyState(el);
-          return;
-        }
-        var built = buildSeries(data, stack);
-        if (!built.series.length) {
-          emptyState(el, "All series are zero in this window.");
-          return;
-        }
-        var ts = timestampSeries(data.captured_at, built.series);
-        var annotations = (opts.scope === "workload")
-          ? buildAnnotations(data.events, data.captured_at)
-          : { xaxis: [] };
-
-        var dim = document.documentElement.getAttribute("data-bs-theme") === "dim";
-
-        var chart = new ApexCharts(el, {
-          chart: {
-            type: "area",
-            height: opts.height || 280,
-            stacked: true,
-            toolbar: { show: false },
-            zoom: { enabled: false },
-            background: "transparent",
-            animations: { enabled: false },
-          },
-          theme: { mode: dim ? "dark" : "light" },
-          series: ts,
-          colors: built.palette,
-          stroke: { curve: "stepline", width: 1 },
-          fill: {
-            type: "gradient",
-            gradient: { opacityFrom: 0.55, opacityTo: 0.15 },
-          },
-          dataLabels: { enabled: false },
-          xaxis: {
-            type: "datetime",
-            labels: { datetimeUTC: false },
-          },
-          yaxis: {
-            labels: {
-              formatter: function (v) { return Math.round(v); },
-            },
-            title: { text: "Active findings" },
-          },
-          legend: { position: "top", horizontalAlign: "right" },
-          tooltip: { x: { format: "yyyy-MM-dd HH:mm" } },
-          annotations: annotations,
-          grid: { borderColor: dim ? "#373e47" : "#e9ecef" },
-        });
-        chart.render();
-        el._snapshotChart = chart;
+        el._snapshotUrl = url;
+        el._snapshotData = data;
+        buildChart(el, data, opts);
       })
       .catch(function (err) {
         el.innerHTML = (

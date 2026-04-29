@@ -5,6 +5,16 @@ Worker claims pending IngestQueue items whose matching ImportMark is in
 pending until the importer signals finish. SKIP LOCKED partitions
 work cleanly across parallel workers.
 
+**Inventory gate.** Within a single `import_id`, a non-inventory item
+is only claimable once that import's `inventory` queue row has reached
+`status='done'` (or never existed at all). Non-inventory parsers
+resolve workloads via aliases that the inventory parser populates;
+processing them before inventory lands silently drops the report
+because `_resolve_workload` returns None. Holding non-inventory items
+until inventory is done closes that race. If inventory `failed`, the
+gate stays closed — the queue blocks visibly rather than dropping
+data silently; operator intervention is then expected.
+
 The drain check counts both `pending` AND `processing` rows so a
 worker mid-item still keeps the count > 0 — preventing premature
 reaps.
@@ -37,7 +47,9 @@ def enqueue(
     )
 
 
-# Worker claim: SKIP LOCKED + JOIN to ImportMark.state='draining'.
+# Worker claim: SKIP LOCKED + JOIN to ImportMark.state='draining', plus
+# the inventory gate (see module docstring) — non-inventory items wait
+# for their import's inventory row to reach status='done'.
 _CLAIM_SQL = """
 WITH claimed AS (
     SELECT q.id
@@ -50,6 +62,17 @@ WITH claimed AS (
        AND m.import_id = q.import_id
      WHERE q.status = 'pending'
        AND m.state = 'draining'
+       AND (
+             q.kind = 'inventory'
+             OR NOT EXISTS (
+                 SELECT 1
+                   FROM core_ingestqueue qi
+                  WHERE qi.cluster_name = q.cluster_name
+                    AND qi.import_id   = q.import_id
+                    AND qi.kind        = 'inventory'
+                    AND qi.status     <> 'done'
+             )
+       )
      ORDER BY q.created_at
      FOR UPDATE OF q SKIP LOCKED
      LIMIT %s
