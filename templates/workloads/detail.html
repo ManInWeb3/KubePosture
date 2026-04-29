@@ -1,0 +1,218 @@
+{% extends "base.html" %}
+{% load findings_tags %}
+{% load help_tags %}
+
+{% block title %}{{ kind }}/{{ name }} — KubePosture{% endblock %}
+{% block pretitle %}Workload{% endblock %}
+{% block page_title %}{{ kind }}/{{ name }}{% endblock %}
+
+{% block content %}
+{% help "Workload Detail" %}
+  <p><strong>What it is:</strong> a single workload's posture across every cluster
+  it runs in — image rollout history, finding counts, deploy events, and per-image
+  CVE list. The cluster picker scopes the page to one cluster; the trend chart
+  marks image-set changes (deploy / rollback / admission rewrite) so you can see
+  whether a change moved the needle on findings.</p>
+  <p><strong>Where the data comes from:</strong> Trivy CRDs (vulnerabilities,
+  config, secrets) and Kyverno PolicyReports ingested via webhook + the
+  <code>kubeposture-import</code> CronJob. Snapshot rows feed the trend chart;
+  the image table comes from inventory observations.</p>
+  <p class="mb-0"><strong>How to use:</strong> click an image row to load its
+  active findings below, then click any finding to slide in its full detail panel
+  (description, remediation, references). Use the trend toggles to flip between
+  severity / urgency stacking and to hide heartbeat snapshots if you only want
+  real deploy events.</p>
+{% endhelp %}
+
+<!-- Header -->
+<div class="card mb-3">
+  <div class="card-body">
+    <div class="d-flex align-items-center mb-2">
+      <div class="text-muted small me-2" style="min-width: 6rem;">Cluster</div>
+      <div class="btn-group btn-group-sm" role="group" aria-label="Cluster selector">
+        {% for c in clusters_with_workload %}
+          <a href="{% url 'workloads-detail' kind=kind name=name %}?cluster={{ c }}{% if selected_namespace %}&namespace={{ selected_namespace }}{% endif %}"
+             class="btn {% if selected_cluster == c or clusters_with_workload|length == 1 %}btn-primary{% else %}btn-outline-secondary{% endif %}">{{ c }}</a>
+        {% endfor %}
+        {% if clusters_with_workload|length > 1 %}
+        <a href="{% url 'workloads-detail' kind=kind name=name %}{% if selected_namespace %}?namespace={{ selected_namespace }}{% endif %}"
+           class="btn {% if not selected_cluster %}btn-primary{% else %}btn-outline-secondary{% endif %}">All clusters</a>
+        {% endif %}
+      </div>
+    </div>
+
+    {% if namespaces_with_workload|length > 1 or selected_namespace %}
+    <div class="d-flex align-items-center">
+      <div class="text-muted small me-2" style="min-width: 6rem;">Namespace</div>
+      <div class="btn-group btn-group-sm" role="group" aria-label="Namespace selector">
+        {% for ns in namespaces_with_workload %}
+          <a href="{% url 'workloads-detail' kind=kind name=name %}?{% if selected_cluster %}cluster={{ selected_cluster }}&{% endif %}namespace={{ ns }}"
+             class="btn {% if selected_namespace == ns %}btn-primary{% else %}btn-outline-secondary{% endif %}">{{ ns }}</a>
+        {% endfor %}
+        <a href="{% url 'workloads-detail' kind=kind name=name %}{% if selected_cluster %}?cluster={{ selected_cluster }}{% endif %}"
+           class="btn {% if not selected_namespace %}btn-primary{% else %}btn-outline-secondary{% endif %}">All namespaces</a>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Signals -->
+    <div class="mt-3">
+      <div class="text-muted small">Signals</div>
+      {% for chip in signal_chips %}
+        <span class="badge bg-orange-lt text-orange me-1" title="{{ chip.cluster }}">
+          {{ chip.signal_id }}
+        </span>
+      {% empty %}
+        <span class="text-muted small">No active signals.</span>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+<!-- Trend (per-workload snapshot history) -->
+<div class="card mb-3">
+  <div class="card-header d-flex align-items-center">
+    <h3 class="card-title">CVE Trend</h3>
+    <span class="ms-2 text-muted small">Snapshot history per cluster — image-set events marked.</span>
+    <div class="ms-auto btn-group btn-group-sm" role="group" aria-label="Stack mode" id="trend-stack-toggle">
+      <button type="button" class="btn btn-outline-primary active" data-stack="severity">Severity</button>
+      <button type="button" class="btn btn-outline-primary" data-stack="priority">Urgency</button>
+    </div>
+    <div class="ms-2 btn-group btn-group-sm" role="group" aria-label="Mode" id="trend-mode-toggle">
+      <button type="button" class="btn btn-outline-secondary active" data-mode="all">All snapshots</button>
+      <button type="button" class="btn btn-outline-secondary" data-mode="image_changes_only">Image changes only</button>
+    </div>
+  </div>
+  <div class="card-body">
+    {% for w in scoped_workloads %}
+      {% if scoped_workloads|length > 1 %}
+        <div class="text-muted small mb-1">Cluster: <code>{{ w.cluster.name }}</code></div>
+      {% endif %}
+      <div id="workload-trend-{{ w.pk }}" data-workload-id="{{ w.pk }}" class="mb-3"></div>
+    {% empty %}
+      <p class="text-muted mb-0">No workload in scope.</p>
+    {% endfor %}
+  </div>
+</div>
+<script>
+  (function () {
+    var els = document.querySelectorAll('[id^="workload-trend-"]');
+    var state = { stack: "severity", mode: "all" };
+    function renderAll() {
+      els.forEach(function (el) {
+        renderSnapshotChart({
+          elId: el.id,
+          scope: "workload",
+          stack: state.stack,
+          params: { workload_id: el.dataset.workloadId, mode: state.mode, days: 90 },
+          height: 260,
+        });
+      });
+    }
+    function bindToggle(groupId, key) {
+      var group = document.getElementById(groupId);
+      if (!group) return;
+      group.addEventListener("click", function (ev) {
+        var btn = ev.target.closest("button[data-" + key + "]");
+        if (!btn) return;
+        group.querySelectorAll("button").forEach(function (b) { b.classList.remove("active"); });
+        btn.classList.add("active");
+        state[key] = btn.dataset[key];
+        renderAll();
+      });
+    }
+    bindToggle("trend-stack-toggle", "stack");
+    bindToggle("trend-mode-toggle", "mode");
+    renderAll();
+  })();
+</script>
+
+<!-- Images (master) — click a row to swap the findings panel below -->
+<div class="card mb-3">
+  <div class="card-header">
+    <h3 class="card-title">Images</h3>
+    <span class="ms-2 text-muted small">Click a row to view its findings.</span>
+    <div class="ms-auto">
+      <label class="form-check form-switch mb-0">
+        <input class="form-check-input" type="checkbox"
+               {% if include_history %}checked{% endif %}
+               onchange="window.location.href = this.checked
+                  ? window.location.pathname + '?{% if selected_cluster %}cluster={{ selected_cluster }}&{% endif %}{% if selected_namespace %}namespace={{ selected_namespace }}&{% endif %}include_history=1'
+                  : window.location.pathname + '?{% if selected_cluster %}cluster={{ selected_cluster }}{% endif %}{% if selected_namespace %}{% if selected_cluster %}&{% endif %}namespace={{ selected_namespace }}{% endif %}'">
+        <span class="form-check-label small">Show all ever-deployed images</span>
+      </label>
+    </div>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table table-hover" id="images-master">
+      <thead>
+        <tr>
+          <th>Cluster</th>
+          <th>Namespace</th>
+          <th>Container</th>
+          <th>Image</th>
+          <th>Digest</th>
+          <th>First seen</th>
+          <th>Last seen</th>
+          <th class="text-end">Immediate</th>
+          <th class="text-end">Out-of-Cycle</th>
+          <th class="text-end">Scheduled</th>
+          <th class="text-end">Defer</th>
+          <th class="text-end">Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in image_rows %}
+        <tr class="cursor-pointer{% if active_row and active_row.image.digest == row.image.digest and active_row.cluster.pk == row.cluster.pk %} table-active{% endif %}{% if not row.currently_deployed %} table-secondary{% endif %}"
+            hx-get="{% url 'workloads-detail' kind=kind name=name %}?cluster={{ row.cluster.name }}{% if selected_namespace %}&namespace={{ selected_namespace }}{% endif %}&image={{ row.image.digest }}{% if include_history %}&include_history=1{% endif %}"
+            hx-target="#findings-panel"
+            hx-swap="outerHTML"
+            hx-push-url="true"
+            hx-headers='{"HX-Target": "findings-panel"}'
+            hx-on:click="this.closest('tbody').querySelectorAll('tr.table-active').forEach(function(r){r.classList.remove('table-active');}); this.classList.add('table-active');">
+          <td>{{ row.cluster.name }}</td>
+          <td>{{ row.namespace.name }}</td>
+          <td>
+            <code class="small">{{ row.container_name }}</code>
+            {% if row.init_container %}<span class="badge bg-blue-lt text-blue ms-1" title="initContainer">init</span>{% endif %}
+          </td>
+          <td><span class="text-muted small">{{ row.image.ref|default:row.image.repository }}</span></td>
+          <td><span class="font-monospace small">{{ row.image.digest|truncatechars:23 }}</span></td>
+          <td>{{ row.first_seen_at|date:"Y-m-d H:i" }}</td>
+          <td>{{ row.last_seen_at|date:"Y-m-d H:i" }}</td>
+          {% if row.currently_deployed %}
+          <td class="text-end">{% count_badge row.n_immediate "immediate" %}</td>
+          <td class="text-end">{% count_badge row.n_out_of_cycle "out_of_cycle" %}</td>
+          <td class="text-end">{% count_badge row.n_scheduled "scheduled" %}</td>
+          <td class="text-end">{% count_badge row.n_defer "defer" %}</td>
+          <td class="text-end">{{ row.n_total }}</td>
+          {% else %}
+          <td colspan="5" class="text-center fst-italic text-muted" title="No longer observed in this workload">not deployed</td>
+          {% endif %}
+        </tr>
+        {% empty %}
+        <tr><td colspan="12" class="text-center text-muted p-3">
+          No image observations on record for this workload.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Findings (detail) — scoped to the selected image -->
+{% include "workloads/_findings_panel.html" %}
+
+<!-- Finding-detail offcanvas — body filled by HTMX on row click -->
+<div class="offcanvas offcanvas-end" tabindex="-1" id="finding-detail-offcanvas"
+     aria-labelledby="finding-detail-offcanvas-label"
+     style="--tblr-offcanvas-width: 640px; width: 640px;">
+  <div class="offcanvas-header">
+    <h2 class="offcanvas-title" id="finding-detail-offcanvas-label">Finding</h2>
+    <button type="button" class="btn-close" data-bs-dismiss="offcanvas" aria-label="Close"></button>
+  </div>
+  <div class="offcanvas-body">
+    <p class="text-muted">Click a finding row to load details.</p>
+  </div>
+</div>
+{% endblock %}

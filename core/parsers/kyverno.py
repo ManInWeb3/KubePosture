@@ -1,138 +1,119 @@
+"""Kyverno PolicyReport / ClusterPolicyReport parsers.
+
+Each report carries a list of policy results; failing results emit
+both a Finding (for the dashboard) AND a WorkloadSignal upsert
+(scored by urgency.py via the registry's HOST_ESCAPE / RBAC sets).
+
+`subjects[]` per result identifies the K8s resource the rule fired
+against — this is what we resolve to a Workload via the alias chain.
 """
-Kyverno PolicyReport parsers.
+from __future__ import annotations
 
-A single PolicyReport CRD contains both individual results (pass/fail per
-resource per policy) and a summary (aggregate counts). One parser handles
-both: failures become Findings, summary becomes a PolicyComplianceSnapshot.
+from typing import Any
 
-CRD structure (wgpolicyk8s.io/v1alpha2):
-  kind: PolicyReport | ClusterPolicyReport
-  scope: {apiVersion, kind, name, namespace, uid}  — the evaluated resource
-  results[]: {policy, rule, result, severity, message, source, timestamp, ...}
-  summary: {pass, fail, warn, error, skip}
-
-Kyverno uses lowercase severity (critical, high, medium, low).
-Result values: pass, fail, warn, error, skip.
-
-Ingestion approach: CronJob posts individual PolicyReport CRDs one by one
-(not the List wrapper). Each CRD = one resource evaluated against all policies.
-"""
-from core.constants import Category, Source
-
-KYVERNO_SEVERITY_MAP = {
-    "critical": "Critical",
-    "high": "High",
-    "medium": "Medium",
-    "low": "Low",
-    "info": "Low",
-}
+from core.constants import Category, Severity, Source
+from core.signals import signal_for_kyverno_policy
 
 
-def _map_severity(kyverno_severity: str) -> str:
-    """Map Kyverno lowercase severity to our TextChoices value."""
-    return KYVERNO_SEVERITY_MAP.get(kyverno_severity.lower(), "Medium")
+def _meta(obj: dict) -> dict:
+    return obj.get("metadata") or {}
 
 
-def parse_kyverno_policyreport(cluster_name: str, payload: dict) -> list[dict]:
-    """Parse PolicyReport/ClusterPolicyReport -> findings + summary.
+def _to_severity(s: str) -> str:
+    return {
+        "critical": Severity.CRITICAL.value,
+        "high": Severity.HIGH.value,
+        "medium": Severity.MEDIUM.value,
+        "low": Severity.LOW.value,
+        "info": Severity.INFO.value,
+    }.get((s or "").lower(), Severity.MEDIUM.value)
 
-    Returns a list with:
-    - Finding dicts for each failed/error result (category=policy)
-    - A final dict tagged _kyverno_summary=True with aggregate counts
 
-    The ingest orchestrator uses _kyverno_summary to create a
-    PolicyComplianceSnapshot alongside the findings.
-    """
-    scope = payload.get("scope", {})
-    resource_ns = scope.get("namespace", "")
-    resource_kind = scope.get("kind", "")
-    resource_name = scope.get("name", "")
-
-    # For ClusterPolicyReport, scope may be empty — use metadata
-    if not resource_kind:
-        resource_kind = payload.get("kind", "")
-        resource_name = payload.get("metadata", {}).get("name", "")
-
-    results = payload.get("results", [])
-    summary = payload.get("summary", {})
-
-    findings = []
-    for r in results:
-        result_status = r.get("result", "")
-        # Only failed and error results become findings
-        if result_status not in ("fail", "error"):
-            continue
-
-        policy = r.get("policy", "")
-        rule = r.get("rule", "")
-        severity = _map_severity(r.get("severity", "medium"))
-        title = f"{policy}/{rule}" if rule else policy
-
-        # Use result-level resource if available (some reports have per-result resources)
-        r_resources = r.get("resources", [])
-        if r_resources:
-            res = r_resources[0]
-            r_ns = res.get("namespace", resource_ns)
-            r_kind = res.get("kind", resource_kind)
-            r_name = res.get("name", resource_name)
-        else:
-            r_ns = resource_ns
-            r_kind = resource_kind
-            r_name = resource_name
-
-        findings.append({
-            "title": title,
-            "severity": severity,
-            "vuln_id": policy,
-            "category": Category.POLICY,
-            "source": Source.KYVERNO,
-            "namespace": r_ns,
-            "resource_kind": r_kind,
-            "resource_name": r_name,
-            "details": {
-                "policy": policy,
-                "rule": rule,
-                "result": result_status,
-                "message": r.get("message", ""),
-                "category": r.get("category", ""),
-                "source": r.get("source", "kyverno"),
+def parse_policy_report(obj: dict) -> dict:
+    """Returns:
+        {
+          "kind": "kyverno.PolicyReport" | "kyverno.ClusterPolicyReport",
+          "namespace": "...",
+          "results": [
+            {
+              "subject": (kind, name),
+              "namespace_for_subject": "...",
+              "finding": {...} | None,
+              "signal_id": "kyverno:..." | None,
             },
-        })
+            ...
+          ],
+        }
 
-    # Collect ALL results (pass + fail) for raw_json storage
-    all_results = []
-    for r in results:
-        all_results.append({
-            "policy": r.get("policy", ""),
-            "rule": r.get("rule", ""),
-            "result": r.get("result", ""),
-            "severity": r.get("severity", ""),
-            "message": r.get("message", ""),
-            "category": r.get("category", ""),
-            "namespace": resource_ns,
-            "resource_kind": resource_kind,
-            "resource_name": resource_name,
-        })
+    Pass-result rows are dropped — only failures produce findings/signals.
 
-    # Append summary dict for PolicyComplianceSnapshot
-    total_pass = summary.get("pass", 0) or 0
-    total_fail = summary.get("fail", 0) or 0
-    total_warn = summary.get("warn", 0) or 0
-    total_skip = summary.get("skip", 0) or 0
-    total_error = summary.get("error", 0) or 0
-    total_fail_combined = total_fail + total_error
+    Subject resolution: each result may carry `resources[]` or
+    `subjects[]`. When neither is populated, we fall back to the
+    report's `scope` block (the resource the report is about). For
+    PolicyReports we also walk owner-references via the alias chain
+    (handled at upsert time).
+    """
+    api_kind = obj.get("kind") or ""
+    md = _meta(obj)
+    namespace = md.get("namespace") or ""
+    scope = obj.get("scope") or {}
+    results_out: list[dict] = []
 
-    total = total_pass + total_fail_combined
-    pass_rate = round((total_pass / total * 100), 2) if total > 0 else 0
+    for r in obj.get("results") or []:
+        if (r.get("result") or "").lower() not in ("fail", "error", "warn"):
+            continue
+        policy = r.get("policy") or ""
+        rule = r.get("rule") or ""
+        msg = r.get("message") or ""
+        sev = _to_severity(r.get("severity") or "medium")
+        subjects = r.get("subjects") or r.get("resources") or []
+        if not subjects:
+            # Fall back to the report-level scope.
+            if scope.get("kind") and scope.get("name"):
+                subjects = [scope]
+            else:
+                subjects = [{}]
+        for subj in subjects:
+            sub_kind = subj.get("kind") or ""
+            sub_name = subj.get("name") or ""
+            sub_ns = subj.get("namespace") or namespace
 
-    findings.append({
-        "_kyverno_summary": True,
-        "total_pass": total_pass,
-        "total_fail": total_fail_combined,
-        "total_warn": total_warn,
-        "total_skip": total_skip,
-        "pass_rate": pass_rate,
-        "results": all_results,
-    })
+            sig_id = signal_for_kyverno_policy(policy)
 
-    return findings
+            finding = {
+                "source": Source.KYVERNO.value,
+                "category": Category.POLICY.value,
+                "vuln_id": policy,
+                "pkg_name": "",
+                "installed_version": "",
+                "fixed_version": "",
+                "title": f"{policy}/{rule}" if rule else policy,
+                "severity": sev,
+                "cvss_score": None,
+                "cvss_vector": "",
+                "details": {
+                    "rule": rule,
+                    "message": msg,
+                    "category": r.get("category") or "",
+                    "result": r.get("result"),
+                },
+            }
+
+            results_out.append({
+                "subject": (sub_kind, sub_name),
+                "namespace_for_subject": sub_ns,
+                "finding": finding,
+                "signal_id": sig_id,
+            })
+
+    return {
+        "kind": f"kyverno.{api_kind}" if api_kind else "kyverno.PolicyReport",
+        "namespace": namespace,
+        "results": results_out,
+    }
+
+
+PARSERS_BY_KIND = {
+    "kyverno.PolicyReport": parse_policy_report,
+    "kyverno.ClusterPolicyReport": parse_policy_report,
+}

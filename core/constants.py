@@ -1,70 +1,118 @@
-"""
-Preset enumerations (Convention D5).
+"""Preset enumerations for KubePostureNG.
 
-These values are hardcoded. No configuration UI, no custom values.
-Used by models, parsers, API, and admin throughout the codebase.
+These values are hardcoded by design (Convention D5). Used by models,
+parsers, scoring, API, and admin throughout the codebase.
 """
 from django.db import models
 
 
 class Severity(models.TextChoices):
-    CRITICAL = "Critical", "Critical"
-    HIGH = "High", "High"
-    MEDIUM = "Medium", "Medium"
-    LOW = "Low", "Low"
-
-
-class Status(models.TextChoices):
-    ACTIVE = "active", "Active"
-    ACKNOWLEDGED = "acknowledged", "Acknowledged"
-    RISK_ACCEPTED = "risk_accepted", "Risk Accepted"
-    FALSE_POSITIVE = "false_positive", "False Positive"
-    RESOLVED = "resolved", "Resolved"
+    CRITICAL = "critical", "Critical"
+    HIGH = "high", "High"
+    MEDIUM = "medium", "Medium"
+    LOW = "low", "Low"
+    INFO = "info", "Info"
+    UNKNOWN = "unknown", "Unknown"
 
 
 class Category(models.TextChoices):
     VULNERABILITY = "vulnerability", "Vulnerability"
-    MISCONFIGURATION = "misconfiguration", "Misconfiguration"
-    SECRET = "secret", "Secret"
+    CONFIG = "config", "Configuration"
+    EXPOSED_SECRET = "exposed-secret", "Exposed Secret"
     RBAC = "rbac", "RBAC"
-    INFRA = "infra", "Infrastructure"
-    POLICY = "policy", "Policy"  # Kyverno (Phase 2)
+    COMPLIANCE = "compliance", "Compliance"
+    POLICY = "policy", "Policy"
 
 
 class Source(models.TextChoices):
     TRIVY = "trivy", "Trivy"
     KYVERNO = "kyverno", "Kyverno"
+    KUBEPOSTURE = "kubepostureng-policy", "KubePostureNG"
 
 
-class Priority(models.TextChoices):
+class PriorityBand(models.TextChoices):
     IMMEDIATE = "immediate", "Immediate"
     OUT_OF_CYCLE = "out_of_cycle", "Out-of-Cycle"
     SCHEDULED = "scheduled", "Scheduled"
     DEFER = "defer", "Defer"
 
 
-class Origin(models.TextChoices):
+class Environment(models.TextChoices):
+    PROD = "prod", "Production"
+    STAGING = "staging", "Staging"
+    DEV = "dev", "Development"
+
+
+class WorkloadKind(models.TextChoices):
+    DEPLOYMENT = "Deployment", "Deployment"
+    STATEFULSET = "StatefulSet", "StatefulSet"
+    DAEMONSET = "DaemonSet", "DaemonSet"
+    CRONJOB = "CronJob", "CronJob"
+    JOB = "Job", "Job"
+    POD = "Pod", "Pod"
+
+
+class AliasKind(models.TextChoices):
+    REPLICASET = "ReplicaSet", "ReplicaSet"
+    JOB = "Job", "Job"
+    POD = "Pod", "Pod"
+
+
+class ImportMarkState(models.TextChoices):
+    OPEN = "open", "Open"
+    DRAINING = "draining", "Draining"
+    REAPED = "reaped", "Reaped"
+
+
+class IngestQueueStatus(models.TextChoices):
+    PENDING = "pending", "Pending"
+    PROCESSING = "processing", "Processing"
+    DONE = "done", "Done"
+    FAILED = "failed", "Failed"
+
+
+class FindingActionType(models.TextChoices):
+    ACKNOWLEDGE = "acknowledge", "Acknowledge"
+    ACCEPT = "accept", "Accept"
+    FALSE_POSITIVE = "false_positive", "False Positive"
+    SCHEDULED = "scheduled", "Scheduled"
+
+
+class FindingActionScope(models.TextChoices):
+    PER_FINDING = "per-finding", "Per Finding"
+    PER_VULN_IMAGE = "per-vuln-image", "Per (Vuln, Image)"
+    PER_VULN = "per-vuln", "Per Vuln"
+
+
+class SnapshotScope(models.TextChoices):
+    GLOBAL = "global", "Global"
     CLUSTER = "cluster", "Cluster"
-    CI = "ci", "CI Pipeline"  # Future CI scanning
+    NAMESPACE = "namespace", "Namespace"
+    WORKLOAD = "workload", "Workload"
 
 
-# EPSS threshold for "high exploit probability" in priority decision tree
-EPSS_HIGH_THRESHOLD = 0.1  # 10% — findings above this are considered high-risk
+class ImageSetChangeKind(models.TextChoices):
+    NONE = "none", "No change"
+    ADDED = "added", "Added"
+    REMOVED = "removed", "Removed"
+    REPLACED = "replaced", "Replaced"
+    MIXED = "mixed", "Mixed"
+    FIRST_SEEN = "first_seen", "First seen"
 
-# Severity mapping from Trivy (uppercase) to our TextChoices
+
+# Retention for WorkloadImageObservation rows that have flipped to
+# currently_deployed=False. The inventory reaper sweeps stale rows
+# older than this on every complete cycle. Keeps recent history for
+# audit ("this slot used to run X") without unbounded growth.
+WORKLOAD_OBSERVATION_RETENTION_DAYS = 30
+
+
+# Mapping from Trivy CRD severity strings to Severity enum.
 TRIVY_SEVERITY_MAP = {
     "CRITICAL": Severity.CRITICAL,
     "HIGH": Severity.HIGH,
     "MEDIUM": Severity.MEDIUM,
     "LOW": Severity.LOW,
-    "UNKNOWN": Severity.LOW,  # Map UNKNOWN to Low
-}
-
-# Known Trivy compliance framework IDs (from trivy-operator specs)
-TRIVY_FRAMEWORK_IDS = {
-    "k8s-cis-1.23",
-    "eks-cis-1.4",
-    "k8s-nsa-1.0",
-    "k8s-pss-baseline-0.1",
-    "k8s-pss-restricted-0.1",
+    "INFO": Severity.INFO,
+    "UNKNOWN": Severity.UNKNOWN,
 }

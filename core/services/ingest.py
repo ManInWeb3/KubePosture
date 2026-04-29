@@ -1,221 +1,233 @@
-"""
-Ingest orchestrator — the central entry point for all scanner data.
+"""Ingest dispatch — parse one queued payload, apply to the DB.
 
-Flow:
-  1. Detect envelope format (verb + operatorObject), unwrap if present
-  2. Extract kind and cluster name
-  3. Auto-register cluster (Convention D2)
-  4. Dispatch to parser via KIND_ROUTER
-  5. Dedup + upsert + resolve stale
-  6. Update ScanStatus
-  7. Return summary
-
-See: docs/architecture.md § Data Flow
+`process_item(IngestQueue)` is the public entry point.
 """
-import logging
+from __future__ import annotations
 
 from django.db import transaction
 from django.utils import timezone
 
-from core.constants import Source, Status
-from core.parsers import KIND_ROUTER
-from core.parsers.metadata import parse_cluster_meta
-from core.services.dedup import resolve_stale, upsert_findings
+from core.constants import ImportMarkState
+from core.models import (
+    Cluster,
+    Image,
+    ImportMark,
+    IngestQueue,
+    Namespace,
+    Workload,
+    WorkloadAlias,
+    WorkloadImageObservation,
+    WorkloadSignal,
+)
+from core.parsers import inventory as inventory_parser
+from core.parsers import kyverno as kyverno_parser
+from core.parsers import trivy as trivy_parser
+from core.services.dedup import upsert_findings
+from core.signals import SIGNALS
 
-logger = logging.getLogger(__name__)
+
+# ── Helpers --------------------------------------------------------
+
+def _get_cluster(name: str) -> Cluster | None:
+    return Cluster.objects.filter(name=name).first()
 
 
-class IngestError(Exception):
-    """Raised when ingest fails due to bad data."""
+def _get_or_create_image(*, ref: str, digest: str) -> Image | None:
+    """Return / create an Image row keyed by digest. Empty digest → None.
 
-
-def get_or_create_cluster(name: str):
-    """Auto-register cluster on first ingest (Convention D2).
-
-    Only environment is auto-parsed from the cluster name. All other
-    metadata (provider, region, project) defaults to empty and is set
-    in Django admin when needed.
+    Don't overwrite a longer-already-stored ref with a shorter one —
+    the inventory typically has the fully-qualified ref while Trivy's
+    artifact often omits the registry. Same digest, different display
+    forms; we keep the more informative one.
     """
-    from core.models import Cluster
-
-    meta = parse_cluster_meta(name)
-    cluster, created = Cluster.objects.get_or_create(
-        name=name,
-        defaults={"environment": meta["environment"]},
+    if not digest:
+        return None
+    img, _ = Image.objects.get_or_create(
+        digest=digest,
+        defaults={"ref": ref or "", "deployed": True},
     )
-    if created:
-        logger.info(
-            "Auto-registered cluster: %s (environment=%s)", name, meta["environment"]
-        )
-    return cluster
+    if ref and ref != img.ref and len(ref) > len(img.ref or ""):
+        img.ref = ref
+        img.save(update_fields=["ref"])
+    return img
 
 
-def _unwrap_envelope(payload: dict) -> tuple[str | None, dict]:
-    """Handle webhook envelope format (OPERATOR_SEND_DELETED_REPORTS).
+def _resolve_workload(
+    cluster: Cluster, namespace_name: str, kind: str, name: str
+) -> Workload | None:
+    """Walk alias chain to top-level workload. Returns None if not found."""
+    if not name:
+        return None
+    ns = Namespace.objects.filter(cluster=cluster, name=namespace_name).first()
+    if ns is None and namespace_name:
+        return None  # cluster-scoped namespace = ""
+    if ns is not None:
+        wl = Workload.objects.filter(
+            cluster=cluster, namespace=ns, kind=kind, name=name
+        ).first()
+        if wl:
+            return wl
+    # Try alias.
+    alias = WorkloadAlias.objects.filter(
+        cluster=cluster,
+        namespace=ns,
+        alias_kind=kind,
+        alias_name=name,
+    ).select_related("target_workload").first() if ns else None
+    if alias:
+        return alias.target_workload
+    return None
 
-    Returns (verb, crd_payload). If no envelope, returns (None, original).
-    """
-    if "operatorObject" in payload and "verb" in payload:
-        return payload["verb"], payload["operatorObject"]
-    return None, payload
 
-
-def _extract_cluster_name(payload: dict, header_value: str | None) -> str:
-    """Extract cluster name from header or CRD metadata labels."""
-    if header_value:
-        return header_value
-
-    # Try to get from CRD metadata
-    labels = payload.get("metadata", {}).get("labels", {})
-    # Trivy sets cluster name in some label configurations
-    for key in ("trivy-operator.cluster.name", "cluster"):
-        if key in labels:
-            return labels[key]
-
-    raise IngestError(
-        "Cluster name required: set X-Cluster-Name header or include in CRD metadata"
-    )
-
-
-def ingest_scan(payload: dict, cluster_name_header: str | None = None) -> dict:
-    """Main ingest entry point.
-
-    Args:
-        payload: Raw CRD JSON (or envelope with verb + operatorObject)
-        cluster_name_header: Value of X-Cluster-Name header (optional)
-
-    Returns:
-        Summary dict with counts and metadata
-    """
-    from core.models import RawReport, ScanStatus
-
-    # 1. Unwrap envelope
-    verb, crd = _unwrap_envelope(payload)
-    if verb == "delete":
-        logger.debug("Ignoring delete webhook event")
-        return {"status": "skipped", "reason": "delete event"}
-
-    # 2. Extract kind
-    kind = crd.get("kind", "")
-    if not kind:
-        raise IngestError("Missing 'kind' field in CRD payload")
-
-    # 3. Find parser
-    parser = KIND_ROUTER.get(kind)
-    if not parser:
-        raise IngestError(f"Unknown CRD kind: {kind}")
-
-    # 4. Extract cluster name
-    cluster_name = _extract_cluster_name(crd, cluster_name_header)
-    cluster = get_or_create_cluster(cluster_name)
-
-    # 5. Parse
-    finding_dicts = parser(cluster_name, crd)
-
-    # 6a. Handle compliance reports — structured processing
-    if finding_dicts and finding_dicts[0].get("_compliance"):
-        from core.services.compliance import save_compliance_snapshot
-
-        return save_compliance_snapshot(cluster, finding_dicts[0], crd)
-
-    # 6b. Handle SBOM reports — component upsert
-    if finding_dicts and finding_dicts[0].get("_sbom"):
-        from core.services.sbom import save_sbom_components
-
-        return save_sbom_components(cluster, finding_dicts[0])
-
-    # 6c. Handle raw storage (future CRD types)
-    if finding_dicts and finding_dicts[0].get("_store_raw"):
-        raw_kind = finding_dicts[0].get("kind", kind)
-        RawReport.objects.create(
-            cluster=cluster,
-            kind=raw_kind,
-            source=Source.TRIVY,
-            raw_json=crd,
-        )
-        logger.info("Stored raw %s for %s", raw_kind, cluster_name)
-        return {
-            "status": "stored_raw",
-            "cluster": cluster_name,
-            "kind": raw_kind,
-            "source": Source.TRIVY,
-        }
-
-    # 7. Handle Kyverno PolicyReport — mixed findings + summary
-    kyverno_summary = None
-    if finding_dicts and finding_dicts[-1].get("_kyverno_summary"):
-        kyverno_summary = finding_dicts.pop()
-        # Remaining items are finding dicts (failures only)
-
-    # 8. Detect source from findings
-    source = Source.TRIVY
-    if finding_dicts and finding_dicts[0].get("source") == Source.KYVERNO:
-        source = Source.KYVERNO
-
-    # 9-12: Upsert + resolve stale + snapshot + scan status — all in one transaction
-    # If any step fails, everything rolls back (no orphaned findings).
-    from core.models import Finding
-
-    with transaction.atomic():
-        # 9. Dedup + upsert findings
-        stats = upsert_findings(cluster, source, finding_dicts)
-
-        # 10. Resolve stale findings — scoped to the same resource
-        # Skip for Kyverno: a PolicyReport spans multiple resources,
-        # so per-resource stale resolution doesn't apply per-CRD.
-        hashes = stats.pop("hashes")
-        scope = stats.pop("scope")
-        resolved = 0
-        if source == Source.TRIVY and scope:
-            resolved = resolve_stale(cluster, source, hashes, scope)
-
-        # 11. Save Kyverno PolicyComplianceSnapshot if present
-        if kyverno_summary:
-            from core.models.kyverno import PolicyComplianceSnapshot
-
-            now = timezone.now()
-            results_data = kyverno_summary.get("results", [])
-            PolicyComplianceSnapshot.objects.create(
-                cluster=cluster,
-                scanned_at=now,
-                total_pass=kyverno_summary["total_pass"],
-                total_fail=kyverno_summary["total_fail"],
-                total_warn=kyverno_summary["total_warn"],
-                total_skip=kyverno_summary["total_skip"],
-                pass_rate=kyverno_summary["pass_rate"],
-                raw_json={"results": results_data},
-            )
-
-        # 12. Update ScanStatus
-        now = timezone.now()
-        ScanStatus.objects.update_or_create(
-            cluster=cluster,
-            source=source,
-            defaults={
-                "last_ingest": now,
-                "finding_count": Finding.objects.filter(
-                    cluster=cluster, source=source, status=Status.ACTIVE
-                ).count(),
-            },
+def _upsert_signal(workload: Workload, signal_id: str) -> None:
+    if signal_id not in SIGNALS:
+        return
+    obj = WorkloadSignal.objects.filter(workload=workload, signal_id=signal_id).first()
+    if obj:
+        obj.currently_active = True
+        obj.save(update_fields=["currently_active", "last_seen_at"])
+    else:
+        WorkloadSignal.objects.create(
+            workload=workload,
+            signal_id=signal_id,
+            currently_active=True,
         )
 
-    result = {
-        "status": "success",
-        "cluster": cluster_name,
-        "kind": kind,
-        "source": source,
-        "created": stats["created"],
-        "updated": stats["updated"],
-        "reactivated": stats["reactivated"],
-        "resolved": resolved,
-    }
-    logger.info(
-        "Ingested %s from %s: %d created, %d updated, %d reactivated, %d resolved",
-        kind,
-        cluster_name,
-        stats["created"],
-        stats["updated"],
-        stats["reactivated"],
-        resolved,
+
+# ── Per-kind handlers ---------------------------------------------
+
+@transaction.atomic
+def _process_inventory(item: IngestQueue) -> dict:
+    cluster = _get_cluster(item.cluster_name)
+    if cluster is None:
+        return {"skipped": "cluster_not_registered"}
+
+    mark = ImportMark.objects.filter(
+        cluster=cluster, kind="inventory", import_id=item.import_id
+    ).first()
+    started_at = mark.started_at if mark else timezone.now()
+
+    staging = inventory_parser.parse_envelope(item.raw_json or {}, cluster)
+    counters = inventory_parser.persist(staging, mark_started_at=started_at)
+    return counters
+
+
+def _process_trivy_per_workload(item: IngestQueue, parser_func) -> dict:
+    cluster = _get_cluster(item.cluster_name)
+    if cluster is None:
+        return {"skipped": "cluster_not_registered"}
+    parsed = parser_func(item.raw_json or {})
+    if not parsed:
+        return {"skipped": "empty"}
+
+    workload = None
+    if not parsed.get("cluster_scoped"):
+        workload = _resolve_workload(
+            cluster,
+            parsed.get("namespace") or "",
+            parsed.get("resource_kind") or "",
+            parsed.get("resource_name") or "",
+        )
+        if workload is None and parsed.get("namespace"):
+            return {"skipped": "workload_not_resolved", "kind": item.kind}
+
+    image = _get_or_create_image(
+        ref=parsed.get("image_ref") or "",
+        digest=parsed.get("image_digest") or "",
     )
-    return result
+    if image and workload:
+        WorkloadImageObservation.objects.get_or_create(
+            workload=workload,
+            image=image,
+            container_name=parsed.get("container_name") or "",
+        )
+
+    # ConfigAuditReport produces signal upserts, not Findings — its
+    # `findings` list is dropped here. Other Trivy kinds emit findings
+    # normally.
+    findings_to_upsert: list = []
+    if item.kind != "trivy.ConfigAuditReport":
+        findings_to_upsert = parsed.get("findings") or []
+
+    created, updated = upsert_findings(
+        cluster=cluster,
+        workload=workload,
+        image=image,
+        findings=findings_to_upsert,
+        observation_time=item.created_at or timezone.now(),
+    )
+
+    # Signal upserts (ConfigAudit / RBAC reports).
+    if workload:
+        for sid in parsed.get("signal_ids") or set():
+            _upsert_signal(workload, sid)
+
+    # Image OS metadata (Vuln reports).
+    if image and parsed.get("os_family"):
+        changed_fields = []
+        if image.os_family != parsed["os_family"]:
+            image.os_family = parsed["os_family"]
+            changed_fields.append("os_family")
+        if image.os_version != parsed.get("os_version") or "":
+            image.os_version = parsed.get("os_version") or ""
+            changed_fields.append("os_version")
+        if image.base_eosl != parsed.get("base_eosl", False):
+            image.base_eosl = parsed.get("base_eosl", False)
+            changed_fields.append("base_eosl")
+        if changed_fields:
+            image.save(update_fields=changed_fields)
+
+    return {"created": created, "updated": updated}
+
+
+def _process_kyverno(item: IngestQueue) -> dict:
+    """Kyverno PolicyReport → WorkloadSignal upserts only.
+
+    Kyverno fail-results don't produce Finding rows in v1 (Findings come
+    from vuln / secret / RBAC scans). The fail tells us a registry
+    signal is currently active on the targeted workload.
+    """
+    cluster = _get_cluster(item.cluster_name)
+    if cluster is None:
+        return {"skipped": "cluster_not_registered"}
+    parsed = kyverno_parser.parse_policy_report(item.raw_json or {})
+    if not parsed["results"]:
+        return {"signals_set": 0}
+
+    signals_set = 0
+    for r in parsed["results"]:
+        sub_kind, sub_name = r["subject"]
+        sub_ns = r["namespace_for_subject"]
+        sig_id = r["signal_id"]
+
+        if not sig_id:
+            continue
+        if sub_kind in ("ClusterRole", "ClusterRoleBinding") or not sub_ns:
+            # Cluster-scoped policy result has no workload to attach a
+            # signal to in v1; skip silently.
+            continue
+
+        workload = _resolve_workload(cluster, sub_ns, sub_kind, sub_name)
+        if workload is None:
+            continue
+
+        _upsert_signal(workload, sig_id)
+        signals_set += 1
+
+    return {"signals_set": signals_set}
+
+
+# ── Top-level dispatch --------------------------------------------
+
+def process_item(item: IngestQueue) -> dict:
+    kind = item.kind
+    if kind == "inventory":
+        return _process_inventory(item)
+
+    if kind in trivy_parser.PARSERS_BY_KIND:
+        return _process_trivy_per_workload(item, trivy_parser.PARSERS_BY_KIND[kind])
+
+    if kind in kyverno_parser.PARSERS_BY_KIND:
+        return _process_kyverno(item)
+
+    return {"skipped": "unknown_kind", "kind": kind}

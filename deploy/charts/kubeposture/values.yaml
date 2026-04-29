@@ -135,6 +135,23 @@ cronJobs:
         memory: 256Mi
     activeDeadlineSeconds: 300
 
+  enrichVex:
+    enabled: true
+    # Don't seed on install — OSV query cost scales with #distinct CVEs in
+    # Finding, which is zero on a fresh DB. First scheduled run after real
+    # ingest will populate it.
+    initialRun: false
+    schedule: "45 3 * * *"      # daily 03:45 UTC
+    command: ["python", "manage.py", "enrich_vex"]
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    activeDeadlineSeconds: 900  # OSV lookups are per-CVE; up to 500 CVEs/run
+
   expireRiskAcceptances:
     enabled: true
     schedule: "0 4 * * *"       # daily 04:00 UTC
@@ -161,6 +178,39 @@ cronJobs:
         memory: 256Mi
     activeDeadlineSeconds: 120
 
+  # Safety-net for import-level auto-resolve. The queue processor reaps
+  # inline after each item transitions to DONE (zero-latency); this
+  # CronJob covers the case where the processor restarts or misses a
+  # signal, so a stranded ImportMark doesn't leak findings indefinitely.
+  reapUnobservedFindings:
+    enabled: true
+    schedule: "7 * * * *"       # hourly at :07 to stagger from other crons
+    command: ["python", "manage.py", "reap_unobserved_findings"]
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 300m
+        memory: 256Mi
+    activeDeadlineSeconds: 300
+
+  # Daily FindingSnapshot rollup for trending. Scheduled after the
+  # reaper's hourly cycles and the enrichment runs have settled so the
+  # captured counts reflect end-of-day state, not mid-import churn.
+  snapshotFindings:
+    enabled: true
+    schedule: "30 6 * * *"      # daily 06:30 UTC (after reaper + enrichment)
+    command: ["python", "manage.py", "snapshot_findings"]
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 300m
+        memory: 256Mi
+    activeDeadlineSeconds: 300
+
   recalculatePriorities:
     enabled: true
     schedule: "0 6 * * 0"       # weekly Sunday 06:00 UTC
@@ -184,7 +234,8 @@ adminUser:
 # ── Post-install/upgrade Job ───────────────────────────────────
 
 setupJob:
-  # Runs: migrate, setup_roles, load_frameworks, ensure_adminuser (all idempotent)
+  # Runs: migrate, setup_roles, load_frameworks,
+  # ensure_adminuser (all idempotent)
   resources:
     requests:
       cpu: 100m

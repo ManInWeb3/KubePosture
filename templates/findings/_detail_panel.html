@@ -1,0 +1,159 @@
+{% load findings_tags %}
+<div class="offcanvas-header">
+  <div>
+    <h2 class="offcanvas-title mb-1">
+      {% if f.vuln_id %}<code>{{ f.vuln_id }}</code>{% else %}Finding #{{ f.pk }}{% endif %}
+    </h2>
+    <div class="d-flex flex-wrap gap-2 align-items-center">
+      {% severity_badge f.severity %}
+      {% priority_badge f.effective_priority %}
+      {% if f.kev_listed %}<span class="badge bg-danger-lt text-danger" title="CISA Known Exploited Vulnerability">KEV</span>{% endif %}
+      <span class="badge bg-azure-lt text-azure">{{ f.source }}</span>
+      <span class="badge bg-secondary-lt text-secondary">{{ f.category }}</span>
+    </div>
+  </div>
+  <button type="button" class="btn-close ms-auto" data-bs-dismiss="offcanvas" aria-label="Close"></button>
+</div>
+<div class="offcanvas-body">
+  <p class="mb-3" style="word-break: break-word;">{{ f.title }}</p>
+
+  <div class="datagrid mb-3">
+    {% if f.pkg_name %}
+    <div class="datagrid-item">
+      <div class="datagrid-title">Package</div>
+      <div class="datagrid-content"><code>{{ f.pkg_name }}</code></div>
+    </div>
+    {% endif %}
+    {% if f.installed_version %}
+    <div class="datagrid-item">
+      <div class="datagrid-title">Installed</div>
+      <div class="datagrid-content"><code>{{ f.installed_version }}</code></div>
+    </div>
+    {% endif %}
+    {% if f.fixed_version %}
+    <div class="datagrid-item">
+      <div class="datagrid-title">Fixed in</div>
+      <div class="datagrid-content"><code class="text-success">{{ f.fixed_version }}</code></div>
+    </div>
+    {% endif %}
+    {% if f.cvss_score is not None %}
+    <div class="datagrid-item">
+      <div class="datagrid-title">CVSS</div>
+      <div class="datagrid-content">
+        {{ f.cvss_score }}
+        {% if f.cvss_vector %}<div class="small text-muted font-monospace" style="word-break: break-all;">{{ f.cvss_vector }}</div>{% endif %}
+      </div>
+    </div>
+    {% endif %}
+    {% if f.epss_score is not None %}
+    <div class="datagrid-item">
+      <div class="datagrid-title">EPSS</div>
+      <div class="datagrid-content">
+        {% epss_badge f.epss_score %}
+        {% if f.epss_percentile is not None %}
+          <span class="text-muted small ms-1">p{{ f.epss_percentile|floatformat:1 }}</span>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
+    <div class="datagrid-item">
+      <div class="datagrid-title">Cluster</div>
+      <div class="datagrid-content">{{ f.cluster.name }}</div>
+    </div>
+    {% if f.workload %}
+    <div class="datagrid-item">
+      <div class="datagrid-title">Namespace</div>
+      <div class="datagrid-content">{{ f.workload.namespace.name }}</div>
+    </div>
+    <div class="datagrid-item">
+      <div class="datagrid-title">Workload</div>
+      <div class="datagrid-content"><code>{{ f.workload.kind }}/{{ f.workload.name }}</code></div>
+    </div>
+    {% endif %}
+    {% if resource_kind or resource_name %}
+    <div class="datagrid-item">
+      <div class="datagrid-title">Resource</div>
+      <div class="datagrid-content"><code>{{ resource_kind }}/{{ resource_name }}</code></div>
+    </div>
+    {% endif %}
+    {% if f.image %}
+    <div class="datagrid-item">
+      <div class="datagrid-title">Image</div>
+      <div class="datagrid-content">
+        <div style="word-break: break-all;">{{ f.image.ref|default:f.image.repository }}</div>
+        <div class="small text-muted font-monospace" style="word-break: break-all;">{{ f.image.digest }}</div>
+      </div>
+    </div>
+    {% endif %}
+    <div class="datagrid-item">
+      <div class="datagrid-title">First seen</div>
+      <div class="datagrid-content">{{ f.first_seen|date:"Y-m-d H:i" }}</div>
+    </div>
+    <div class="datagrid-item">
+      <div class="datagrid-title">Last seen</div>
+      <div class="datagrid-content">{{ f.last_seen|date:"Y-m-d H:i" }}</div>
+    </div>
+    {% if published_date %}
+    <div class="datagrid-item">
+      <div class="datagrid-title">Published</div>
+      <div class="datagrid-content">{{ published_date }}</div>
+    </div>
+    {% endif %}
+    {% if last_modified_date %}
+    <div class="datagrid-item">
+      <div class="datagrid-title">Modified</div>
+      <div class="datagrid-content">{{ last_modified_date }}</div>
+    </div>
+    {% endif %}
+  </div>
+
+  {% if description %}
+  <div class="mb-3">
+    <h4 class="mb-1">Description</h4>
+    <p class="mb-0" style="white-space: pre-wrap; word-break: break-word;">{{ description }}</p>
+  </div>
+  {% endif %}
+
+  {% if remediation %}
+  <div class="mb-3">
+    <h4 class="mb-1">Remediation</h4>
+    <p class="mb-0" style="white-space: pre-wrap; word-break: break-word;">{{ remediation }}</p>
+  </div>
+  {% endif %}
+
+  {% if messages %}
+  <div class="mb-3">
+    <h4 class="mb-1">Messages</h4>
+    <ul class="mb-0">
+      {% for m in messages %}
+        <li style="white-space: pre-wrap; word-break: break-word;">{{ m }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {% if primary_link or links %}
+  <div class="mb-3">
+    <h4 class="mb-1">References</h4>
+    <ul class="mb-0">
+      {% if primary_link %}<li><a href="{{ primary_link }}" target="_blank" rel="noopener noreferrer">{{ primary_link }}</a></li>{% endif %}
+      {% for l in links %}
+        <li><a href="{{ l }}" target="_blank" rel="noopener noreferrer">{{ l }}</a></li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {% if extra_details %}
+  <details class="mb-3">
+    <summary class="text-muted small">Raw details JSON</summary>
+    <pre class="small mt-2 p-2 bg-body-tertiary rounded" style="white-space: pre-wrap; word-break: break-word;">{% for k, v in extra_details.items %}{{ k }}: {{ v }}
+{% endfor %}</pre>
+  </details>
+  {% endif %}
+
+  <div class="text-muted small mt-3">
+    <code>hash {{ f.hash_code|truncatechars:16 }}</code>
+    <span class="ms-2">finding #{{ f.pk }}</span>
+  </div>
+</div>

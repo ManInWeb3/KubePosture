@@ -1,101 +1,225 @@
 {% extends "base.html" %}
+{% load help_tags %}
 {% load findings_tags %}
 
-{% block title %}{{ short_image }} — KubePosture{% endblock %}
-{% block pretitle %}<a href="{% url 'image-list' %}" class="text-decoration-none">Images</a>{% endblock %}
-{% block page_title %}
-  <span class="font-monospace">{{ short_image }}</span>
-{% endblock %}
+{% block title %}{{ payload.ref }} — Image{% endblock %}
+{% block pretitle %}Image{% endblock %}
+{% block page_title %}<span class="font-monospace">{{ payload.ref }}</span>{% endblock %}
 
 {% block content %}
-<!-- Stats cards -->
 <div class="row row-deck row-cards mb-3">
-  <div class="col-sm-3">
+  <div class="col">
     <div class="card">
-      <div class="card-body text-center">
-        <div class="h1 mb-0">{{ total }}</div>
-        <div class="text-muted">Total CVEs</div>
-      </div>
-    </div>
-  </div>
-  <div class="col-sm-3">
-    <div class="card{% if critical %} border-danger{% endif %}">
-      <div class="card-body text-center">
-        <div class="h1 mb-0 {% if critical %}text-danger{% endif %}">{{ critical }}</div>
-        <div class="text-muted">Critical</div>
-      </div>
-    </div>
-  </div>
-  <div class="col-sm-3">
-    <div class="card">
-      <div class="card-body text-center">
-        <div class="h1 mb-0 text-orange">{{ high }}</div>
-        <div class="text-muted">High</div>
-      </div>
-    </div>
-  </div>
-  <div class="col-sm-3">
-    <div class="card">
-      <div class="card-body text-center">
-        <div class="h1 mb-0 text-success">{{ fixable }}</div>
-        <div class="text-muted">Fixable</div>
+      <div class="card-body">
+        <div class="row text-center">
+          <div class="col">
+            <div class="h1">{{ payload.os_total }}</div>
+            <div class="text-muted">OS-package CVEs</div>
+          </div>
+          <div class="col">
+            <div class="h1">{{ payload.library_total }}</div>
+            <div class="text-muted">Library CVEs</div>
+          </div>
+          <div class="col">
+            <div class="h1">{{ payload.workloads|length }}</div>
+            <div class="text-muted">Affected workloads</div>
+          </div>
+          <div class="col">
+            <div class="h1">{{ payload.digests|length }}</div>
+            <div class="text-muted">Digest(s) currently deployed</div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
 </div>
 
-<!-- Full image reference + link to findings -->
 <div class="card mb-3">
-  <div class="card-body py-2 d-flex align-items-center justify-content-between">
-    <div>
-      <small class="text-muted">Full reference:</small>
-      <code>{{ image_ref }}</code>
+  <div class="card-body">
+    <div class="datagrid">
+      <div class="datagrid-item">
+        <div class="datagrid-title">OS</div>
+        <div class="datagrid-content">
+          {% if payload.os_family %}
+            {{ payload.os_family }} {{ payload.os_version }}
+            {% if payload.base_eosl %}<span class="badge bg-danger-lt text-danger ms-1" title="Trivy flags this base OS as end-of-service-life">EOSL</span>{% endif %}
+          {% else %}
+            <span class="text-muted">—</span>
+          {% endif %}
+        </div>
+      </div>
+      <div class="datagrid-item" style="flex: 1 0 60%;">
+        <div class="datagrid-title">Digest(s)</div>
+        <div class="datagrid-content">
+          {% for d in payload.digests %}
+            <div class="font-monospace small">{{ d|truncatechars:72 }}</div>
+          {% empty %}
+            <span class="text-muted">—</span>
+          {% endfor %}
+        </div>
+      </div>
     </div>
-    <a href="{% url 'findings-list' %}?image={{ image_ref }}" class="btn btn-sm btn-outline-primary"
-       title="View all findings for this image in the Findings page">
-      View in Findings
-    </a>
   </div>
 </div>
 
-<!-- CVE table -->
-<div class="card">
-  <div class="card-header"><h3 class="card-title">Vulnerabilities ({{ total }}{% if total > 200 %}, showing first 200{% endif %})</h3></div>
+<!-- Affected workloads -->
+<div class="card mb-3">
+  <div class="card-header"><h3 class="card-title">Affected workloads</h3></div>
   <div class="table-responsive">
-    <table class="table table-vcenter card-table table-sm">
+    <table class="table table-vcenter card-table">
       <thead>
         <tr>
-          <th>Severity</th>
-          <th>CVE</th>
-          <th>Component</th>
-          <th>Installed</th>
-          <th>Fix Available</th>
-          <th>EPSS</th>
+          <th>Workload</th>
           <th>Cluster</th>
+          <th>Namespace</th>
+          <th>Exposure</th>
+          <th>Escalation</th>
         </tr>
       </thead>
       <tbody>
-        {% for f in findings %}
+        {% for wl in payload.workloads %}
         <tr>
-          <td>{% severity_badge f.severity %}</td>
           <td>
-            <a href="{% url 'findings-detail' f.pk %}">{{ f.vuln_id|default:"—" }}</a>
-            {% if f.kev_listed %}<span class="badge bg-danger-lt text-danger ms-1">KEV</span>{% endif %}
+            <a href="{% url 'workload-detail' pk=wl.pk %}">
+              <strong>{{ wl.kind }}/{{ wl.name }}</strong>
+            </a>
           </td>
-          <td class="text-muted">{{ f.details.component_name|default:"" }}</td>
-          <td class="font-monospace text-muted" style="font-size:0.8rem">{{ f.details.installed_version|default:"" }}</td>
+          <td>{{ wl.cluster.name }}</td>
+          <td>{{ wl.namespace.name|default:"-" }}</td>
           <td>
-            {% if f.details.fixed_version %}
-              <span class="font-monospace text-success" style="font-size:0.8rem">{{ f.details.fixed_version }}</span>
+            {% if wl.directly_exposed %}
+              <span class="badge bg-red-lt">{{ wl.exposure_type }}</span>
             {% else %}
-              <span class="text-muted">—</span>
+              <span class="text-muted">{{ wl.exposure_type }}</span>
             {% endif %}
           </td>
-          <td>{% if f.epss_score != None %}{% epss_badge f.epss_score %}{% endif %}</td>
-          <td class="text-muted">{{ f.cluster.name|default:"" }}</td>
+          <td>
+            {% if wl.has_privileged_container %}<span class="badge bg-red-lt">privileged</span>{% endif %}
+            {% if wl.host_network %}<span class="badge bg-orange-lt">hostNet</span>{% endif %}
+            {% if wl.host_pid %}<span class="badge bg-orange-lt">hostPID</span>{% endif %}
+            {% if wl.has_rbac_finding %}<span class="badge bg-orange-lt">rbac</span>{% endif %}
+          </td>
         </tr>
         {% empty %}
-        <tr><td colspan="7" class="text-center text-muted py-4">No vulnerabilities found.</td></tr>
+        <tr><td colspan="5" class="text-center text-muted">No workloads resolved yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Findings -->
+<div class="card">
+  <div class="card-header">
+    <h3 class="card-title">Findings</h3>
+    <span class="ms-2 text-muted small">Active + acknowledged findings on every digest currently deployed under this ref.</span>
+  </div>
+
+  <div class="card-body border-bottom">
+    <div class="row g-2 align-items-end">
+      <div class="col-auto">
+        <label class="form-label small mb-1">Priority</label>
+        <select data-filter-table="image-findings-tbl" data-filter-attr="priority" class="form-select form-select-sm">
+          <option value="">all</option>
+          <option value="immediate">IMMEDIATE</option>
+          <option value="out_of_cycle">OUT-OF-CYCLE</option>
+          <option value="scheduled">SCHEDULED</option>
+          <option value="defer">DEFER</option>
+        </select>
+      </div>
+      <div class="col-auto">
+        <label class="form-label small mb-1">Severity</label>
+        <select data-filter-table="image-findings-tbl" data-filter-attr="severity" class="form-select form-select-sm">
+          <option value="">all</option>
+          <option value="Critical">Critical</option>
+          <option value="High">High</option>
+          <option value="Medium">Medium</option>
+          <option value="Low">Low</option>
+        </select>
+      </div>
+      <div class="col-auto">
+        <label class="form-label small mb-1">Ownership</label>
+        <select data-filter-table="image-findings-tbl" data-filter-attr="package_type" class="form-select form-select-sm">
+          <option value="">all</option>
+          <option value="os">Platform (os)</option>
+          <option value="library">App (library)</option>
+        </select>
+      </div>
+      <div class="col-auto">
+        <label class="form-label small mb-1">Has fix</label>
+        <select data-filter-table="image-findings-tbl" data-filter-attr="fix" class="form-select form-select-sm">
+          <option value="">all</option>
+          <option value="yes">yes</option>
+          <option value="no">no</option>
+        </select>
+      </div>
+      <div class="col-auto">
+        <label class="form-label small mb-1">KEV</label>
+        <select data-filter-table="image-findings-tbl" data-filter-attr="kev" class="form-select form-select-sm">
+          <option value="">all</option>
+          <option value="yes">yes</option>
+        </select>
+      </div>
+      <div class="col-auto">
+        <button type="button" data-filter-reset="image-findings-tbl" class="btn btn-sm btn-outline-secondary">Reset</button>
+      </div>
+      <div class="col">
+        <div class="text-muted small text-end">
+          <span data-filter-count="image-findings-tbl">{{ payload.findings|length }}</span> / {{ payload.findings|length }} findings
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="table-responsive">
+    <table id="image-findings-tbl" class="table table-vcenter card-table" data-sortable>
+      <thead>
+        <tr>
+          <th class="sortable sort-asc">Priority</th>
+          <th class="sortable">Severity</th>
+          <th class="sortable">Own.</th>
+          <th class="sortable">CVE</th>
+          <th class="sortable">Component</th>
+          <th class="sortable">Fix</th>
+          <th class="sortable text-end">EPSS</th>
+          <th class="sortable">KEV</th>
+          <th class="sortable">Container</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for f in payload.findings %}
+        <tr data-priority="{{ f.priority }}"
+            data-severity="{{ f.severity }}"
+            data-package_type="{{ f.package_type }}"
+            data-fix="{% if f.fixed_version %}yes{% else %}no{% endif %}"
+            data-kev="{% if f.kev_listed %}yes{% else %}no{% endif %}">
+          <td data-sort="{{ f.priority_rank }}">
+            <a href="{% url 'findings-detail' pk=f.id %}">{% priority_badge f.priority %}</a>
+          </td>
+          <td data-sort="{{ f.severity_rank }}">{% severity_badge f.severity %}</td>
+          <td>
+            {% if f.package_type == "os" %}<span class="badge bg-purple-lt">Platform</span>
+            {% elif f.package_type == "library" %}<span class="badge bg-green-lt">App</span>
+            {% else %}<span class="text-muted">—</span>{% endif %}
+          </td>
+          <td><code class="small">{{ f.vuln_id }}</code></td>
+          <td>{{ f.component_name|default:"—" }}</td>
+          <td>
+            {% if f.fixed_version %}<code class="small">{{ f.fixed_version }}</code>
+            {% else %}<span class="text-muted">no fix</span>{% endif %}
+          </td>
+          <td class="text-end" data-sort="{{ f.epss_score|default_if_none:0 }}">
+            {% if f.epss_score %}{{ f.epss_score }}{% else %}<span class="text-muted">—</span>{% endif %}
+          </td>
+          <td data-sort="{% if f.kev_listed %}1{% else %}0{% endif %}">
+            {% if f.kev_listed %}<span class="badge bg-red-lt">KEV</span>{% else %}<span class="text-muted">—</span>{% endif %}
+          </td>
+          <td>{% if f.container %}<code class="small">{{ f.container }}</code>{% else %}<span class="text-muted">—</span>{% endif %}</td>
+        </tr>
+        {% empty %}
+        <tr data-emptystate><td colspan="9" class="text-center text-muted p-3">
+          No active findings for <code>{{ payload.ref }}</code>.
+        </td></tr>
         {% endfor %}
       </tbody>
     </table>

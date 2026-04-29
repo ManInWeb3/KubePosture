@@ -33,11 +33,13 @@ spec:
             - name: import
               image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
               imagePullPolicy: {{ .Values.image.pullPolicy }}
+              # Token is read from the KUBEPOSTURE_TOKEN env var below
+              # (not passed as a positional arg) so it doesn't show up in
+              # `ps` output inside the container or `kubectl describe pod`.
               command:
                 - python
                 - scripts/import-cluster.py
                 - {{ required "clusterName is required" .Values.clusterName }}
-                - $(KUBEPOSTURE_TOKEN)
                 - --in-cluster
                 {{- if and .Values.import.trivy (not .Values.import.kyverno) }}
                 - --trivy

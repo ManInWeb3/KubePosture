@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+
+{% block title %}{{ label }} — KubePosture{% endblock %}
+{% block pretitle %}Coming soon{% endblock %}
+{% block page_title %}{{ label }}{% endblock %}
+
+{% block content %}
+<div class="empty">
+  <p class="empty-title">{{ label }} — not yet wired</p>
+  <p class="empty-subtitle text-muted">
+    This screen lands in a later slice. Head back to
+    <a href="{% url 'workloads-list' %}">Workloads</a> to triage findings.
+  </p>
+</div>
+{% endblock %}

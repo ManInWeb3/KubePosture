@@ -1,159 +1,122 @@
-"""Template tags for finding display — severity/status/EPSS/priority badges with tooltips."""
+"""Tabler badge helpers for severity, priority, EPSS, KEV.
+
+Templates load this with `{% load findings_tags %}`. Each tag returns
+safe HTML for a Tabler `bg-*-lt` badge, so callers don't have to repeat
+colour mapping in every template.
+"""
+from __future__ import annotations
+
 from django import template
-from django.utils.html import format_html
+from django.utils.safestring import mark_safe
 
 register = template.Library()
 
-# --- Colors (light variants for readability in both themes) ---
 
-SEVERITY_COLORS = {
-    "Critical": "bg-danger-lt text-danger",
-    "High": "bg-orange-lt text-orange",
-    "Medium": "bg-yellow-lt text-yellow",
-    "Low": "bg-blue-lt text-blue",
+_SEVERITY_COLOURS = {
+    "critical": "bg-red-lt text-red",
+    "high": "bg-orange-lt text-orange",
+    "medium": "bg-yellow-lt text-yellow",
+    "low": "bg-azure-lt text-azure",
+    "info": "bg-secondary-lt text-secondary",
+    "unknown": "bg-secondary-lt text-secondary",
 }
 
-STATUS_COLORS = {
-    "active": "bg-danger-lt text-danger",
-    "acknowledged": "bg-blue-lt text-blue",
-    "risk_accepted": "bg-warning-lt text-warning",
-    "false_positive": "bg-secondary-lt text-secondary",
-    "resolved": "bg-success-lt text-success",
-}
-
-PRIORITY_COLORS = {
-    "immediate": "bg-danger-lt text-danger",
+_PRIORITY_COLOURS = {
+    "immediate": "bg-red-lt text-red",
     "out_of_cycle": "bg-orange-lt text-orange",
-    "scheduled": "bg-azure-lt text-azure",
+    "scheduled": "bg-yellow-lt text-yellow",
     "defer": "bg-secondary-lt text-secondary",
 }
 
-# --- Labels ---
-
-STATUS_LABELS = {
-    "active": "Active",
-    "acknowledged": "Acknowledged",
-    "risk_accepted": "Risk Accepted",
-    "false_positive": "False Positive",
-    "resolved": "Resolved",
-}
-
-PRIORITY_LABELS = {
+_PRIORITY_LABELS = {
     "immediate": "Immediate",
     "out_of_cycle": "Out-of-Cycle",
     "scheduled": "Scheduled",
     "defer": "Defer",
 }
 
-# --- Tooltip descriptions (shown on hover via title attribute) ---
-
-SEVERITY_DESCRIPTIONS = {
-    "Critical": "Highest severity \u2014 CVSS 9.0-10.0. Typically allows remote code execution or full system compromise.",
-    "High": "CVSS 7.0-8.9. Significant impact \u2014 data exposure, privilege escalation, or service disruption.",
-    "Medium": "CVSS 4.0-6.9. Moderate impact \u2014 requires specific conditions or limited scope.",
-    "Low": "CVSS 0.1-3.9. Minor impact \u2014 informational or requires unlikely conditions.",
-}
-
-STATUS_DESCRIPTIONS = {
-    "active": "Open finding, needs attention. Detected by scanner, not yet acted on.",
-    "acknowledged": "Team is aware. Investigation or fix is in progress.",
-    "risk_accepted": "Risk formally accepted with reason and expiry. Will reactivate when acceptance expires.",
-    "false_positive": "Confirmed not a real issue in this context. Requires admin approval with justification.",
-    "resolved": "Fixed \u2014 scanner no longer reports this finding. Auto-set when absent from scan.",
-}
-
-PRIORITY_DESCRIPTIONS = {
-    "immediate": "Fix now \u2014 actively exploited (KEV) or high-risk on exposed production. SLA: 24-48h.",
-    "out_of_cycle": "Fix before next sprint \u2014 significant risk, don't wait for normal cycle. SLA: 1 week.",
-    "scheduled": "Fix in next regular cycle \u2014 real risk but contained by environment. SLA: 30 days.",
-    "defer": "Low risk in this context \u2014 fix when convenient. Next maintenance window.",
-}
-
-
-# --- Badge tags ---
 
 @register.simple_tag
 def severity_badge(severity):
-    css = SEVERITY_COLORS.get(severity, "bg-secondary")
-    desc = SEVERITY_DESCRIPTIONS.get(severity, "")
-    return format_html('<span class="badge {}" title="{}">{}</span>', css, desc, severity)
+    if not severity:
+        return mark_safe('<span class="text-muted">—</span>')
+    cls = _SEVERITY_COLOURS.get(severity.lower(), "bg-secondary-lt")
+    return mark_safe(f'<span class="badge {cls}">{severity.title()}</span>')
 
 
-@register.simple_tag
-def status_badge(status):
-    css = STATUS_COLORS.get(status, "bg-secondary")
-    label = STATUS_LABELS.get(status, status)
-    desc = STATUS_DESCRIPTIONS.get(status, "")
-    return format_html('<span class="badge {}" title="{}">{}</span>', css, desc, label)
+# Numeric ranks so kubeposture.js sortable tables order by urgency,
+# not alphabetic textContent. Higher = more urgent — pair with sort-desc.
+_PRIORITY_RANK = {"immediate": 3, "out_of_cycle": 2, "scheduled": 1, "defer": 0}
+_SEVERITY_RANK = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1, "unknown": 0}
+
+
+@register.filter
+def priority_rank(value):
+    return _PRIORITY_RANK.get(value, -1)
+
+
+@register.filter
+def severity_rank(value):
+    return _SEVERITY_RANK.get((value or "").lower(), -1)
 
 
 @register.simple_tag
 def priority_badge(priority):
-    css = PRIORITY_COLORS.get(priority, "bg-secondary")
-    label = PRIORITY_LABELS.get(priority, priority)
-    desc = PRIORITY_DESCRIPTIONS.get(priority, "")
-    return format_html('<span class="badge {}" title="{}">{}</span>', css, desc, label)
-
-
-@register.filter
-def dict_get(d, key):
-    if not isinstance(d, dict):
-        return ""
-    return d.get(key, "")
-
-
-_PSS_COLORS = {
-    "restricted": "bg-success-lt text-success",
-    "baseline": "bg-warning-lt text-warning",
-    "privileged": "bg-danger-lt text-danger",
-}
-_PSS_DESCRIPTIONS = {
-    "restricted": "Most restrictive policy — no privileged containers, enforced non-root.",
-    "baseline": "Prevents known privilege escalations while permitting baseline workloads.",
-    "privileged": "No restrictions — any workload, including privileged pods, can run.",
-    "": "No pod-security.kubernetes.io/enforce label — K8s treats as privileged.",
-}
-
-
-@register.simple_tag
-def pss_badge(level):
-    """Render a Pod Security Standards level as a badge."""
-    key = (level or "").lower()
-    css = _PSS_COLORS.get(key, "bg-secondary-lt text-secondary")
-    desc = _PSS_DESCRIPTIONS.get(key, _PSS_DESCRIPTIONS[""])
-    label = key or "unlabeled"
-    return format_html('<span class="badge {}" title="{}">{}</span>', css, desc, label)
-
-
-@register.simple_tag
-def network_policy_badge(count):
-    """Render NetworkPolicy count; zero is a risk signal."""
-    try:
-        n = int(count)
-    except (TypeError, ValueError):
-        n = 0
-    if n == 0:
-        css = "bg-danger-lt text-danger"
-        desc = "No NetworkPolicies — pod-to-pod traffic is unrestricted."
-    else:
-        css = "bg-success-lt text-success"
-        desc = f"{n} NetworkPolicy resource(s) in this namespace."
-    return format_html('<span class="badge {}" title="{}">{}</span>', css, desc, n)
+    if not priority:
+        return mark_safe('<span class="text-muted">—</span>')
+    cls = _PRIORITY_COLOURS.get(priority, "bg-secondary-lt")
+    label = _PRIORITY_LABELS.get(priority, priority)
+    return mark_safe(f'<span class="badge {cls}">{label}</span>')
 
 
 @register.simple_tag
 def epss_badge(score):
     if score is None:
-        return ""
-    score_f = float(score)
-    if score_f >= 0.5:
-        css = "bg-danger-lt text-danger"
-    elif score_f >= 0.1:
-        css = "bg-orange-lt text-orange"
-    elif score_f >= 0.01:
-        css = "bg-yellow-lt text-yellow"
+        return mark_safe('<span class="text-muted">—</span>')
+    pct = score * 100 if score <= 1 else score
+    if pct >= 50:
+        cls = "bg-red-lt text-red"
+    elif pct >= 10:
+        cls = "bg-orange-lt text-orange"
+    elif pct >= 1:
+        cls = "bg-yellow-lt text-yellow"
     else:
-        css = "bg-azure-lt text-azure"
-    pct = f"{score_f:.1%}"
-    desc = f"EPSS: {pct} probability this CVE will be exploited in the next 30 days"
-    return format_html('<span class="badge {}" title="{}">{}</span>', css, desc, pct)
+        cls = "bg-secondary-lt text-secondary"
+    return mark_safe(f'<span class="badge {cls}">{pct:.1f}%</span>')
+
+
+@register.simple_tag
+def kev_badge(kev_listed):
+    if kev_listed:
+        return mark_safe('<span class="badge bg-red-lt text-red" title="CISA Known Exploited Vulnerability — actively exploited in the wild">KEV</span>')
+    return mark_safe('<span class="text-muted">—</span>')
+
+
+_PSS_COLOURS = {
+    "restricted": "bg-success-lt text-success",
+    "baseline": "bg-warning-lt text-warning",
+    "privileged": "bg-danger-lt text-danger",
+}
+
+
+@register.simple_tag
+def pss_badge(value):
+    """Render the Pod Security Standards `enforce` mode as a Tabler badge.
+
+    Empty value renders a muted "—" since the absence of the label means
+    PSS is not configured for the namespace.
+    """
+    v = (value or "").strip().lower()
+    if not v:
+        return mark_safe('<span class="text-muted">—</span>')
+    cls = _PSS_COLOURS.get(v, "bg-secondary-lt text-secondary")
+    return mark_safe(f'<span class="badge {cls}" title="pod-security.kubernetes.io/enforce">{v}</span>')
+
+
+@register.simple_tag
+def count_badge(value, band):
+    """Render a priority-band count: integer, coloured if non-zero, muted 0 otherwise."""
+    if not value:
+        return mark_safe('<span class="text-muted">0</span>')
+    cls = _PRIORITY_COLOURS.get(band, "bg-secondary-lt")
+    return mark_safe(f'<span class="badge {cls}">{value}</span>')

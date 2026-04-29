@@ -4,14 +4,6 @@
 {% block title %}Service Tokens — KubePosture{% endblock %}
 
 {% block settings_content %}
-{% if messages %}
-{% for msg in messages %}
-<div class="alert alert-{{ msg.tags }} alert-dismissible">{{ msg }}
-  <a class="btn-close" data-bs-dismiss="alert"></a>
-</div>
-{% endfor %}
-{% endif %}
-
 {% help "Service Tokens" %}
   <p>API tokens for scanner ingest. The <code>kubeposture-import</code> CronJob on each target
   cluster uses a token to POST Trivy/Kyverno CRDs to <code>/api/v1/ingest/</code>.</p>

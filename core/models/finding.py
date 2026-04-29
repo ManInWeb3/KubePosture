@@ -1,141 +1,122 @@
-from django.conf import settings
+"""Finding — one vuln / misconfig / policy violation per (workload, image).
+
+Per-workload semantics: the same CVE on the same image running in two
+workloads produces two Finding rows, each with its own
+`effective_priority` and its own `FindingAction` overlays. Different
+deployment contexts warrant different priorities.
+
+`workload` is nullable for cluster-scoped findings (e.g. a Trivy
+ClusterRbacAssessmentReport against a ClusterRole with no owning
+workload). For those rows the dedup hash substitutes `cluster.name`
+for `workload.id` and omits `image.digest`.
+
+Finding has no status field. Workflow state — acknowledge, accept,
+false-positive, scheduled — lives in `FindingAction`.
+"""
 from django.contrib.postgres.indexes import GinIndex
 from django.db import models
+from django.utils import timezone
 
-from core.constants import Category, Origin, Priority, Severity, Source, Status
+from core.constants import Category, PriorityBand, Severity, Source
 
 
 class Finding(models.Model):
-    """
-    Central security finding — JSONB hybrid model.
-
-    Indexed columns for filtering/dedup/lifecycle + JSONB `details` (GIN indexed)
-    for all CRD-type-specific data. Different CRD types (VulnerabilityReport,
-    ConfigAuditReport, etc.) produce findings with different fields in `details`.
-    No schema migration when CRDs change — new fields land in JSONB automatically.
-
-    See: docs/architecture.md § JSONB Hybrid Approach
-    """
-
-    # ── Origin ──────────────────────────────────────────────────
-    origin = models.CharField(
-        max_length=10, choices=Origin.choices, default=Origin.CLUSTER
-    )
-
-    # ── K8s Identity (columns — used in hash + filtering) ───────
     cluster = models.ForeignKey(
         "core.Cluster",
+        on_delete=models.CASCADE,
+        related_name="findings",
+        help_text=(
+            "Always set. For workload-scoped findings, redundant with "
+            "workload.cluster — kept on the row for query convenience and "
+            "for cluster-scoped findings (workload null)."
+        ),
+    )
+    workload = models.ForeignKey(
+        "core.Workload",
         on_delete=models.CASCADE,
         related_name="findings",
         null=True,
         blank=True,
     )
-    namespace = models.ForeignKey(
-        "core.Namespace",
-        on_delete=models.SET_NULL,
+    image = models.ForeignKey(
+        "core.Image",
+        on_delete=models.CASCADE,
         related_name="findings",
         null=True,
         blank=True,
-        help_text="NULL for cluster-scoped resources (ClusterRole, etc.).",
     )
-    resource_kind = models.CharField(max_length=100, blank=True)
-    resource_name = models.CharField(max_length=253, blank=True)
 
-    @property
-    def namespace_name(self) -> str:
-        """String form of the namespace — empty for cluster-scoped findings.
-        Used for dedup hashing and legacy string APIs."""
-        return self.namespace.name if self.namespace_id else ""
+    source = models.CharField(max_length=32, choices=Source.choices)
+    category = models.CharField(max_length=32, choices=Category.choices)
 
-    # ── Finding Core (columns — most displayed/searched) ────────
-    title = models.CharField(max_length=500)
-    severity = models.CharField(max_length=20, choices=Severity.choices)
     vuln_id = models.CharField(
-        max_length=100,
+        max_length=128,
         blank=True,
         db_index=True,
-        help_text="CVE ID, check ID, or rule ID",
+        help_text=(
+            "Source-defined identifier as opaque string — CVE-*, GHSA-*, "
+            "vendor IDs, AVD-* or Kyverno policy names. EPSS / KEV joins "
+            "match on the CVE-* prefix only."
+        ),
     )
+    pkg_name = models.CharField(max_length=256, blank=True, db_index=True)
+    installed_version = models.CharField(max_length=128, blank=True)
+    fixed_version = models.CharField(max_length=128, blank=True)
 
-    # ── Classification ──────────────────────────────────────────
-    category = models.CharField(max_length=30, choices=Category.choices)
-    source = models.CharField(max_length=30, choices=Source.choices)
+    title = models.CharField(max_length=512)
+    severity = models.CharField(max_length=16, choices=Severity.choices)
+    cvss_score = models.FloatField(null=True, blank=True)
+    cvss_vector = models.CharField(max_length=128, blank=True)
 
-    # ── Lifecycle ───────────────────────────────────────────────
-    status = models.CharField(
-        max_length=20, choices=Status.choices, default=Status.ACTIVE
-    )
-    first_seen = models.DateTimeField(auto_now_add=True)
-    last_seen = models.DateTimeField(auto_now=True)
-    resolved_at = models.DateTimeField(null=True, blank=True)
-
-    # ── Dedup ───────────────────────────────────────────────────
-    hash_code = models.CharField(max_length=64)
-
-    # ── Effective Priority (SSVC-inspired decision tree) ─────────
-    effective_priority = models.CharField(
-        max_length=20,
-        choices=Priority.choices,
-        default=Priority.SCHEDULED,
-        db_index=True,
-        help_text="Contextual priority from severity + EPSS/KEV + cluster/namespace exposure",
-    )
-
-    # ── Enrichment (Phase 2 — columns for bulk updates) ────────
-    epss_score = models.DecimalField(
-        max_digits=5, decimal_places=4, null=True, blank=True
-    )
-    kev_listed = models.BooleanField(null=True, blank=True)
-
-    # ── Risk Acceptance (Phase 2 — columns for lifecycle) ───────
-    accepted_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="accepted_findings",
-    )
-    accepted_reason = models.TextField(blank=True)
-    accepted_until = models.DateField(null=True, blank=True)
-
-    # ── JSONB — all CRD-type-specific data (GIN indexed) ───────
     details = models.JSONField(
         default=dict,
         blank=True,
+        help_text="Source-specific fields not promoted to columns.",
+    )
+
+    effective_priority = models.CharField(
+        max_length=20,
+        choices=PriorityBand.choices,
+        default=PriorityBand.SCHEDULED,
+        db_index=True,
+    )
+
+    epss_score = models.FloatField(null=True, blank=True)
+    epss_percentile = models.FloatField(null=True, blank=True)
+    kev_listed = models.BooleanField(default=False)
+
+    first_seen = models.DateTimeField(default=timezone.now)
+    last_seen = models.DateTimeField(default=timezone.now)
+
+    hash_code = models.CharField(
+        max_length=64,
         help_text=(
-            "CRD-type-specific fields: description, remediation, score, "
-            "component_name, installed_version, fixed_version, image, "
-            "container, advisory_url, check_id, messages, etc."
+            "sha256 of (source, category, vuln_id, workload.id or "
+            "cluster.name, image.digest, pkg_name, installed_version)."
         ),
     )
 
     class Meta:
         constraints = [
             models.UniqueConstraint(
-                fields=["origin", "cluster", "hash_code"],
-                name="unique_finding_per_origin_cluster",
+                fields=["source", "hash_code"],
+                name="unique_finding_per_source_hash",
             ),
         ]
         indexes = [
             GinIndex(fields=["details"], name="finding_details_gin"),
             models.Index(
-                fields=["cluster", "source", "status"],
-                name="finding_cluster_source_status",
+                fields=["workload", "effective_priority"],
+                name="finding_workload_priority",
             ),
             models.Index(
-                fields=["cluster", "status"],
-                name="finding_cluster_status",
+                fields=["cluster", "effective_priority"],
+                name="finding_cluster_priority",
             ),
-            models.Index(
-                fields=["severity", "status"],
-                name="finding_severity_status",
-            ),
-            models.Index(
-                fields=["last_seen"],
-                name="finding_last_seen",
-            ),
+            models.Index(fields=["last_seen"], name="finding_last_seen"),
+            models.Index(fields=["image"], name="finding_image"),
         ]
-        ordering = ["-first_seen"]
+        ordering = ["-last_seen"]
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"[{self.severity}] {self.title[:80]}"

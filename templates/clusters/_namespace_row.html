@@ -9,7 +9,6 @@
   </td>
   <td class="text-muted">{{ ns.finding_count }}</td>
   <td>{% pss_badge ns.pss_enforce %}</td>
-  <td>{% network_policy_badge ns.network_policy_count %}</td>
   <td class="text-muted">
     {% if not ns.active and ns.deactivated_at %}
       <span title="Deactivated at">{{ ns.deactivated_at|date:"Y-m-d H:i" }}</span>

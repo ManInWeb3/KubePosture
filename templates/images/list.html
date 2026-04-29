@@ -1,85 +1,131 @@
 {% extends "base.html" %}
-{% load findings_tags %}
 {% load help_tags %}
 
 {% block title %}Images — KubePosture{% endblock %}
-{% block pretitle %}Vulnerability Posture{% endblock %}
-{% block page_title %}
-  Images
-  <span class="text-muted fs-5 ms-2">{{ total_images }} entries with active CVEs</span>
-{% endblock %}
+{% block pretitle %}Inventory{% endblock %}
+{% block page_title %}Images{% endblock %}
 
 {% block content %}
 {% help "Images" %}
-  <p>Container images rolled up from all Trivy <em>VulnerabilityReports</em> — one row per
-  image, with its CVE counts by severity and effective priority. Data is populated automatically;
-  images appear the moment their workloads are scanned.</p>
-  <p class="mb-0"><strong>How to use:</strong> sort by Critical or Immediate to find the highest-leverage
-  image to patch — fixing one base image often closes hundreds of findings across workloads.
-  Click the image to see every CVE and the clusters it's running on.</p>
+  <p><strong>One row per image × cluster × namespace.</strong> The same
+  image ref (e.g. <code>ghcr.io/grafana/grafana:10.2.3</code>) appears
+  once for each place it's deployed so you can see exactly where
+  findings land.</p>
+  <p><strong>Action unit.</strong> Each row is one upgrade decision —
+  bump the tag in your values file, or escalate to the vendor, or
+  accept risk. The fix propagates to every workload running the image
+  on the next ArgoCD sync.</p>
+  <p class="mb-0"><strong>Sort</strong> defaults to IMMEDIATE desc,
+  then KEV, then OUT-OF-CYCLE, then high-EPSS + workload count. Click
+  any column header to re-sort.</p>
 {% endhelp %}
-<!-- Filters (same order as columns) -->
-<div class="card mb-3">
-  <div class="card-body py-2">
-    <form method="get" class="d-flex gap-2 align-items-center flex-wrap">
-      <select name="cluster" class="form-select form-select-sm" style="width:auto" onchange="this.form.submit()">
-        <option value="">All clusters</option>
-        {% for c in clusters %}
-        <option value="{{ c.pk }}" {% if request.GET.cluster == c.pk|stringformat:"d" %}selected{% endif %}>{{ c.name }}</option>
-        {% endfor %}
-      </select>
-      <input type="text" name="namespace" class="form-control form-control-sm" style="max-width:200px"
-             placeholder="Namespace..." value="{{ request.GET.namespace|default:'' }}">
-      <input type="text" name="search" class="form-control form-control-sm" style="max-width:300px"
-             placeholder="Search image name..." value="{{ request.GET.search|default:'' }}">
-      <button type="submit" class="btn btn-sm btn-outline-secondary">Filter</button>
-      {% if request.GET.cluster or request.GET.namespace or request.GET.search %}
-      <a href="{% url 'image-list' %}" class="btn btn-sm btn-outline-secondary">Clear</a>
-      {% endif %}
-    </form>
-  </div>
-</div>
 
-<!-- Image table -->
+{% if not rows %}
+<div class="empty">
+  <p class="empty-title">No images tracked yet.</p>
+  <p class="empty-subtitle text-muted">Connect a cluster and let Trivy ingest vulnerability reports.</p>
+</div>
+{% else %}
 <div class="card">
+  <div class="card-body border-bottom">
+    <div class="row g-2 align-items-end">
+      <div class="col-auto">
+        <label class="form-label small mb-1">Cluster</label>
+        <select data-filter-table="images-tbl" data-filter-attr="cluster" class="form-select form-select-sm">
+          <option value="">all</option>
+          {% for name in all_cluster_names %}
+          <option value="{{ name }}">{{ name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-auto">
+        <label class="form-label small mb-1">Namespace</label>
+        <select data-filter-table="images-tbl" data-filter-attr="namespace" class="form-select form-select-sm">
+          <option value="">all</option>
+          {% for name in all_namespace_names %}
+          <option value="{{ name }}">{{ name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-auto">
+        <label class="form-label small mb-1">Image</label>
+        <input type="text" data-filter-table="images-tbl" data-filter-attr="image" data-filter-mode="substring" class="form-control form-control-sm" placeholder="search..." style="min-width: 14rem;">
+      </div>
+      <div class="col-auto">
+        <label class="form-label small mb-1">Status</label>
+        <select data-filter-table="images-tbl" data-filter-attr="status" class="form-select form-select-sm">
+          <option value="open" selected>Active</option>
+          <option value="">All</option>
+          <option value="clean">Clean</option>
+        </select>
+      </div>
+      <div class="col-auto">
+        <button type="button" data-filter-reset="images-tbl" class="btn btn-sm btn-outline-secondary">Reset</button>
+      </div>
+      <div class="col">
+        <div class="text-muted small text-end">
+          <span data-filter-count="images-tbl">{{ rows|length }}</span> / {{ rows|length }} images
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="table-responsive">
-    <table class="table table-vcenter card-table table-hover">
+    <table id="images-tbl" class="table table-vcenter card-table" data-sortable>
       <thead>
         <tr>
-          <th>Cluster</th>
-          <th>Namespace</th>
-          <th>Image</th>
-          <th title="Total active CVEs">Total</th>
-          <th title="Critical severity CVEs">C</th>
-          <th title="High severity CVEs">H</th>
-          <th title="CVEs with a fix available">Fixable</th>
-          <th title="CVEs on CISA Known Exploited Vulnerabilities list">KEV</th>
-          <th title="Highest EPSS score among CVEs in this image">Max EPSS</th>
+          <th class="sortable">Cluster</th>
+          <th class="sortable">Namespace</th>
+          <th class="sortable">Image</th>
+          <th class="sortable">OS</th>
+          <th class="sortable text-end">Workloads</th>
+          <th class="sortable text-end sort-desc" title="Findings tagged IMMEDIATE by the priority tree">IMMEDIATE</th>
+          <th class="sortable text-end">OUT-OF-CYCLE</th>
+          <th class="sortable text-end">KEV</th>
+          <th class="sortable text-end" title="Findings with EPSS > 0.1 (high exploit probability)">High-EPSS</th>
+          <th class="sortable text-end">Fixable</th>
+          <th class="sortable text-end">Total</th>
         </tr>
       </thead>
       <tbody>
-        {% for stat in image_stats %}
-        <tr>
-          <td>{{ stat.cluster__name|default:"—" }}</td>
-          <td class="text-muted">{{ stat.namespace|default:"—" }}</td>
+        {% for row in rows %}
+        <tr data-cluster="{{ row.cluster_name }}"
+            data-namespace="{{ row.namespace_name }}"
+            data-image="{{ row.ref }}"
+            data-status="{{ row.status }}">
+          <td>{{ row.cluster_name }}</td>
+          <td>{{ row.namespace_name }}</td>
           <td>
-            <a href="{% url 'image-detail' stat.image %}" class="fw-bold font-monospace" style="font-size:0.85rem"
-               title="{{ stat.image }}">
-              {{ stat.short_image }}
+            <a href="{% url 'image-detail' %}?ref={{ row.ref|urlencode }}{% if selected_cluster %}&cluster={{ selected_cluster.pk }}{% endif %}">
+              <strong class="font-monospace small">{{ row.ref }}</strong>
             </a>
           </td>
-          <td><span class="fw-bold">{{ stat.total_cves }}</span></td>
-          <td>{% if stat.critical %}<span class="text-danger fw-bold">{{ stat.critical }}</span>{% else %}0{% endif %}</td>
-          <td>{% if stat.high %}<span class="text-orange">{{ stat.high }}</span>{% else %}0{% endif %}</td>
-          <td>{% if stat.fixable %}<span class="text-success">{{ stat.fixable }}</span>{% else %}0{% endif %}</td>
-          <td>{% if stat.kev_count %}<span class="badge bg-danger-lt text-danger">{{ stat.kev_count }}</span>{% else %}—{% endif %}</td>
-          <td>{% if stat.max_epss %}{% epss_badge stat.max_epss %}{% else %}—{% endif %}</td>
+          <td>
+            {% if row.os_family %}
+              <span class="text-muted small">{{ row.os_family }} {{ row.os_version }}</span>
+              {% if row.base_eosl %}<span class="badge bg-danger-lt text-danger ms-1" title="Trivy flags this base OS as end-of-service-life">EOSL</span>{% endif %}
+            {% else %}
+              <span class="text-muted">—</span>
+            {% endif %}
+          </td>
+          <td class="text-end">{{ row.workload_count }}</td>
+          <td class="text-end">
+            {% if row.immediate %}<span class="badge bg-red-lt">{{ row.immediate }}</span>{% else %}<span class="text-muted">0</span>{% endif %}
+          </td>
+          <td class="text-end">
+            {% if row.out_of_cycle %}<span class="badge bg-orange-lt">{{ row.out_of_cycle }}</span>{% else %}<span class="text-muted">0</span>{% endif %}
+          </td>
+          <td class="text-end">
+            {% if row.kev %}<span class="badge bg-red-lt">{{ row.kev }}</span>{% else %}<span class="text-muted">0</span>{% endif %}
+          </td>
+          <td class="text-end">{{ row.high_epss }}</td>
+          <td class="text-end">{{ row.fixable }}</td>
+          <td class="text-end">{{ row.total }}</td>
         </tr>
-        {% empty %}
-        <tr><td colspan="9" class="text-center text-muted py-4">No images with active vulnerabilities.</td></tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
 </div>
+{% endif %}
 {% endblock %}

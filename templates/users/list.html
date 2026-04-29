@@ -3,14 +3,6 @@
 {% block title %}Users — KubePosture{% endblock %}
 
 {% block settings_content %}
-{% if messages %}
-{% for msg in messages %}
-<div class="alert alert-{{ msg.tags }} alert-dismissible">{{ msg }}
-  <a class="btn-close" data-bs-dismiss="alert"></a>
-</div>
-{% endfor %}
-{% endif %}
-
 {% load help_tags %}
 {% help "Users & Roles" %}
   <p>Manage who can log in and what they can do. Click <strong>+ New User</strong> to add

@@ -1,6 +1,6 @@
 <div class="card">
   <div class="table-responsive">
-    <table class="table table-vcenter card-table table-hover table-sm" id="comp-tbl">
+    <table class="table table-vcenter card-table table-hover table-sm" id="comp-tbl" data-sortable>
       <thead>
         <tr>
           <th class="sortable">Cluster</th>
@@ -68,29 +68,3 @@
   </div>
   {% endif %}
 </div>
-<script>
-// Client-side column sorting
-(function(){
-  var table = document.getElementById('comp-tbl');
-  if (!table) return;
-  var headers = table.querySelectorAll('th.sortable');
-  var dir = {};
-  headers.forEach(function(th){
-    th.style.cursor = 'pointer';
-    th.addEventListener('click', function(){
-      var col = Array.from(th.parentNode.children).indexOf(th);
-      var tbody = table.querySelector('tbody');
-      var rows = Array.from(tbody.querySelectorAll('tr'));
-      dir[col] = !(dir[col]);
-      rows.sort(function(a,b){
-        var at = (a.children[col]||{}).textContent||'';
-        var bt = (b.children[col]||{}).textContent||'';
-        return dir[col] ? at.localeCompare(bt) : bt.localeCompare(at);
-      });
-      rows.forEach(function(r){ tbody.appendChild(r); });
-      headers.forEach(function(h){ h.classList.remove('sort-asc','sort-desc'); });
-      th.classList.add(dir[col] ? 'sort-asc' : 'sort-desc');
-    });
-  });
-})();
-</script>

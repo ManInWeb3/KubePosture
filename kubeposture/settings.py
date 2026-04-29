@@ -115,7 +115,6 @@ STORAGES = {
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework.authentication.TokenAuthentication",
         "rest_framework.authentication.SessionAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
@@ -124,9 +123,13 @@ REST_FRAMEWORK = {
     "DEFAULT_FILTER_BACKENDS": [
         "django_filters.rest_framework.DjangoFilterBackend",
     ],
-    "DEFAULT_PAGINATION_CLASS": "core.api.pagination.StandardPagination",
+    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 25,
 }
+
+# ── KubePostureNG harness flag (Phase 5) ───────────────────────────
+
+TESTING_HARNESS_ENABLED = env.bool("TESTING_HARNESS_ENABLED", default=False)
 
 # ── Logging ─────────────────────────────────────────────────────
 
@@ -168,6 +171,13 @@ LOGGING = {
 # ── Ingest Queue ───────────────────────────────────────────────
 
 INGEST_QUEUE_MAX_ATTEMPTS = env.int("INGEST_QUEUE_MAX_ATTEMPTS", default=3)
+
+# ── Snapshots ──────────────────────────────────────────────────
+
+# Sliding retention window for the Snapshot table. Per
+# Architecture/dev_docs/03-data-model.md §Snapshot — Retention.
+# `manage.py prune_snapshots` deletes rows older than this.
+SNAPSHOT_RETENTION_DAYS = env.int("SNAPSHOT_RETENTION_DAYS", default=365)
 
 # ── Security (production) ───────────────────────────────────────
 

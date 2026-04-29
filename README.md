@@ -1,42 +1,29 @@
-# KubePosture
+# KubePostureNG
 
-K8s security posture management platform. Aggregates vulnerability and compliance findings from Trivy Operator and Kyverno across all clusters into a single database with lifecycle tracking, effective priority scoring, and compliance reporting.
+K8s security posture aggregator. Pulls Trivy Operator + Kyverno reports
+from each cluster, enriches with EPSS / KEV / VEX, scores each finding
+by urgency, and exposes a per-`(workload, image)` view of what to fix
+first.
 
-## Who Uses This
+Authoritative design lives in
+[`Architecture/dev_docs/`](Architecture/dev_docs/) and the executable
+test bundle in
+[`Architecture/mock_tests/`](Architecture/mock_tests/).
 
-KubePosture is the **security team's tool**. Not everyone involved in fixing security issues needs an account.
+The current milestone is **data model + ingest + scripts + scenario
+tests passing**. UI = Django admin only. Custom UI lands in a later
+milestone.
 
-### Direct access (create accounts)
+---
 
-| Role | Django group | What they do |
-|---|---|---|
-| Security lead / CISO | `admin` | Approve risk acceptance, manage cluster config, user management, compliance sign-off |
-| DevSecOps engineer | `operator` | Triage findings, acknowledge, bulk actions, propose risk acceptance |
-| Compliance officer / auditor | `viewer` | Read compliance matrix, download PDF reports |
-| On-call engineer | `viewer` | Look up a CVE or misconfiguration during an incident |
-
-### No direct access needed — sync to Linear instead
-
-| Person | Why no account | How they engage |
-|---|---|---|
-| Developer | Doesn't need CVSS, EPSS, or compliance context — just needs a ticket | Linear issue synced from the finding |
-| Product manager | Schedules security work in sprints, not raw CVE triage | Linear issue as backlog item |
-| Engineering manager | Wants team-level security work visible, not a security dashboard | Linear issues in team board |
-
-The sync boundary: KubePosture decides **what** needs fixing and **how urgent** (IMMEDIATE → Urgent, OUT-OF-CYCLE → High, SCHEDULED → Medium, DEFER → Low). Linear is where engineering tracks **when** they'll fix it. Linear integration is planned for Phase 5H.
-
-### Risk acceptance
-
-"Accept Risk" requires admin role — it's a compliance act with an auditable paper trail (reason + expiry date required). A propose/approve workflow (operator proposes, admin approves in one click) is planned for Phase 4.
-
-## Quick Start (Local Development)
+## Quick start (local development)
 
 ### Prerequisites
 
 - Python 3.12+
 - Docker (for PostgreSQL)
 
-### 1. Start the database
+### 1. Start postgres
 
 ```bash
 docker compose up -d db
@@ -48,366 +35,293 @@ docker compose up -d db
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-pip install -r requirements-dev.txt  # for tests
+pip install -r requirements-dev.txt   # pytest, ruff
 ```
 
 ### 3. Configure environment
-
-Copy the example env file:
 
 ```bash
 cp .env.example .env
 ```
 
-The defaults work for local development with the docker-compose database.
+Defaults work against the docker-compose database. The relevant vars:
 
-### 4. Initialize the database
+| Variable | Notes |
+|---|---|
+| `SECRET_KEY` | Any non-empty string for dev. |
+| `DATABASE_URL` | Defaults to the docker-compose Postgres. |
+| `DEBUG` | `True` in dev. |
+| `LOG_LEVEL` | `INFO` is fine; bump to `DEBUG` to see queue / reaper traces. |
+| `TESTING_HARNESS_ENABLED` | Set to `true` to expose `/api/v1/testing/*` (the scenario harness). Off in prod. |
+
+### 4. Apply migrations
 
 ```bash
 python manage.py migrate
-python manage.py setup_roles              # creates viewer/operator/admin groups
-python manage.py load_frameworks fixtures/*.yaml  # loads compliance frameworks
-python manage.py createsuperuser          # create your admin account
 ```
 
-### 5. Start the dev server
+### 5. Create a Django superuser (for the admin UI)
+
+```bash
+python manage.py createsuperuser
+```
+
+### 6. Run the dev server
 
 ```bash
 python manage.py runserver
 ```
 
-Open http://localhost:8000 and log in with your superuser account.
+Open http://localhost:8000/admin/ and log in with the superuser. The
+admin lists every model — Cluster, Workload, Image, Finding,
+WorkloadSignal, ImportMark, IngestQueue, Snapshot, FindingAction,
+EpssScore, KevEntry, VexStatement, ScanInconsistency.
 
-### 6. Start the ingest queue processor
+There is no custom UI in this milestone. Read + act through Django
+admin.
 
-In a separate terminal:
+### 7. Drain the ingest queue
+
+In another terminal:
 
 ```bash
 source .venv/bin/activate
 python manage.py process_ingest_queue
 ```
 
-This continuously processes incoming scanner data. Must be running for ingested data to appear.
+This is one-shot — it drains everything currently `state=draining`
+and exits. In production it runs as a 1-min CronJob; locally re-run
+it whenever you've ingested new data.
 
-## How to connect a new cluster
+---
 
-End-to-end flow for adding a new target cluster to an already-running KubePosture:
+## Loading data
 
-1. **Create a service token.** In the UI: Settings → Tokens → **+ Create token**. Enter a name
-   (e.g. `cluster-prod-1`) and copy the value shown — it's only displayed once.
-   CLI equivalent: `python manage.py create_service_token cluster-prod-1`.
+Three ways, in order from cheapest to most-realistic:
 
-2. **Install the import chart on the target cluster.** Point it at your KubePosture URL and paste the token:
-   ```bash
-   helm install kubeposture-import oci://ghcr.io/maninweb3/kubeposture/charts/kubeposture-import \
-     --set clusterName=cluster-prod-1 \
-     --set token.value=<paste-token-here> \
-     --set kubepostureUrl=https://kubeposture.example.com
-   ```
-   The initial-run Job fires immediately; findings appear in KubePosture within minutes.
-   Use `secretRef` in values instead of `token.value` for production secret hygiene.
+### Option A — Replay a scenario fixture (no cluster needed)
 
-3. **That's it.** The import script auto-detects on every run:
-   - Cluster **provider** (aws/eks/gcp/gke/azure/aks/onprem) from node provider_id + labels
-   - **Region** from node label `topology.kubernetes.io/region`
-   - **K8s version** from the API server
-   - **Namespaces** — all of them, with `internet_exposed=true` on any namespace that has a
-     Service of type LoadBalancer/NodePort or an Ingress
-
-   The cluster registers itself on first contact; namespaces populate on the first sync call
-   (`POST /api/v1/cluster-metadata/sync/`). You only visit Settings → Clusters → Configure to
-   refine — mark sensitive-data namespaces (can't be auto-detected) or override anything the
-   auto-detector got wrong.
-
-### Ad-hoc import (no Helm)
-
-Import everything (Trivy + Kyverno):
+Useful for sanity-checking the pipeline end-to-end without any K8s
+plumbing.
 
 ```bash
-python scripts/import-cluster.py cluster-prod-1 <token>
+TESTING_HARNESS_ENABLED=true \
+DJANGO_SETTINGS_MODULE=kubeposture.settings \
+pytest tests/scenario_runner/   # all 7 scenarios pass
 ```
 
-Import Trivy only:
+That populates a throwaway test DB. To populate your real dev DB
+from a fixture, use the harness endpoint:
 
 ```bash
-python scripts/import-cluster.py cluster-name-1 <token> --trivy
+curl -X POST http://localhost:8000/api/v1/testing/reset/ \
+  -H 'Content-Type: application/json' -d '{}'
+
+curl -X POST http://localhost:8000/api/v1/testing/load_scenario/ \
+  -H 'Content-Type: application/json' -d '{
+    "cluster": "prod-payments-1",
+    "import_id": "01HW000000000000000000HPPY",
+    "scenario_dir": "/abs/path/to/Architecture/mock_tests/01-happy-path"
+  }'
 ```
 
-Import Kyverno only:
+(Server must have been started with `TESTING_HARNESS_ENABLED=true`.)
+
+### Option B — Replay a captured `kubectl get -o json` dump
 
 ```bash
-python scripts/import-cluster.py cluster-name-1 <token> --kyverno
+# 1. Capture from any cluster you have kubectl access to.
+mkdir -p /tmp/kp-snap/{kubeapi,trivy,kyverno}
+kubectl get deployments -A -o json   > /tmp/kp-snap/kubeapi/deployments.json
+kubectl get statefulsets -A -o json  > /tmp/kp-snap/kubeapi/statefulsets.json
+kubectl get daemonsets -A -o json    > /tmp/kp-snap/kubeapi/daemonsets.json
+kubectl get cronjobs -A -o json      > /tmp/kp-snap/kubeapi/cronjobs.json
+kubectl get jobs -A -o json          > /tmp/kp-snap/kubeapi/jobs.json
+kubectl get replicasets -A -o json   > /tmp/kp-snap/kubeapi/replicasets.json
+kubectl get pods -A -o json          > /tmp/kp-snap/kubeapi/pods.json
+kubectl get services -A -o json      > /tmp/kp-snap/kubeapi/services.json
+kubectl get ingresses -A -o json     > /tmp/kp-snap/kubeapi/ingresses.json
+kubectl get networkpolicies -A -o json > /tmp/kp-snap/kubeapi/networkpolicies.json
+kubectl get namespaces -o json       > /tmp/kp-snap/kubeapi/namespaces.json
+kubectl get nodes -o json            > /tmp/kp-snap/kubeapi/nodes.json
+kubectl version -o json              > /tmp/kp-snap/kubeapi/version.json
+
+# Trivy CRDs (only if Trivy Operator is installed in the cluster):
+kubectl get vulnerabilityreports -A -o json   > /tmp/kp-snap/trivy/vulnerabilityreports.json
+kubectl get configauditreports -A -o json     > /tmp/kp-snap/trivy/configauditreports.json
+kubectl get exposedsecretreports -A -o json   > /tmp/kp-snap/trivy/exposedsecretreports.json
+kubectl get rbacassessmentreports -A -o json  > /tmp/kp-snap/trivy/rbacassessmentreports.json
+kubectl get clusterrbacassessmentreports -o json > /tmp/kp-snap/trivy/clusterrbacassessmentreports.json
+kubectl get infraassessmentreports -A -o json > /tmp/kp-snap/trivy/infraassessmentreports.json
+kubectl get clustercompliancereports -o json  > /tmp/kp-snap/trivy/clustercompliancereports.json
+
+# Kyverno PolicyReports (only if Kyverno is installed):
+kubectl get policyreports -A -o json          > /tmp/kp-snap/kyverno/policyreports.json
+kubectl get clusterpolicyreports -o json      > /tmp/kp-snap/kyverno/clusterpolicyreports.json
+
+# 2. Mint a bearer token (only the plain token is shown — once).
+TOKEN=$(python manage.py create_cluster_token <cluster-name> | tail -1)
+
+# 3. Replay the capture into your local central.
+KUBEPOSTURE_URL=http://localhost:8000 KUBEPOSTURE_TOKEN=$TOKEN \
+  python scripts/import-cluster.py <cluster-name> --from-folder /tmp/kp-snap
+
+# 4. Drain the queue.
+python manage.py process_ingest_queue
 ```
 
-Custom kubeconfig:
+### Option C — Live cluster import
+
+Same flow, but instead of `--from-folder` point the importer at a
+kubeconfig:
 
 ```bash
-python scripts/import-cluster.py cluster-name-1 <token> --kubeconfig /path/to/kubeconfig
+TOKEN=$(python manage.py create_cluster_token <cluster-name> | tail -1)
+
+KUBEPOSTURE_URL=http://localhost:8000 KUBEPOSTURE_TOKEN=$TOKEN \
+  python scripts/import-cluster.py <cluster-name> \
+  --kubeconfig ~/.kube/config
+
+python manage.py process_ingest_queue
 ```
 
-In-cluster (for K8s CronJob):
+`--in-cluster` works too if the script runs as a Pod with a
+ServiceAccount.
+
+---
+
+## Enrichment (EPSS + KEV)
+
+Optional but recommended — without these every Finding's
+`effective_priority` is a function of severity + workload context only.
 
 ```bash
-python scripts/import-cluster.py cluster-name-1 <token> --in-cluster
+python manage.py enrich_fetch --source kev    # ~1.5k rows, seconds
+python manage.py enrich_fetch --source epss   # ~330k rows, ~3 min
 ```
 
-Custom API URL:
+Failures are non-fatal: the loaders honour the universal zero-input
+no-op rule (empty/failed fetch leaves existing rows alone).
+
+In production both run as daily CronJobs. Locally, re-run when you
+want fresh threat-intel.
+
+VEX is admin-uploaded — drop OpenVEX / CSAF JSON files anywhere and
+load with:
 
 ```bash
-KUBEPOSTURE_URL=https://kubeposture.someorg.xyz \
-  python scripts/import-cluster.py cluster-name-1 <token>
-```
-
-## How-To: Mitigating CVEs via Findings
-
-Playbook for reducing *Immediate* and *Out-of-Cycle* findings. Work top-down;
-ignore *Scheduled* and *Defer* until the top two buckets are empty.
-
-1. **Configure cluster context first.** In Settings → Clusters, set each cluster's
-   environment (prod/staging/dev), internet-exposed flag, and sensitive-data flag.
-   Without this, effective priority degrades and everything lands in *Defer*.
-2. **Triage Immediate findings.** Findings → filter `priority=immediate`, `status=active`.
-   This is the KEV + high-EPSS + critical + exposed-prod intersection — the weekly work queue.
-3. **Group by image.** Most CVEs cluster in a few base images. Open the Images tab,
-   sort by Critical count. One base-image bump (e.g. `python:3.11-slim` → `3.12-slim`)
-   typically closes 20–200 findings at once.
-4. **Choose the fix per finding.** Click a finding — the `fixed_version` field tells you if a patch exists.
-   - **Patch available** → bump the dependency/image, rebuild, redeploy.
-   - **No patch, exposed + KEV** → compensate with NetworkPolicy, WAF rule, or disable the feature.
-   - **Vendor image, unpatched** → Accept Risk with a short expiry (≤ 90 days) + tracking ticket.
-   - **False positive** → mark as False Positive with a reason (audit trail matters).
-5. **Ship & verify.** After the new image rolls out, the next scan dedups by hash.
-   Fixed findings auto-transition to RESOLVED; unchanged ones stay ACTIVE. Verify by
-   filtering `status=resolved` for that cluster/image.
-6. **Prevent recurrence (shift left).** Dependabot/Renovate on source repos,
-   Trivy in CI to fail builds on new Criticals, pin base images to hardened/distroless.
-7. **Measure.** Track *time-to-fix for Immediate* and *open Immediate at week end* — not raw finding counts.
-
-## How-To: Making Clusters Compliant
-
-Goal: pass framework audits (CIS Kubernetes Benchmark, NSA Hardening, SOC2, PCI DSS)
-and keep them passing. Core loop: **Trivy detects existing violations → you fix them →
-Kyverno prevents new violations**.
-
-1. **Pick a framework.** Compliance → Trivy Frameworks. Start with CIS Kubernetes Benchmark
-   (widest coverage). Add SOC2/PCI DSS/HIPAA only if you have a regulatory requirement.
-   Frameworks are loaded from fixture YAMLs listed in `frameworkFixtures` in Helm values
-   via `manage.py load_frameworks`.
-2. **Read the matrix.** Click a framework card → View Matrix. Rows = controls, columns = clusters.
-   **FAIL** cells are your work; **MISSING** means no scan data (check the scanner is installed).
-3. **Fix the easy wins.** Most CIS failures are config issues in Helm values:
-   - Missing `resources.requests`/`resources.limits` → add them.
-   - `allowPrivilegeEscalation: true` → set to false.
-   - Running as root → set `runAsNonRoot: true` + non-zero `runAsUser`.
-   - Writable root filesystem → `readOnlyRootFilesystem: true`, mount writable paths as `emptyDir`.
-   - Missing NetworkPolicy → add default-deny per namespace + explicit allows.
-   - Wide cluster-admin bindings → scope down to namespaces or specific resources.
-   - Default ServiceAccount in use → create per-workload SA, set `automountServiceAccountToken: false` where unused.
-4. **Deploy Kyverno policies in audit mode.** Once a control is green, deploy the matching
-   Kyverno policy with `validationFailureAction: Audit`. Violations show up on
-   Compliance → Kyverno Policies without blocking deployments.
-5. **Promote to enforce.** Watch for 1–2 weeks. When the audit-mode policy has zero fails
-   across all clusters, flip to `validationFailureAction: Enforce`. New violations get
-   blocked at admission — the control is self-enforcing.
-6. **Document exceptions.** Legitimate exceptions (e.g. a vendor operator needing cluster-admin)
-   get a Risk Acceptance on the finding with reason + expiry. Auditors accept documented
-   exceptions; they don't accept undocumented ones.
-7. **Prepare for audit.** You need four things:
-   detection evidence (matrix PASS/FAIL), enforcement evidence (Kyverno in enforce mode),
-   remediation evidence (finding history shows who fixed what, when), documented exceptions.
-8. **Stay compliant.** Weekly: no new red cells. Monthly: review risk acceptances.
-   Quarterly: reload framework fixtures (`manage.py load_frameworks`) in case CIS/SOC2
-   released new versions.
-
-## Daily Cron Jobs
-
-These should run as K8s CronJobs in production:
-
-```bash
-# Enrich findings with EPSS exploit probability scores (daily)
-python manage.py enrich_epss
-
-# Enrich findings with CISA KEV (Known Exploited Vulnerabilities) flags (daily)
-python manage.py enrich_kev
-
-# Expire risk acceptances past their expiry date (daily)
-python manage.py expire_risk_acceptances
-
-# Clean up processed ingest queue items older than 7 days
-python manage.py cleanup_ingest_queue --days 7
-
-# Recalculate effective priorities (after cluster config changes)
-python manage.py recalculate_priorities
-```
-
-## Management Commands
-
-| Command | Purpose |
-|---------|---------|
-| `setup_roles` | Create viewer/operator/admin groups (idempotent) |
-| `create_service_token <name>` | Create API token for scanner ingest |
-| `load_frameworks <files>` | Load compliance framework fixtures from YAML |
-| `process_ingest_queue` | Process incoming scanner data (run continuously) |
-| `enrich_epss` | Update EPSS exploit probability scores |
-| `enrich_kev` | Update CISA Known Exploited Vulnerabilities flags |
-| `expire_risk_acceptances` | Reactivate expired risk acceptances |
-| `recalculate_priorities` | Recalculate effective priority for all findings |
-| `cleanup_ingest_queue` | Delete old processed queue items |
-| `backfill_compliance` | Reprocess raw compliance reports into structured models |
-| `backfill_sbom` | Reprocess raw SBOM reports into component models |
-
-## Build & Release
-
-### Docker Image
-
-**Build locally:**
-
-```bash
-docker build -t kubeposture:dev .
-```
-
-**Release via CI** — push a semver tag:
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-GitHub Actions builds a multi-platform image (`amd64` + `arm64`) and pushes to GHCR:
-
-```
-ghcr.io/<owner>/<repo>:0.1.0
-ghcr.io/<owner>/<repo>:0.1
-ghcr.io/<owner>/<repo>:latest
-ghcr.io/<owner>/<repo>:sha-<short-sha>
-```
-
-**Pull a released image:**
-
-```bash
-docker pull ghcr.io/<owner>/<repo>:0.1.0
+python manage.py enrich_from_file --source vex /path/to/file.json
 ```
 
 ---
 
-### Helm Charts
+## Daily housekeeping
 
-There are two charts under `deploy/charts/`:
+```bash
+python manage.py snapshot_capture          # daily heartbeat snapshots (global / cluster / namespace / workload)
+python manage.py prune_snapshots           # delete Snapshot rows older than SNAPSHOT_RETENTION_DAYS (default 365)
+python manage.py reap_safety_net           # fire any stuck reaps
+python manage.py recalculate_priorities    # bulk recompute (after a scoring tweak)
+```
 
-| Chart | Purpose |
+Snapshot rows feed the **CVE Trend** charts on `/workloads/` (fleet-wide
+or per-cluster, follows the cluster filter) and on each workload detail
+page (per-cluster history with image-set events marked). Per-import
+workload-scope snapshots are written automatically by the inventory
+reaper; the daily heartbeat above fills in continuity at all four
+scopes.
+
+---
+
+## Running the scenario suite
+
+The scenario harness drives the scenarios under
+`Architecture/mock_tests/` end-to-end against the testing endpoints.
+It's the canonical regression suite for the ingest pipeline.
+
+```bash
+TESTING_HARNESS_ENABLED=true LOG_LEVEL=ERROR \
+  pytest tests/scenario_runner/
+```
+
+Each scenario:
+
+1. Truncates the test DB (`/api/v1/testing/reset/`).
+2. Posts the scenario's `imports/*.json` files via
+   `/api/v1/testing/load_scenario/`, which drains the queue and fires
+   reaps inline.
+3. Evaluates `assertions.yaml` via
+   `/api/v1/testing/assert_batch/` — ~25 assertion kinds covering
+   workloads, findings, signals, snapshots, marks.
+
+---
+
+## Common operations
+
+| Task | Command |
 |---|---|
-| `kubeposture` | Main application (web, worker, cronjobs) |
-| `kubeposture-import` | CronJob deployed per-cluster to pull scanner data |
-
-**Lint and package locally:**
-
-```bash
-helm lint deploy/charts/kubeposture
-helm package deploy/charts/kubeposture --version 0.1.0 --app-version 0.1.0
-```
-
-**Release via CI** — push a chart release tag using the convention `helm-{chart}-v{version}`:
-
-```bash
-# release the main chart
-git tag helm-kubeposture-v0.1.0
-git push origin helm-kubeposture-v0.1.0
-
-# release the import chart
-git tag helm-kubeposture-import-v0.1.0
-git push origin helm-kubeposture-import-v0.1.0
-```
-
-GitHub Actions lints, packages, and pushes the chart as an OCI artifact to GHCR.
-
-**Install a released chart:**
-
-```bash
-helm install kubeposture \
-  oci://ghcr.io/<owner>/<repo>/charts/kubeposture \
-  --version 0.1.0 \
-  -f my-values.yaml
-```
-
-> OCI charts do not use `helm repo add` — reference the full OCI URL directly.
+| Reset the dev DB | `docker compose exec db psql -U kubeposture -d postgres -c 'DROP DATABASE IF EXISTS kubeposture' -c 'CREATE DATABASE kubeposture'` then `python manage.py migrate` |
+| Mint a cluster bearer token | `python manage.py create_cluster_token <name>` |
+| Drain the ingest queue once | `python manage.py process_ingest_queue` |
+| Force a priority recompute | `python manage.py recalculate_priorities [--cluster <name>]` |
+| Capture a daily snapshot | `python manage.py snapshot_capture` |
+| Prune old snapshots | `python manage.py prune_snapshots [--dry-run]` |
+| Fetch latest EPSS / KEV | `python manage.py enrich_fetch --source {epss,kev}` |
+| Run scenario tests | `TESTING_HARNESS_ENABLED=true pytest tests/scenario_runner/` |
+| System check | `python manage.py check` |
 
 ---
 
-## User Management
+## Layout
 
-### Default admin user
+```
+core/
+  models/                # 16 models (Cluster, Workload, Finding, WorkloadSignal, …)
+  parsers/
+    inventory.py         # raw K8s manifest → staged upserts
+    trivy.py             # Trivy CRDs → Findings + signal IDs
+    kyverno.py           # Kyverno PolicyReports → signals
+  services/
+    ingest.py            # per-kind dispatch
+    queue.py             # SKIP LOCKED claim, gated on ImportMark.state='draining'
+    reaper.py            # kind-dispatched reap, zero-input no-op rule
+    dedup.py             # Finding hash + bulk upsert
+    snapshot.py          # daily-heartbeat capture
+    enrichment.py        # file + HTTP loaders for EPSS / KEV / VEX
+    worker.py            # claim → process → reap loop
+    test_assertions.py   # scenario-runner assertion evaluator
+  api/
+    auth.py              # bearer-token auth + ClusterToken hashing
+    views.py             # /api/v1/imports/*  /ingest/  /cluster-metadata/sync/
+    testing_views.py     # /api/v1/testing/*  (gated on settings flag)
+  signals.py             # signal registry (kyverno: / ksv: / kp: IDs)
+  urgency.py             # pure decision tree → effective_priority
+  management/commands/   # process_ingest_queue, enrich_fetch, …
 
-`manage.py ensure_adminuser` (run by the setup Job on every deploy) creates a plain application admin — in the `admin` group, no Django admin access, no superuser flag. Change the credentials in Helm values:
-
-```yaml
-adminUser:
-  username: admin
-  password: changeme
-  email: security@example.com
+scripts/import-cluster.py        # the importer (live and --from-folder modes)
+tests/scenario_runner/           # pytest plugin walking Architecture/mock_tests/
 ```
 
-### Assign a role to an existing user
+---
 
-```bash
-python manage.py shell -c "
-from django.contrib.auth.models import User, Group
-u = User.objects.get(username='jane')
-u.groups.set([Group.objects.get(name='operator')])  # viewer | operator | admin
-"
-```
+## Tech stack
 
-### Grant Django admin access (platform operator / superuser)
+- Django 5.2 LTS + DRF
+- PostgreSQL 16 (JSONB on `Finding.details` + `Snapshot.*`)
+- Whitenoise (static), gunicorn (WSGI)
+- DB-backed ingest queue — no Redis / Celery
+- pytest + pytest-django for unit tests + scenario suite
 
-Django admin (`/admin/`) is separate from application roles. Only needed for the platform operator who fixes data via Django admin (cluster metadata corrections, framework management, etc.). Keep this to one or two people.
+---
 
-```bash
-python manage.py shell -c "
-from django.contrib.auth.models import User
-u = User.objects.get(username='jane')
-u.is_staff = True       # grants /admin/ login
-u.is_superuser = True   # bypasses all permission checks in /admin/
-u.save()
-"
-```
+## Known limits in this milestone
 
-To revoke:
-
-```bash
-python manage.py shell -c "
-from django.contrib.auth.models import User
-u = User.objects.get(username='jane')
-u.is_staff = False
-u.is_superuser = False
-u.save()
-"
-```
-
-> Superusers bypass `has_role()` checks in the application too — they can do everything any role can do.
-
-## Running Tests
-
-```bash
-source .venv/bin/activate
-python -m pytest core/tests/ -v
-```
-
-Note: Tests marked with `@pytest.mark.django_db` require PostgreSQL running via docker-compose.
-
-## Environment Variables
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `SECRET_KEY` | Yes | - | Django secret key |
-| `DATABASE_URL` | Yes | - | PostgreSQL connection string |
-| `DEBUG` | No | `False` | Enable debug mode |
-| `ALLOWED_HOSTS` | No | `[]` | Comma-separated list of allowed hosts |
-| `LOG_LEVEL` | No | `INFO` | Logging level |
-
-## Tech Stack
-
-- **Backend:** Django 5.2 LTS + Django REST Framework
-- **UI:** Tabler (Bootstrap 5) + HTMX -- server-side rendering, zero JS build pipeline
-- **Database:** PostgreSQL 16 (JSONB hybrid model for findings)
-- **Static files:** Whitenoise
-- **Queue:** PostgreSQL-backed async ingest queue (no Redis/Celery)
-
+- No custom UI. Django admin only.
+- No live `--in-cluster` / `--kubeconfig` smoke test against a real
+  cluster recorded yet — only `--from-folder` is verified end-to-end.
+- VEX auto-fetch deferred. File-driven only.
+- Helm chart for the central + importer not yet bumped to the new
+  endpoint contract — local dev only for now.
+- `reap_safety_net` fires drainable reaps but does not yet delete
+  stuck `state=open` marks past 1h. Workaround: clear them via Django
+  admin or a SQL DELETE.

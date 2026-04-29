@@ -1,202 +1,243 @@
+"""Enrichment loaders — file-driven and HTTP-driven.
+
+Each loader applies the universal zero-input no-op rule: an empty or
+unreadable input skips the removal phase so existing rows stay intact.
 """
-Enrichment service — EPSS scores and CISA KEV data.
+from __future__ import annotations
 
-Two daily cron jobs fetch external intelligence to enrich findings:
-- EPSS: exploit probability per CVE (0.0-1.0)
-- KEV: whether a CVE is actively exploited in the wild
-
-Both use stdlib only (no requests/httpx) for zero extra dependencies.
-
-See: docs/architecture.md § Enrichment Sources
-"""
 import csv
 import gzip
 import io
 import json
 import logging
-from decimal import Decimal, InvalidOperation
-from urllib.error import URLError
+import socket
+import tempfile
+import time
+from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from django.utils import timezone
+from django.db import transaction
 
-logger = logging.getLogger(__name__)
+from core.models import EpssScore, Finding, KevEntry
+from core.urgency import recompute_batch
+
+log = logging.getLogger("core.enrichment")
+
+
+# ── HTTP fetch ────────────────────────────────────────────────────
 
 EPSS_URL = "https://epss.cyentia.com/epss_scores-current.csv.gz"
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 
+_HTTP_TIMEOUT = 60
+_HTTP_MAX_ATTEMPTS = 3
+_HTTP_BACKOFF_BASE = 1.5
+_USER_AGENT = "kubepostureng-enrichment/1.0"
 
-# ── EPSS ───────────────────────────────────────────────────────
 
-
-def fetch_epss_scores(url: str = EPSS_URL) -> dict[str, Decimal]:
-    """Download EPSS CSV and return {cve_id: score} dict.
-
-    The CSV is gzipped, ~7MB compressed. Format:
-      #model_version:v2024.01.01,score_date:2026-04-15
-      cve,epss,percentile
-      CVE-2024-1234,0.00091,0.38200
+def _http_get(url: str) -> bytes | None:
+    """Fetch `url` with retries. Returns None on persistent failure
+    so callers honour the zero-input no-op rule.
     """
-    logger.info("Downloading EPSS scores from %s", url)
-
-    req = Request(url, headers={"Accept-Encoding": "gzip"})
-    try:
-        with urlopen(req, timeout=60) as resp:
-            raw = resp.read()
-    except URLError as e:
-        logger.error("Failed to download EPSS: %s", e)
-        return {}
-
-    # Decompress gzip
-    try:
-        data = gzip.decompress(raw).decode("utf-8")
-    except Exception:
-        # Maybe not gzipped (in tests)
-        data = raw.decode("utf-8")
-
-    scores = {}
-    reader = csv.reader(io.StringIO(data))
-    for row in reader:
-        # Skip comments and header
-        if not row or row[0].startswith("#") or row[0] == "cve":
-            continue
+    last_err = ""
+    for attempt in range(1, _HTTP_MAX_ATTEMPTS + 1):
         try:
-            cve_id = row[0].strip()
-            score = Decimal(row[1].strip())
-            scores[cve_id] = score
-        except (IndexError, InvalidOperation):
-            continue
+            req = Request(url, headers={"User-Agent": _USER_AGENT})
+            with urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
+                return resp.read()
+        except HTTPError as e:
+            last_err = f"HTTP {e.code}"
+            if 400 <= e.code < 500:
+                break  # don't retry client errors
+        except (URLError, socket.timeout) as e:
+            last_err = f"transport: {e}"
 
-    logger.info("Parsed %d EPSS scores", len(scores))
-    return scores
+        if attempt < _HTTP_MAX_ATTEMPTS:
+            time.sleep(_HTTP_BACKOFF_BASE * (2 ** (attempt - 1)))
+
+    log.warning("enrichment.fetch.failed url=%s last_err=%s", url, last_err)
+    return None
 
 
-def apply_epss_scores(scores: dict[str, Decimal]) -> int:
-    """Bulk update epss_score on findings with matching CVE IDs."""
-    from core.models import Finding
+def fetch_epss() -> int:
+    """Download the latest EPSS dump (gzipped CSV), apply via the
+    file loader. Returns the number of rows upserted (0 on failure).
+    """
+    body = _http_get(EPSS_URL)
+    if body is None:
+        return 0
+    try:
+        text = gzip.decompress(body).decode("utf-8", errors="replace")
+    except OSError:
+        log.warning("enrichment.epss.gunzip_failed")
+        return 0
+    with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False) as tmp:
+        tmp.write(text)
+        tmp_path = tmp.name
+    try:
+        return load_epss_from_file(tmp_path)
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
 
-    if not scores:
+
+def fetch_kev() -> int:
+    """Download the latest CISA KEV catalog JSON, apply via the file
+    loader. Returns the number of rows upserted (0 on failure).
+    """
+    body = _http_get(KEV_URL)
+    if body is None:
+        return 0
+    text = body.decode("utf-8", errors="replace")
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tmp:
+        tmp.write(text)
+        tmp_path = tmp.name
+    try:
+        return load_kev_from_file(tmp_path)
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+# ── EPSS ----------------------------------------------------------
+
+def load_epss_from_file(path: str) -> int:
+    """Accepts the FIRST.org CSV format (`cve,epss,percentile`).
+
+    Returns the number of rows upserted.
+    """
+    text = _read(path)
+    if not text:
+        log.info("enrichment.epss.empty_input", extra={"path": path})
         return 0
 
-    now = timezone.now()
-    # Get all active CVE findings that have a vuln_id
-    findings = Finding.objects.filter(
-        vuln_id__startswith="CVE-",
-    ).only("id", "vuln_id", "epss_score")
+    rows = list(csv.reader(io.StringIO(text)))
+    # Skip blank rows + a possible 1-line preamble + 1 header row.
+    cleaned: list[tuple[str, float, float]] = []
+    for r in rows:
+        if not r or len(r) < 3:
+            continue
+        if r[0].startswith("#"):
+            continue
+        if r[0].lower() == "cve":
+            continue
+        try:
+            cleaned.append((r[0], float(r[1]), float(r[2])))
+        except ValueError:
+            continue
 
-    updated = 0
-    batch = []
-    for f in findings.iterator(chunk_size=2000):
-        score = scores.get(f.vuln_id)
-        if score is not None and f.epss_score != score:
-            f.epss_score = score
-            batch.append(f)
+    if not cleaned:
+        log.info("enrichment.epss.no_rows_after_parse", extra={"path": path})
+        return 0
 
-        if len(batch) >= 2000:
-            Finding.objects.bulk_update(batch, ["epss_score"], batch_size=2000)
-            updated += len(batch)
-            batch = []
-
-    if batch:
-        Finding.objects.bulk_update(batch, ["epss_score"], batch_size=2000)
-        updated += len(batch)
-
-    logger.info("Updated EPSS scores on %d findings", updated)
-    return updated
-
-
-def enrich_epss(url: str = EPSS_URL) -> dict:
-    """Download EPSS and apply to findings. Recalculates priorities. Returns summary."""
-    scores = fetch_epss_scores(url)
-    updated = apply_epss_scores(scores)
-
-    # Recalculate priorities since EPSS changes affect the decision tree
-    priorities_updated = 0
-    if updated > 0:
-        from core.services.priority import recalculate_all_priorities
-
-        priorities_updated = recalculate_all_priorities()
-        logger.info("Recalculated %d priorities after EPSS update", priorities_updated)
-
-    return {
-        "scores_downloaded": len(scores),
-        "findings_updated": updated,
-        "priorities_recalculated": priorities_updated,
-    }
-
-
-# ── CISA KEV ───────────────────────────────────────────────────
-
-
-def fetch_kev_cves(url: str = KEV_URL) -> set[str]:
-    """Download CISA KEV JSON and return set of CVE IDs.
-
-    JSON format:
-      {"title": "...", "catalogVersion": "...",
-       "vulnerabilities": [{"cveID": "CVE-2024-1234", ...}, ...]}
-    """
-    logger.info("Downloading CISA KEV from %s", url)
-
-    req = Request(url, headers={"Accept": "application/json"})
-    try:
-        with urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read())
-    except URLError as e:
-        logger.error("Failed to download KEV: %s", e)
-        return set()
-    except json.JSONDecodeError:
-        logger.error("KEV response is not valid JSON")
-        return set()
-
-    cves = set()
-    for vuln in data.get("vulnerabilities", []):
-        cve_id = vuln.get("cveID", "")
-        if cve_id:
-            cves.add(cve_id)
-
-    logger.info("Parsed %d KEV CVEs", len(cves))
-    return cves
-
-
-def apply_kev_flags(kev_cves: set[str]) -> dict:
-    """Bulk update kev_listed on findings. Sets True for matches, False for non-matches."""
-    from core.models import Finding
-
-    if not kev_cves:
-        return {"marked_kev": 0, "cleared_kev": 0}
-
-    # Mark matching findings as KEV-listed
-    marked = Finding.objects.filter(
-        vuln_id__in=kev_cves,
-    ).exclude(kev_listed=True).update(kev_listed=True)
-
-    # Clear KEV flag on findings no longer in the list
-    cleared = Finding.objects.filter(
-        kev_listed=True,
-        vuln_id__startswith="CVE-",
-    ).exclude(vuln_id__in=kev_cves).update(kev_listed=False)
-
-    logger.info("KEV: %d marked, %d cleared", marked, cleared)
-    return {"marked_kev": marked, "cleared_kev": cleared}
-
-
-def enrich_kev(url: str = KEV_URL) -> dict:
-    """Download KEV and apply to findings. Recalculates priorities. Returns summary."""
-    kev_cves = fetch_kev_cves(url)
-    result = apply_kev_flags(kev_cves)
-    result["kev_cves_downloaded"] = len(kev_cves)
-
-    # Recalculate priorities since KEV changes affect the decision tree
-    total_changed = result["marked_kev"] + result["cleared_kev"]
-    if total_changed > 0:
-        from core.services.priority import recalculate_all_priorities
-
-        result["priorities_recalculated"] = recalculate_all_priorities()
-        logger.info(
-            "Recalculated %d priorities after KEV update",
-            result["priorities_recalculated"],
+    seen_ids = [cve for cve, _, _ in cleaned]
+    n = 0
+    with transaction.atomic():
+        # Bulk UPSERT — the dump is ~250k rows; per-row update_or_create
+        # is unworkable (~5 min). bulk_create + update_conflicts gets it
+        # under 5s.
+        rows = [
+            EpssScore(vuln_id=cve, score=score, percentile=pct)
+            for cve, score, pct in cleaned
+        ]
+        EpssScore.objects.bulk_create(
+            rows,
+            update_conflicts=True,
+            update_fields=["score", "percentile"],
+            unique_fields=["vuln_id"],
+            batch_size=5000,
         )
-    else:
-        result["priorities_recalculated"] = 0
+        n = len(rows)
+        # Removal phase: drop rows for CVEs no longer in the dump.
+        EpssScore.objects.exclude(vuln_id__in=seen_ids).delete()
 
-    return result
+        # Refresh the Finding-side cache for vuln_ids we touched. We
+        # only update findings whose vuln_id appears in the dump; a
+        # vuln_id that dropped out gets its cache cleared too.
+        for cve, score, pct in cleaned:
+            Finding.objects.filter(vuln_id=cve).update(
+                epss_score=score,
+                epss_percentile=pct,
+            )
+        Finding.objects.exclude(vuln_id__in=seen_ids).filter(
+            epss_score__isnull=False
+        ).update(epss_score=None, epss_percentile=None)
+
+    affected = list(Finding.objects.filter(vuln_id__in=seen_ids))
+    recompute_batch(affected)
+    return n
+
+
+# ── KEV -----------------------------------------------------------
+
+def load_kev_from_file(path: str) -> int:
+    """Accepts the CISA KEV JSON format (`{"vulnerabilities": [...]}`)."""
+    text = _read(path)
+    if not text:
+        log.info("enrichment.kev.empty_input", extra={"path": path})
+        return 0
+    try:
+        doc = json.loads(text)
+    except json.JSONDecodeError:
+        log.warning("enrichment.kev.invalid_json", extra={"path": path})
+        return 0
+    vulns = doc.get("vulnerabilities") or []
+    if not vulns:
+        log.info("enrichment.kev.no_rows", extra={"path": path})
+        return 0
+
+    seen_ids = [v["cveID"] for v in vulns if v.get("cveID")]
+    n = 0
+    with transaction.atomic():
+        rows = [
+            KevEntry(
+                vuln_id=v["cveID"],
+                added_at=_date(v.get("dateAdded")),
+                short_description=v.get("shortDescription") or "",
+                required_action=v.get("requiredAction") or "",
+                due_date=_date(v.get("dueDate")),
+            )
+            for v in vulns if v.get("cveID")
+        ]
+        KevEntry.objects.bulk_create(
+            rows,
+            update_conflicts=True,
+            update_fields=["added_at", "short_description", "required_action", "due_date"],
+            unique_fields=["vuln_id"],
+            batch_size=2000,
+        )
+        n = len(rows)
+        KevEntry.objects.exclude(vuln_id__in=seen_ids).delete()
+
+        # Update Finding caches.
+        Finding.objects.filter(vuln_id__in=list(seen_ids)).update(kev_listed=True)
+        Finding.objects.exclude(vuln_id__in=list(seen_ids)).filter(kev_listed=True).update(
+            kev_listed=False
+        )
+
+    affected = list(
+        Finding.objects.filter(vuln_id__in=list(seen_ids))
+    )
+    recompute_batch(affected)
+    return n
+
+
+# ── Helpers -------------------------------------------------------
+
+def _read(path: str) -> str:
+    p = Path(path)
+    if not p.is_file():
+        return ""
+    try:
+        return p.read_text()
+    except OSError:
+        return ""
+
+
+def _date(value):
+    if not value:
+        return None
+    from datetime import date
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None

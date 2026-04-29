@@ -1,0 +1,22 @@
+{% load findings_tags %}
+{% for row in rows %}
+<tr>
+  <td>{{ row.cluster }}</td>
+  <td>{{ row.namespace }}</td>
+  <td>
+    <a href="{% url 'workloads-detail' kind=row.kind name=row.name %}?cluster={{ row.cluster }}">
+      <strong>{{ row.kind }}/{{ row.name }}</strong>
+    </a>
+  </td>
+  <td class="text-end">{% count_badge row.n_immediate "immediate" %}</td>
+  <td class="text-end">{% count_badge row.n_out_of_cycle "out_of_cycle" %}</td>
+  <td class="text-end">{% count_badge row.n_scheduled "scheduled" %}</td>
+  <td class="text-end">{% count_badge row.n_defer "defer" %}</td>
+</tr>
+{% empty %}
+<tr>
+  <td colspan="7" class="text-center text-muted p-3">
+    No workloads match these filters.
+  </td>
+</tr>
+{% endfor %}

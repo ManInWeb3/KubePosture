@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+{% load help_tags %}
+{% load findings_tags %}
+
+{% block title %}Workloads — KubePosture{% endblock %}
+{% block pretitle %}Workloads{% endblock %}
+{% block page_title %}Workloads{% endblock %}
+
+{% block content %}
+{% help "Workloads" %}
+  <p><strong>One row per workload</strong> — a unique
+  <code>(cluster, namespace, kind, name)</code>. The four count
+  columns are the urgency tree's verdict on this workload's currently
+  visible findings — IMMEDIATE / OUT-OF-CYCLE / SCHEDULED / DEFER —
+  taking severity, EPSS, KEV, and exposure context into account.</p>
+  <p><strong>Default sort:</strong> # Immediate desc → # Out-of-Cycle
+  desc → # Scheduled desc → name asc. Workloads needing action today
+  surface first. Click any count header to override.</p>
+  <p>Default view shows <em>deployed</em> workloads only and hides
+  findings with active <em>Accept</em> / <em>False positive</em>
+  overlays. Toggle the switches to widen the view.</p>
+{% endhelp %}
+
+<!-- CVE Trend (global or per-cluster, follows the cluster filter) -->
+<div class="card mb-3">
+  <div class="card-header d-flex align-items-center">
+    <h3 class="card-title">
+      CVE Trend
+      <span class="text-muted small ms-2">
+        {% if filters.cluster %}cluster <code>{{ filters.cluster }}</code>{% else %}fleet-wide{% endif %}
+        — last 90 days
+      </span>
+    </h3>
+    <div class="ms-auto btn-group btn-group-sm" role="group" aria-label="Stack mode" id="list-trend-stack-toggle">
+      <button type="button" class="btn btn-outline-primary active" data-stack="severity">Severity</button>
+      <button type="button" class="btn btn-outline-primary" data-stack="priority">Urgency</button>
+    </div>
+  </div>
+  <div class="card-body">
+    <div id="list-trend-chart" style="min-height: 280px;"></div>
+  </div>
+</div>
+<script>
+  (function () {
+    var cluster = "{{ filters.cluster|escapejs }}";
+    var state = { stack: "severity" };
+    function renderTrend() {
+      renderSnapshotChart({
+        elId: "list-trend-chart",
+        scope: cluster ? "cluster" : "global",
+        stack: state.stack,
+        params: cluster ? { cluster: cluster, days: 90 } : { days: 90 },
+        height: 280,
+      });
+    }
+    var group = document.getElementById("list-trend-stack-toggle");
+    if (group) {
+      group.addEventListener("click", function (ev) {
+        var btn = ev.target.closest("button[data-stack]");
+        if (!btn) return;
+        group.querySelectorAll("button").forEach(function (b) { b.classList.remove("active"); });
+        btn.classList.add("active");
+        state.stack = btn.dataset.stack;
+        renderTrend();
+      });
+    }
+    renderTrend();
+  })();
+</script>
+
+<form id="workloads-filters" method="get" class="card mb-3"
+      hx-get="{% url 'workloads-list' %}"
+      hx-target="#workload-rows"
+      hx-headers='{"HX-Target": "workload-rows"}'
+      hx-push-url="true"
+      hx-trigger="change, submit, keyup changed delay:400ms from:input[type=text]">
+  <div class="card-body">
+    <div class="row g-2 align-items-center flex-nowrap overflow-auto">
+      <div class="col-auto">
+        <select name="cluster" class="form-select form-select-sm">
+          <option value="">All clusters</option>
+          {% for c in clusters %}
+            <option value="{{ c.name }}" {% if filters.cluster == c.name %}selected{% endif %}>{{ c.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-auto">
+        <select name="namespace" class="form-select form-select-sm">
+          <option value="">Any namespace</option>
+          {% for n in namespace_names %}
+            <option value="{{ n }}" {% if filters.namespace == n %}selected{% endif %}>{{ n }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-auto">
+        <input type="text" name="name" class="form-control form-control-sm"
+               placeholder="name contains…" value="{{ filters.name }}">
+      </div>
+      <div class="col-auto">
+        <label class="form-check form-switch m-0">
+          <input class="form-check-input" type="checkbox" name="has_immediate" value="true"
+                 {% if filters.has_immediate %}checked{% endif %}>
+          <span class="form-check-label">Has Immediate</span>
+        </label>
+      </div>
+      <div class="col-auto">
+        <label class="form-check form-switch m-0">
+          <input class="form-check-input" type="checkbox" name="has_out_of_cycle" value="true"
+                 {% if filters.has_out_of_cycle %}checked{% endif %}>
+          <span class="form-check-label">Has Out-of-Cycle</span>
+        </label>
+      </div>
+      <div class="col-auto">
+        <label class="form-check form-switch m-0">
+          <input class="form-check-input" type="checkbox" name="deployed_only" value="true"
+                 {% if filters.deployed_only %}checked{% endif %}>
+          <span class="form-check-label">Deployed only</span>
+        </label>
+      </div>
+      <div class="col-auto">
+        <label class="form-check form-switch m-0">
+          <input class="form-check-input" type="checkbox" name="include_muted" value="true"
+                 {% if filters.include_muted %}checked{% endif %}>
+          <span class="form-check-label">Include muted</span>
+        </label>
+      </div>
+      <div class="col-auto ms-auto">
+        <a href="{% url 'workloads-list' %}" class="btn btn-sm btn-outline-secondary">Clear</a>
+      </div>
+    </div>
+
+    <input type="hidden" name="sort" value="{{ filters.sort }}">
+    <input type="hidden" name="dir" value="{{ filters.dir }}">
+  </div>
+</form>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table">
+      <thead>
+        <tr>
+          {% include "workloads/_sort_header.html" with col="cluster" label="Cluster" align="" %}
+          {% include "workloads/_sort_header.html" with col="namespace" label="Namespace" align="" %}
+          {% include "workloads/_sort_header.html" with col="name" label="Workload" align="" %}
+          {% include "workloads/_sort_header.html" with col="n_immediate" label="# Immediate" align="text-end" %}
+          {% include "workloads/_sort_header.html" with col="n_out_of_cycle" label="# Out-of-Cycle" align="text-end" %}
+          {% include "workloads/_sort_header.html" with col="n_scheduled" label="# Scheduled" align="text-end" %}
+          {% include "workloads/_sort_header.html" with col="n_defer" label="# Defer" align="text-end" %}
+        </tr>
+      </thead>
+      <tbody id="workload-rows">
+        {% include "workloads/_rows.html" %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+  (function() {
+    var form = document.getElementById('workloads-filters');
+    if (!form) return;
+    var sortIn = form.querySelector('[name="sort"]');
+    var dirIn = form.querySelector('[name="dir"]');
+    document.querySelectorAll('th.sortable').forEach(function(th) {
+      th.addEventListener('click', function() {
+        var col = th.dataset.sortCol;
+        if (sortIn.value === col) {
+          dirIn.value = (dirIn.value === 'asc') ? 'desc' : 'asc';
+        } else {
+          sortIn.value = col;
+          dirIn.value = 'desc';
+        }
+        htmx.trigger(form, 'submit');
+      });
+    });
+  })();
+</script>
+{% endblock %}

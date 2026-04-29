@@ -1,0 +1,62 @@
+{% load findings_tags %}
+<div id="findings-panel" class="card">
+  <div class="card-header">
+    <h3 class="card-title">Findings</h3>
+    {% if active_row %}
+      <span class="ms-2 text-muted small">
+        <strong>{{ active_row.image.ref|default:active_row.image.repository }}</strong>
+        on {{ active_row.cluster.name }}/{{ active_row.namespace.name }}
+        — {{ findings|length }} active
+      </span>
+    {% else %}
+      <span class="ms-2 text-muted small">No image selected.</span>
+    {% endif %}
+  </div>
+  <div class="table-responsive findings-scroll">
+    <table class="table table-vcenter card-table" data-sortable>
+      <thead class="findings-sticky">
+        <tr>
+          <th class="sortable" style="width: 8.5rem; white-space: nowrap;">Vuln ID</th>
+          <th>Title</th>
+          <th class="sortable" style="width: 9rem;">Pkg</th>
+          <th class="sortable sort-desc" title="Effective priority — contextual urgency band (Immediate / Out-of-Cycle / Scheduled / Defer)">Urgency</th>
+          <th class="sortable" title="CVE severity (Critical / High / Medium / Low / Info)">Prio</th>
+          <th class="sortable text-end" title="Exploit Prediction Scoring System — probability of exploitation in next 30 days">EPSS</th>
+          <th class="sortable" title="CISA Known Exploited Vulnerability">KEV</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for f in findings %}
+        <tr class="cursor-pointer"
+            hx-get="{% url 'findings-detail-panel' f.pk %}"
+            hx-target="#finding-detail-offcanvas"
+            hx-swap="innerHTML"
+            data-bs-toggle="offcanvas"
+            data-bs-target="#finding-detail-offcanvas">
+          <td><code class="small">{{ f.vuln_id|default:"—" }}</code></td>
+          <td><span class="text-muted small" style="white-space: normal; word-break: break-word;">{{ f.title }}</span></td>
+          <td style="word-break: break-word;">{{ f.pkg_name|default:"—" }}</td>
+          <td data-sort="{{ f.effective_priority|priority_rank }}">
+            {% priority_badge f.effective_priority %}
+          </td>
+          <td data-sort="{{ f.severity|severity_rank }}">
+            {% severity_badge f.severity %}
+          </td>
+          <td class="text-end" data-sort="{{ f.epss_score|default:0 }}">
+            {% epss_badge f.epss_score %}
+          </td>
+          <td data-sort="{% if f.kev_listed %}1{% else %}0{% endif %}">
+            {% kev_badge f.kev_listed %}
+          </td>
+        </tr>
+        {% empty %}
+        <tr data-emptystate>
+          <td colspan="7" class="text-center text-muted p-3">
+            No active findings on this image.
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>

@@ -1,225 +1,149 @@
-"""
-Deduplication engine — hash computation, upsert, stale resolution.
+"""Finding dedup + bulk upsert.
 
-Extracted from DefectDojo (BSD-3 licensed) and simplified for K8s-only use case.
-See: docs/architecture.md § Deduplication Algorithm
-
-Key insight: Trivy sends one CRD per resource (e.g., VulnerabilityReport for
-ReplicaSet/backend-xyz). resolve_stale must be scoped to that specific resource,
-not the entire cluster — otherwise ingesting report B resolves report A's findings.
+Dedup hash per dev_docs/03-data-model.md *Finding — Dedup key*.
 """
+from __future__ import annotations
+
 import hashlib
-import logging
+from collections.abc import Iterable
 
-from django.db import IntegrityError, transaction
-from django.utils import timezone
+from django.db import transaction
 
-from core.constants import Origin, Status
+from core.models import (
+    Cluster,
+    EpssScore,
+    Finding,
+    Image,
+    KevEntry,
+    Workload,
+)
+from core.urgency import apply_score
 
-logger = logging.getLogger(__name__)
+
+def compute_hash(
+    *,
+    source: str,
+    category: str,
+    vuln_id: str,
+    workload_id: int | None,
+    cluster_name: str,
+    image_digest: str,
+    pkg_name: str,
+    installed_version: str,
+) -> str:
+    if workload_id is not None:
+        parts = (
+            source,
+            category,
+            vuln_id,
+            str(workload_id),
+            image_digest or "",
+            pkg_name or "",
+            installed_version or "",
+        )
+    else:
+        parts = (
+            source,
+            category,
+            vuln_id,
+            cluster_name,
+            pkg_name or "",
+            installed_version or "",
+        )
+    h = hashlib.sha256()
+    h.update("|".join(parts).encode("utf-8"))
+    return h.hexdigest()
 
 
-def compute_hash(finding_dict: dict) -> str:
-    """Compute dedup hash from K8s identity fields.
+def _enrichment_for(vuln_id: str) -> dict:
+    """Look up enrichment values for a fresh Finding upsert.
 
-    hash = sha256(source|title|severity|vuln_id|namespace|resource_kind|resource_name)
-    All inputs are column fields (not from JSONB details).
-    `namespace` is the namespace *string* (empty for cluster-scoped findings).
+    Returns a dict of fields ready to merge into the Finding defaults.
     """
-    parts = "|".join(
-        [
-            str(finding_dict.get("source", "")),
-            str(finding_dict.get("title", "")),
-            str(finding_dict.get("severity", "")),
-            str(finding_dict.get("vuln_id", "")),
-            str(finding_dict.get("namespace", "")),
-            str(finding_dict.get("resource_kind", "")),
-            str(finding_dict.get("resource_name", "")),
-        ]
-    )
-    return hashlib.sha256(parts.encode()).hexdigest()
-
-
-def _resolve_namespace_cache(cluster, finding_dicts: list[dict]) -> dict:
-    """Build a {name: Namespace} cache for this batch, creating rows lazily.
-
-    Keeps ingest O(1) lookups regardless of how many findings share the same
-    namespace. Empty-string namespace means cluster-scoped → skipped (None FK).
-    """
-    from core.models import Namespace
-
-    needed = {fd.get("namespace", "") for fd in finding_dicts if fd.get("namespace")}
-    if not needed:
-        return {}
-
-    existing = {
-        ns.name: ns
-        for ns in Namespace.objects.filter(cluster=cluster, name__in=needed)
+    out = {
+        "epss_score": None,
+        "epss_percentile": None,
+        "kev_listed": False,
     }
-    missing = needed - existing.keys()
-    for name in missing:
-        # Create with defaults — auto-detect from the sync endpoint will
-        # later update internet_exposed if found.
-        ns, _ = Namespace.objects.get_or_create(cluster=cluster, name=name)
-        existing[name] = ns
-    return existing
+    if not vuln_id:
+        return out
+    if vuln_id.startswith("CVE-"):
+        epss = EpssScore.objects.filter(vuln_id=vuln_id).first()
+        if epss:
+            out["epss_score"] = epss.score
+            out["epss_percentile"] = epss.percentile
+        if KevEntry.objects.filter(vuln_id=vuln_id).exists():
+            out["kev_listed"] = True
+    return out
 
 
-def upsert_findings(cluster, source: str, finding_dicts: list[dict]) -> dict:
-    """Upsert findings by (origin, cluster, hash_code).
+@transaction.atomic
+def upsert_findings(
+    *,
+    cluster: Cluster,
+    workload: Workload | None,
+    image: Image | None,
+    findings: Iterable[dict],
+    observation_time,
+) -> tuple[int, int]:
+    """Bulk-upsert finding dicts. Returns (created, updated) counts.
 
-    Uses select_for_update() to prevent race conditions when multiple
-    queue workers process findings for the same resource concurrently.
-
-    Returns: {"created": int, "updated": int, "reactivated": int,
-              "hashes": set, "scope": dict}
-    The scope identifies the resource this batch covers (for resolve_stale).
+    Each finding dict needs:
+      source, category, vuln_id, pkg_name, installed_version,
+      fixed_version, title, severity, cvss_score, cvss_vector, details
     """
-    from core.models import Finding
-    from core.services.priority import compute_priority
+    created = 0
+    updated = 0
+    cluster_name = cluster.name
 
-    now = timezone.now()
-    stats = {"created": 0, "updated": 0, "reactivated": 0}
-    seen_hashes = set()
-
-    ns_cache = _resolve_namespace_cache(cluster, finding_dicts)
-
-    # Extract scope from first finding — all findings in a CRD share the same resource
-    scope = {}
-    if finding_dicts:
-        first = finding_dicts[0]
-        scope = {
-            "namespace": first.get("namespace", ""),
-            "resource_kind": first.get("resource_kind", ""),
-            "resource_name": first.get("resource_name", ""),
-            "category": first.get("category", ""),
+    for f in findings:
+        hc = compute_hash(
+            source=f["source"],
+            category=f["category"],
+            vuln_id=f.get("vuln_id") or "",
+            workload_id=workload.id if workload else None,
+            cluster_name=cluster_name,
+            image_digest=image.digest if image else "",
+            pkg_name=f.get("pkg_name") or "",
+            installed_version=f.get("installed_version") or "",
+        )
+        defaults = {
+            "cluster": cluster,
+            "workload": workload,
+            "image": image,
+            "category": f["category"],
+            "vuln_id": f.get("vuln_id") or "",
+            "pkg_name": f.get("pkg_name") or "",
+            "installed_version": f.get("installed_version") or "",
+            "fixed_version": f.get("fixed_version") or "",
+            "title": f["title"][:512],
+            "severity": f["severity"],
+            "cvss_score": f.get("cvss_score"),
+            "cvss_vector": f.get("cvss_vector") or "",
+            "details": f.get("details") or {},
         }
+        # Fold in enrichment values.
+        defaults.update(_enrichment_for(defaults["vuln_id"]))
 
-    for fd in finding_dicts:
-        hash_code = compute_hash(fd)
-        seen_hashes.add(hash_code)
+        existing = Finding.objects.filter(source=f["source"], hash_code=hc).first()
+        if existing is None:
+            obj = Finding(
+                source=f["source"],
+                hash_code=hc,
+                first_seen=observation_time,
+                last_seen=observation_time,
+                **defaults,
+            )
+            apply_score(obj)
+            obj.save()
+            created += 1
+        else:
+            for k, v in defaults.items():
+                setattr(existing, k, v)
+            if existing.last_seen is None or observation_time > existing.last_seen:
+                existing.last_seen = observation_time
+            apply_score(existing)
+            existing.save()
+            updated += 1
 
-        ns_name = fd.get("namespace", "")
-        ns_obj = ns_cache.get(ns_name) if ns_name else None
-
-        with transaction.atomic():
-            try:
-                existing = Finding.objects.select_for_update().get(
-                    origin=Origin.CLUSTER, cluster=cluster, hash_code=hash_code
-                )
-
-                if existing.status == Status.RESOLVED:
-                    existing.status = Status.ACTIVE
-                    existing.resolved_at = None
-                    existing.last_seen = now
-                    existing.details = fd.get("details", {})
-                    existing.namespace = ns_obj
-                    existing.effective_priority = compute_priority(existing, cluster)
-                    existing.save(
-                        update_fields=[
-                            "status", "resolved_at", "last_seen", "details",
-                            "namespace", "effective_priority",
-                        ]
-                    )
-                    stats["reactivated"] += 1
-                elif existing.status in (Status.ACTIVE, Status.ACKNOWLEDGED):
-                    existing.last_seen = now
-                    existing.details = fd.get("details", {})
-                    existing.namespace = ns_obj
-                    existing.effective_priority = compute_priority(existing, cluster)
-                    existing.save(
-                        update_fields=[
-                            "last_seen", "details", "namespace", "effective_priority"
-                        ]
-                    )
-                    stats["updated"] += 1
-                else:
-                    # risk_accepted or false_positive — update last_seen only
-                    existing.last_seen = now
-                    existing.save(update_fields=["last_seen"])
-                    stats["updated"] += 1
-
-            except Finding.DoesNotExist:
-                try:
-                    finding = Finding(
-                        origin=Origin.CLUSTER,
-                        cluster=cluster,
-                        namespace=ns_obj,
-                        resource_kind=fd.get("resource_kind", ""),
-                        resource_name=fd.get("resource_name", ""),
-                        title=fd["title"],
-                        severity=fd["severity"],
-                        vuln_id=fd.get("vuln_id", ""),
-                        category=fd["category"],
-                        source=source,
-                        status=Status.ACTIVE,
-                        hash_code=hash_code,
-                        details=fd.get("details", {}),
-                    )
-                    finding.effective_priority = compute_priority(finding, cluster)
-                    finding.save()
-                    stats["created"] += 1
-                except IntegrityError:
-                    # Concurrent worker created the same finding — treat as update
-                    existing = Finding.objects.get(
-                        origin=Origin.CLUSTER, cluster=cluster, hash_code=hash_code
-                    )
-                    existing.last_seen = now
-                    existing.save(update_fields=["last_seen"])
-                    stats["updated"] += 1
-
-    stats["hashes"] = seen_hashes
-    stats["scope"] = scope
-    return stats
-
-
-def resolve_stale(cluster, source: str, current_hashes: set[str], scope: dict) -> int:
-    """Resolve findings for the same resource that are not in the current batch.
-
-    Scoped to (cluster, source, namespace, resource_kind, resource_name, category)
-    so ingesting a VulnerabilityReport for resource A doesn't resolve findings
-    from resource B.
-
-    Skips cluster-level reports (empty namespace + resource_kind) to avoid
-    incorrectly resolving unrelated findings.
-
-    Only resolves active/acknowledged findings.
-    Does NOT touch risk_accepted or false_positive.
-    """
-    from core.models import Finding
-
-    if not scope:
-        return 0
-
-    # Don't resolve stale for cluster-level reports where scope is too broad
-    if not scope.get("namespace") and not scope.get("resource_name"):
-        logger.debug(
-            "Skipping stale resolution for cluster-level scope: %s/%s",
-            cluster.name,
-            scope.get("category", ""),
-        )
-        return 0
-
-    now = timezone.now()
-    stale_qs = Finding.objects.filter(
-        origin=Origin.CLUSTER,
-        cluster=cluster,
-        source=source,
-        namespace__name=scope["namespace"],
-        resource_kind=scope["resource_kind"],
-        resource_name=scope["resource_name"],
-        category=scope["category"],
-        status__in=[Status.ACTIVE, Status.ACKNOWLEDGED],
-    ).exclude(hash_code__in=current_hashes)
-
-    count = stale_qs.update(status=Status.RESOLVED, resolved_at=now)
-    if count:
-        logger.info(
-            "Resolved %d stale %s findings for %s/%s/%s",
-            count,
-            scope["category"],
-            cluster.name,
-            scope["namespace"],
-            scope["resource_name"],
-        )
-    return count
+    return created, updated

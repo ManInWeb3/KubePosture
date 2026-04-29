@@ -14,11 +14,32 @@ rules:
       - namespaces
       - nodes
       - services
+      # Pod status carries resolved container digests (imageID), which we
+      # need to populate Image.digest precisely instead of inferring from
+      # the spec tag.
+      - pods
     verbs: ["get", "list"]
   - apiGroups: ["networking.k8s.io"]
     resources:
       - ingresses
-      - networkpolicies
+    verbs: ["get", "list"]
+  # Workload controllers — per-workload exposure + security context drive
+  # the priority tree (directly_exposed, host_network, privileged, RBAC).
+  # ReplicaSets + Jobs are also listed: we read their ownerReferences to
+  # map what Trivy actually scans (the child) back to the parent
+  # Deployment / CronJob. That normalization preserves Finding identity
+  # across rollouts (same CVE, same controller → same hash).
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - statefulsets
+      - daemonsets
+      - replicasets
+    verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources:
+      - cronjobs
+      - jobs
     verbs: ["get", "list"]
   {{- if .Values.import.trivy }}
   # Trivy Operator CRDs (7 types)

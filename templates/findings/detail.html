@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% load findings_tags %}
+{% load help_tags %}
 
 {% block title %}{{ finding.vuln_id|default:finding.title|truncatechars:40 }} — KubePosture{% endblock %}
 {% block pretitle %}Finding Detail{% endblock %}
@@ -11,6 +12,18 @@
 {% endblock %}
 
 {% block content %}
+{% help "Finding Detail" %}
+  <p><strong>What it is:</strong> the canonical view of a single Finding —
+  identity (vuln_id, package, versions), risk signals (severity, CVSS, EPSS,
+  KEV), context (cluster, namespace, workload, image), description and
+  remediation, plus the raw source-specific JSONB payload.</p>
+  <p><strong>Where the data comes from:</strong> Trivy / Kyverno CRD ingest
+  (immutable raw fields) plus daily EPSS / KEV enrichment crons.</p>
+  <p class="mb-0"><strong>How to use:</strong> read the description and follow
+  the references; if the finding is a known false positive or you must accept
+  the risk, use the action buttons (admin-only) — accept and false-positive
+  require a reason and an expiry.</p>
+{% endhelp %}
 <div class="row row-cards">
   <!-- Main info -->
   <div class="col-lg-8">
@@ -46,14 +59,14 @@
             <div class="datagrid-content">{% epss_badge finding.epss_score %}</div>
           </div>
           {% endif %}
-          {% if finding.details.component_name %}
+          {% if finding.component_name %}
           <div class="datagrid-item">
             <div class="datagrid-title">Component</div>
             <div class="datagrid-content">
-              {{ finding.details.component_name }}
+              {{ finding.component_name }}
               {% if finding.details.installed_version %}@ {{ finding.details.installed_version }}{% endif %}
-              {% if finding.details.fixed_version %}
-                <span class="text-success ms-1">Fix: {{ finding.details.fixed_version }}</span>
+              {% if finding.fixed_version %}
+                <span class="text-success ms-1">Fix: {{ finding.fixed_version }}</span>
               {% endif %}
             </div>
           </div>
@@ -97,16 +110,61 @@
             <div class="datagrid-title">Resource</div>
             <div class="datagrid-content">{{ finding.resource_kind }}/{{ finding.resource_name }}</div>
           </div>
-          {% if finding.details.image %}
+          {% if finding.image_ref %}
           <div class="datagrid-item">
             <div class="datagrid-title">Image</div>
-            <div class="datagrid-content">{{ finding.details.image }}</div>
+            <div class="datagrid-content">
+              {{ finding.image_ref }}
+              {% if finding.image_digest %}
+                <div class="small text-muted font-monospace">{{ finding.image_digest|truncatechars:23 }}</div>
+              {% endif %}
+              {% if finding.base_eosl %}
+                <span class="badge bg-danger-lt text-danger ms-1" title="Trivy flagged this base OS as end-of-service-life">EOSL</span>
+              {% endif %}
+            </div>
           </div>
           {% endif %}
           {% if finding.details.container %}
           <div class="datagrid-item">
             <div class="datagrid-title">Container</div>
             <div class="datagrid-content">{{ finding.details.container }}</div>
+          </div>
+          {% endif %}
+          {% if finding.workload %}
+          <div class="datagrid-item">
+            <div class="datagrid-title">Exposure</div>
+            <div class="datagrid-content">
+              {% if finding.workload.directly_exposed %}
+                <span class="badge bg-red-lt">{{ finding.workload.exposure_type }}</span>
+                <small class="text-muted ms-1">directly reachable</small>
+              {% else %}
+                <span class="text-muted">{{ finding.workload.exposure_type }}</span>
+              {% endif %}
+            </div>
+          </div>
+          <div class="datagrid-item">
+            <div class="datagrid-title">Escalation</div>
+            <div class="datagrid-content">
+              {% if finding.workload.has_privileged_container %}<span class="badge bg-red-lt">privileged</span>{% endif %}
+              {% if finding.workload.host_network %}<span class="badge bg-orange-lt">hostNet</span>{% endif %}
+              {% if finding.workload.host_pid %}<span class="badge bg-orange-lt">hostPID</span>{% endif %}
+              {% if finding.workload.has_rbac_finding %}<span class="badge bg-orange-lt">rbac</span>{% endif %}
+              {% if not finding.workload.has_privileged_container and not finding.workload.host_network and not finding.workload.host_pid and not finding.workload.has_rbac_finding %}
+                <span class="text-muted">none</span>
+              {% endif %}
+            </div>
+          </div>
+          {% endif %}
+          {% if finding.package_type %}
+          <div class="datagrid-item">
+            <div class="datagrid-title">Ownership</div>
+            <div class="datagrid-content">
+              {% if finding.package_type == "os" %}
+                <span class="badge bg-purple-lt">Platform (base image)</span>
+              {% elif finding.package_type == "library" %}
+                <span class="badge bg-green-lt">App (dependency)</span>
+              {% endif %}
+            </div>
           </div>
           {% endif %}
         </div>
