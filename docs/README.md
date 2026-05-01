@@ -7,7 +7,8 @@
 
 ## Operations
 
-- [Handling Vulnerable Images](operations/handling-vulnerable-images.md) — playbook for responding to `Immediate` / `Out-of-Cycle` findings, split between **internally-developed apps** (patch source, redeploy) and **third-party images** (the 5-step deployer funnel: VEX → exposure recheck → compensating control → hardened-base swap → time-boxed risk acceptance).
+- [Triaging High-Priority Findings](operations/triage-high-priority-findings.md) — first 30–60 minute runbook when an `Immediate` / `Out-of-Cycle` finding lands. Validate the finding is real, recheck exposure attribution, run the manual applicability check, and deploy short-term mitigations (NetworkPolicy, PodSecurity tightening, WAF rule, ServiceAccount scope reduction) to shrink blast radius before the source fix lands.
+- [Handling Vulnerable Images](operations/handling-vulnerable-images.md) — image-level remediation playbook, split between **internally-developed apps** (patch source, redeploy) and **third-party images** (the 5-step deployer funnel: applicability check → exposure recheck → compensating control → hardened-base swap → time-boxed risk acceptance). Includes `gh` / OSV / cosign commands for looking up applicability against GHSA, OSV.dev, and Chainguard VEX feeds.
 
 ## Related (at repo root)
 

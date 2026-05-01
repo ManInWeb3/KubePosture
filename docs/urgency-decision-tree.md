@@ -101,12 +101,15 @@ month of real production traffic, review the band distribution
 adjust EPSS cutoffs + severity-combination rules based on what the
 data actually says. Until then, leave the defaults alone.
 
+> **Note:** an earlier draft of this spec included a VEX short-circuit
+> at the top of `score()`. VEX ingest was deferred — applicability
+> decisions are recorded out-of-band as `FindingAction.FALSE_POSITIVE`
+> overlays today. See [operations/handling-vulnerable-images.md](operations/handling-vulnerable-images.md#step-1--applicability-check)
+> for the manual applicability-check workflow against GHSA, OSV.dev,
+> and Chainguard VEX feeds.
+
 ```python
 def score(finding: Finding) -> PriorityResult:
-    # VEX short-circuits first
-    if finding.vex_status in {"not_affected", "fixed"}:
-        return PriorityResult(PriorityBand.DEFER, ("VEX cleared",))
-
     # KEV short-circuits to Immediate
     if finding.kev_listed:
         return PriorityResult(PriorityBand.IMMEDIATE, ("KEV",))
@@ -221,9 +224,9 @@ of:
 - **Kyverno policy not deployed in a cluster** — the corresponding
   signal never appears in `WorkloadSignal`; downstream readers see
   "not fired."
-- **Enrichment source empty this cycle** — EPSS/KEV/VEX joins return
-  no row; the `epss_score` / `kev_listed` / `vex_status` columns are
-  `NULL` on the Finding.
+- **Enrichment source empty this cycle** — EPSS/KEV joins return
+  no row; the `epss_score` / `kev_listed` columns are `NULL` on the
+  Finding.
 - **Namespace / cluster context columns not yet populated** —
   autodetect hasn't run, or a new cluster is in its first import.
 
@@ -236,7 +239,6 @@ Column-level rules:
 | `Cluster.environment` | `"dev"` (conservative — lowest weight) | A cluster whose env hasn't been classified should not be treated as prod by accident. Admin override is explicit. |
 | `Finding.epss_score` / `epss_percentile` | treated as `0.0` in comparisons | Absent EPSS means "no published probability" — do not elevate or suppress. |
 | `Finding.kev_listed` | `False` | Same. |
-| `Finding.vex_status` | `None` → neither suppression nor elevation | VEX is additive only. |
 | `WorkloadSignal` absence for a given `signal_id` | treated as "not fired" | Crucial for correctness: see below. |
 
 **The policy-not-deployed trap.** If a Kyverno policy isn't installed
@@ -273,8 +275,8 @@ transaction per trigger event:
 
 - **On ingest** of a finding — using current enrichment + current live
   context.
-- **On enrichment refresh** (EPSS / KEV / VEX — including clearings,
-  when a CVE drops out of a feed). See [05-enrichment.md](05-enrichment.md).
+- **On enrichment refresh** (EPSS / KEV — including clearings, when a
+  CVE drops out of a feed).
 - **On WorkloadSignal change** — any insert, `currently_active`
   toggle, or row update. Fan-out: `Finding.objects.filter(workload=W)`.
 - **On observation change** — image rolls into or out of a workload.
@@ -305,7 +307,6 @@ updates `effective_priority`.
 | High | 0.5 | no | non-prod | yes | — | — | **Scheduled** (severity + exposed-or-escalation) |
 | Medium | 0.4 | no | prod | no | — | yes | **Scheduled** (sensitive-ns) |
 | Low | 0.1 | no | dev | no | — | no | **Defer** |
-| Critical | 0.95 | no | prod | yes | — | — + VEX not_affected | **Defer** |
 
 ## Display notes
 

@@ -4,12 +4,14 @@ How to respond when KubePosture flags an `Immediate` or `Out-of-Cycle` finding o
 
 KubePosture is an SSVC-style **deployer-tree** tool — it tells you a finding is high priority, but it doesn't decide whether you fix the source, swap the image, accept the risk, or do something else. This guide is the operator-side flow.
 
+> **First 30–60 minutes:** if you're triaging a fresh `Immediate` / `Out-of-Cycle` finding, run [triage-high-priority-findings.md](triage-high-priority-findings.md) first — validate the finding, recheck exposure attribution, deploy short-term mitigations (NetworkPolicy, PodSecurity, WAF). Once the blast radius is contained, this doc covers the source-level remediation path.
+
 ## TL;DR
 
 | Image type | Primary action |
 |---|---|
 | **Internally-developed app** (you wrote it / you own the source) | Patch the source, rebuild, redeploy. The finding auto-resolves at the next inventory cycle. |
-| **Third-party app** (Pomerium, Postgres, Argo CD, Trivy itself, anything from Docker Hub / vendor registries) | Walk the deployer funnel: VEX → exposure recheck → compensating control → hardened-base swap → time-boxed risk acceptance. You typically do NOT fork the upstream project. |
+| **Third-party app** (Pomerium, Postgres, Argo CD, Trivy itself, anything from Docker Hub / vendor registries) | Walk the deployer funnel: applicability check → exposure recheck → compensating control → hardened-base swap → time-boxed risk acceptance. You typically do NOT fork the upstream project. |
 
 The two flows differ because for internal apps you're both the **supplier** and the **deployer** in SSVC terms; for third-party apps you're only the deployer, and the supplier side of the workflow is out of your hands.
 
@@ -47,7 +49,7 @@ The Finding doesn't disappear instantly. The reaper auto-resolves it when the ol
 
 ### 4. Edge case — CVE in your code with no fix yet
 
-If you've discovered a vulnerability in your own code that you don't yet have a fix for, the supplier/deployer roles re-merge: you're a deployer of an unfixable image. Walk Flow 2 below as if it were third-party — VEX, compensating controls, time-boxed acceptance — until you ship the patch.
+If you've discovered a vulnerability in your own code that you don't yet have a fix for, the supplier/deployer roles re-merge: you're a deployer of an unfixable image. Walk Flow 2 below as if it were third-party — applicability check, compensating controls, time-boxed acceptance — until you ship the patch.
 
 ---
 
@@ -55,17 +57,80 @@ If you've discovered a vulnerability in your own code that you don't yet have a 
 
 The 5-step deployer funnel. Walk it in order; only fall through to the next step when the previous one doesn't apply.
 
-### Step 1 — Applicability via VEX
+### Step 1 — Applicability check
 
-The most common reason a third-party CVE doesn't actually matter: you don't use the affected feature.
+The most common reason a third-party CVE doesn't actually matter: you don't use the affected feature. Check that before reaching for any other tool — applicability triage clears roughly half the IMMEDIATE-band findings on big projects (Postgres, Nginx, Pomerium, Argo CD, Trivy itself).
 
-- Read the CVE write-up. Identify the function or feature it affects.
-- If your config doesn't enable that feature, the CVE is `not_affected` for your deployment.
-- Record a VEX statement on the Finding. KubePosture reads `Finding.vex_status` and short-circuits to `Defer` ([core/urgency.py](../../core/urgency.py) — see VEX handling at the top of `score()`).
+**KubePosture does not yet ingest VEX statements.** Applicability checks are manual: you look up the CVE in upstream sources, decide whether it applies to your config, and if not, record the finding as **False Positive** with the justification in the reason field. The band stays computed for audit; the finding moves out of default views.
 
-**Example:** A CVE in Pomerium's Okta auth backend, when you only use Google OIDC. VEX status `not_affected`, justification: "Okta auth backend disabled in our config — see `idp_provider: google` in pomerium-config".
+#### Where to look (ordered by signal quality)
 
-VEX is the right answer roughly half the time for big projects (Postgres, Nginx, Pomerium, Argo CD, Trivy). Reach for it before any other tool.
+**1. The project's GitHub Security Advisories (GHSA).** The primary source for applicability conditions on most OSS projects. Each advisory typically includes affected version ranges and a `description` that names the affected feature.
+
+```bash
+# List advisories for a repo
+gh api repos/<owner>/<repo>/security-advisories --paginate \
+  | jq -r '.[] | "\(.ghsa_id) \(.severity) \(.cve_id // "no-CVE") - \(.summary)"'
+
+# Get applicability detail for one advisory
+gh api repos/<owner>/<repo>/security-advisories/GHSA-xxxx-yyyy-zzzz \
+  | jq '{cve_id, severity, summary, description, vulnerabilities}'
+```
+
+Examples: `pomerium/pomerium`, `argoproj/argo-cd`, `postgres/postgres`, `aquasecurity/trivy`.
+
+**2. OSV.dev — fast machine-readable aggregator.** OSV ingests GHSA + Go vuln DB + npm + PyPI advisories. Best for "is version X affected by CVE Y" questions:
+
+```bash
+# All vulns affecting the current version of an OSS project
+curl -sX POST https://api.osv.dev/v1/query \
+  -H 'Content-Type: application/json' \
+  -d '{"package":{"name":"github.com/pomerium/pomerium","ecosystem":"Go"},"version":"0.27.0"}' \
+  | jq '.vulns[] | {id, summary}'
+```
+
+Ecosystems to know: `Go`, `npm`, `PyPI`, `Maven`, `crates.io`, `Debian`, `Alpine`, `OSS-Fuzz`.
+
+**3. Chainguard's VEX feed** — when you run a `cgr.dev/chainguard/<image>`. Chainguard publishes proper OpenVEX statements as cosign attestations:
+
+```bash
+cosign download attestation cgr.dev/chainguard/pomerium:latest \
+  --predicate-type https://openvex.dev/ns/v0.2.0 \
+  | jq -r '.payload | @base64d | fromjson'
+```
+
+Each statement carries `status: not_affected | affected | fixed | under_investigation` plus an OpenVEX justification. This is the only source on this list that's actually authored *as VEX*; everything else is GHSA/OSV data that needs interpretation.
+
+**4. The CVE write-up itself** — NVD / cve.org. Often light on applicability detail but worth a read; usually cross-links back to GHSA.
+
+#### Worked example — Pomerium
+
+A scanner reports `CVE-2025-XXXXX` IMMEDIATE on `pomerium/pomerium:0.27.0`.
+
+```bash
+# Step a — find the GHSA for this CVE
+gh api repos/pomerium/pomerium/security-advisories --paginate \
+  | jq -r '.[] | select(.cve_id=="CVE-2025-XXXXX") | .ghsa_id'
+
+# Step b — read the applicability detail
+gh api repos/pomerium/pomerium/security-advisories/GHSA-xxxx-yyyy-zzzz \
+  | jq -r '.description'
+```
+
+The description says the bug is in the Okta IdP backend. Your config uses `idp_provider: google`. Conclusion: `not_affected`. Record on the finding:
+
+- **Action type:** False Positive
+- **Reason:** `not_affected — vulnerable_code_not_in_execute_path. Okta IdP backend disabled (idp_provider: google in pomerium-config).`
+
+The OpenVEX justification taxonomy is the right vocabulary to borrow, even without a real VEX field — it forces precision and translates cleanly the day this becomes a system feature:
+
+- `component_not_present` — the vulnerable component isn't in the image at all.
+- `vulnerable_code_not_present` — present but not built in.
+- `vulnerable_code_not_in_execute_path` — present but never reached at runtime (most common).
+- `vulnerable_code_cannot_be_controlled_by_adversary` — reachable but inputs are sanitized upstream.
+- `inline_mitigations_already_exist` — a config or compensating control neutralizes the bug.
+
+> **Future:** ingesting OpenVEX / GHSA statements automatically and short-circuiting to `Defer` is a planned feature. It is not implemented today; the Finding model has no `vex_status` field. Track applicability decisions via False Positive actions until that lands.
 
 ### Step 2 — Recheck network exposure attribution
 
