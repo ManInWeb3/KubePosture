@@ -1,4 +1,4 @@
-# KubePostureNG
+# KubePosture
 
 K8s security posture aggregator. Pulls Trivy Operator + Kyverno reports
 from each cluster, enriches with EPSS + KEV, scores each finding by
