@@ -3,8 +3,12 @@
 {% load help_tags %}
 
 {% block title %}{{ kind }}/{{ name }} — KubePosture{% endblock %}
-{% block pretitle %}Workload{% endblock %}
-{% block page_title %}{{ kind }}/{{ name }}{% endblock %}
+{% block breadcrumbs %}
+<ol class="breadcrumb" aria-label="breadcrumbs">
+  <li class="breadcrumb-item"><a href="{% url 'workloads-list' %}">Workloads</a></li>
+  <li class="breadcrumb-item active" aria-current="page">{{ kind }}/{{ name }}</li>
+</ol>
+{% endblock %}
 
 {% block content %}
 {% help "Workload Detail" %}

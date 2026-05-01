@@ -1,8 +1,11 @@
 {% extends "base.html" %}
 
 {% block title %}Profile — KubePosture{% endblock %}
-{% block pretitle %}Account{% endblock %}
-{% block page_title %}Profile{% endblock %}
+{% block breadcrumbs %}
+<ol class="breadcrumb" aria-label="breadcrumbs">
+  <li class="breadcrumb-item active" aria-current="page">Profile</li>
+</ol>
+{% endblock %}
 
 {% block content %}
 {% if messages %}

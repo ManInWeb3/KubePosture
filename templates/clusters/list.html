@@ -2,8 +2,11 @@
 {% load help_tags %}
 
 {% block title %}Clusters — KubePosture{% endblock %}
-{% block pretitle %}Inventory{% endblock %}
-{% block page_title %}Clusters{% endblock %}
+{% block breadcrumbs %}
+<ol class="breadcrumb" aria-label="breadcrumbs">
+  <li class="breadcrumb-item active" aria-current="page">Clusters</li>
+</ol>
+{% endblock %}
 
 {% block content %}
 {% if messages %}

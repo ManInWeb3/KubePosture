@@ -2,8 +2,12 @@
 {% load help_tags %}
 
 {% block title %}{{ cluster.name }} — Clusters — KubePosture{% endblock %}
-{% block pretitle %}<a href="{% url 'cluster-list' %}" class="text-decoration-none">Clusters</a>{% endblock %}
-{% block page_title %}{{ cluster.name }}{% endblock %}
+{% block breadcrumbs %}
+<ol class="breadcrumb" aria-label="breadcrumbs">
+  <li class="breadcrumb-item"><a href="{% url 'cluster-list' %}">Clusters</a></li>
+  <li class="breadcrumb-item active" aria-current="page">{{ cluster.name }}</li>
+</ol>
+{% endblock %}
 
 {% block content %}
 {% if messages %}

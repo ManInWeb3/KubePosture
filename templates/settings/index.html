@@ -2,8 +2,16 @@
 {% load help_tags %}
 
 {% block title %}Access — KubePosture{% endblock %}
-{% block pretitle %}Administration{% endblock %}
-{% block page_title %}Access{% endblock %}
+{% block breadcrumbs %}
+<ol class="breadcrumb" aria-label="breadcrumbs">
+  {% if settings_tab and settings_tab != 'access' %}
+  <li class="breadcrumb-item"><a href="{% url 'user-list' %}">Access</a></li>
+  <li class="breadcrumb-item active" aria-current="page">{% if settings_tab == 'tokens' %}Tokens{% else %}Users{% endif %}</li>
+  {% else %}
+  <li class="breadcrumb-item active" aria-current="page">Access</li>
+  {% endif %}
+</ol>
+{% endblock %}
 
 {% block content %}
 {% if messages %}

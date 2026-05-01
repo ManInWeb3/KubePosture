@@ -12,7 +12,10 @@ from django.db.models import Count
 
 from core.constants import ImageSetChangeKind, SnapshotScope
 from core.models import Cluster, Namespace, Snapshot, Workload
-from core.services.inventory import default_finding_qs
+from core.services.inventory import (
+    default_finding_qs,
+    restrict_to_currently_deployed_images,
+)
 
 
 def _severity_counts(qs) -> dict:
@@ -87,7 +90,9 @@ def capture_cluster_heartbeat(cluster: Cluster) -> int:
     for wl in Workload.objects.filter(
         cluster=cluster, deployed=True,
     ).select_related("namespace"):
-        wf = default_finding_qs(cluster=cluster).filter(workload=wl)
+        wf = restrict_to_currently_deployed_images(
+            default_finding_qs(cluster=cluster).filter(workload=wl)
+        )
         Snapshot.objects.create(
             scope_kind=SnapshotScope.WORKLOAD.value,
             cluster=cluster,
@@ -125,7 +130,9 @@ def capture_daily_heartbeat() -> int:
         written += 1
 
     for wl in Workload.objects.filter(deployed=True).select_related("cluster", "namespace"):
-        wf = default_finding_qs(cluster=wl.cluster).filter(workload=wl)
+        wf = restrict_to_currently_deployed_images(
+            default_finding_qs(cluster=wl.cluster).filter(workload=wl)
+        )
         Snapshot.objects.create(
             scope_kind=SnapshotScope.WORKLOAD.value,
             cluster=wl.cluster,

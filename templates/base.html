@@ -196,8 +196,7 @@
     <div class="page-wrapper">
       <div class="page-header d-print-none">
         <div class="container-xl">
-          <div class="page-pretitle">{% block pretitle %}KubePosture{% endblock %}</div>
-          <h2 class="page-title">{% block page_title %}{% endblock %}</h2>
+          {% block breadcrumbs %}{% endblock %}
         </div>
       </div>
       <div class="page-body">

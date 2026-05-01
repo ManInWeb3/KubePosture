@@ -3,8 +3,11 @@
 {% load findings_tags %}
 
 {% block title %}Workloads — KubePosture{% endblock %}
-{% block pretitle %}Workloads{% endblock %}
-{% block page_title %}Workloads{% endblock %}
+{% block breadcrumbs %}
+<ol class="breadcrumb" aria-label="breadcrumbs">
+  <li class="breadcrumb-item active" aria-current="page">Workloads</li>
+</ol>
+{% endblock %}
 
 {% block content %}
 {% help "Workloads" %}

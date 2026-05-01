@@ -97,6 +97,29 @@ def default_finding_qs(
     return qs
 
 
+def restrict_to_currently_deployed_images(qs):
+    """Narrow a Finding queryset to (workload, image) pairs that are
+    currently deployed — plus image-less rows (workload-level findings
+    like config-audit / RBAC / cluster-scoped).
+
+    Why: `default_finding_qs` keeps any finding whose `last_seen` is at
+    or after `cluster.last_complete_inventory_at`, but Trivy can hold a
+    stale VulnerabilityReport CRD for an image that's already been
+    rolled out, and re-ingesting it bumps `last_seen` past the anchor.
+    Without this filter, the workload-detail Images table (which scopes
+    by current image) and the per-workload trend chart (which doesn't)
+    drift apart whenever an image change leaves a stale CRD behind.
+    """
+    deployed_obs = WorkloadImageObservation.objects.filter(
+        workload_id=OuterRef("workload_id"),
+        image_id=OuterRef("image_id"),
+        currently_deployed=True,
+    )
+    return qs.filter(
+        Q(image__isnull=True) | Exists(deployed_obs)
+    )
+
+
 # ── Per-image priority-band counts ───────────────────────────────
 
 
@@ -160,8 +183,12 @@ def list_workloads(
     if not workload_ids:
         return []
 
-    findings_qs = default_finding_qs().filter(
-        workload_id__in=workload_ids,
+    # Scope to (workload, image) pairs that are currently deployed —
+    # plus image-less workload-level findings — so a stale Trivy
+    # VulnerabilityReport CRD held for a rolled-out image can't inflate
+    # the row's count past what the workload-detail Images table shows.
+    findings_qs = restrict_to_currently_deployed_images(
+        default_finding_qs().filter(workload_id__in=workload_ids)
     )
 
     counts = _band_counts_by(findings_qs, "workload_id")

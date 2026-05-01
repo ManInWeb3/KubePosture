@@ -2,8 +2,13 @@
 {% load help_tags %}
 
 {% block title %}{% if edit_user %}Edit {{ edit_user.username }}{% else %}New User{% endif %} — KubePosture{% endblock %}
-{% block pretitle %}<a href="{% url 'user-list' %}" class="text-decoration-none">Access / Users</a>{% endblock %}
-{% block page_title %}{% if edit_user %}Edit {{ edit_user.username }}{% else %}Create User{% endif %}{% endblock %}
+{% block breadcrumbs %}
+<ol class="breadcrumb" aria-label="breadcrumbs">
+  <li class="breadcrumb-item"><a href="{% url 'user-list' %}">Access</a></li>
+  <li class="breadcrumb-item"><a href="{% url 'user-list' %}">Users</a></li>
+  <li class="breadcrumb-item active" aria-current="page">{% if edit_user %}Edit {{ edit_user.username }}{% else %}Create{% endif %}</li>
+</ol>
+{% endblock %}
 
 {% block content %}
 {% if messages %}

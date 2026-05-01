@@ -1,8 +1,8 @@
 # KubePostureNG
 
 K8s security posture aggregator. Pulls Trivy Operator + Kyverno reports
-from each cluster, enriches with EPSS / KEV / VEX, scores each finding
-by urgency, and exposes a per-`(workload, image)` view of what to fix
+from each cluster, enriches with EPSS + KEV, scores each finding by
+urgency, and exposes a per-`(workload, image)` view of what to fix
 first.
 
 Authoritative design lives in
@@ -325,7 +325,7 @@ core/
     reaper.py            # kind-dispatched reap, zero-input no-op rule
     dedup.py             # Finding hash + bulk upsert
     snapshot.py          # daily-heartbeat capture
-    enrichment.py        # file + HTTP loaders for EPSS / KEV / VEX
+    enrichment.py        # file + HTTP loaders for EPSS + KEV
     worker.py            # claim → process → reap loop
     test_assertions.py   # scenario-runner assertion evaluator
   api/
@@ -357,7 +357,10 @@ tests/scenario_runner/           # pytest plugin walking Architecture/mock_tests
 - No custom UI. Django admin only.
 - No live `--in-cluster` / `--kubeconfig` smoke test against a real
   cluster recorded yet — only `--from-folder` is verified end-to-end.
-- VEX auto-fetch deferred. File-driven only.
+- VEX ingest deferred. Applicability checks are manual against
+  upstream sources; see [docs/operations/handling-vulnerable-images.md](docs/operations/handling-vulnerable-images.md#step-1--applicability-check)
+  for the GHSA / OSV.dev / Chainguard recipes. Record applicability
+  decisions as `FindingAction.FALSE_POSITIVE` overlays.
 - Helm chart for the central + importer not yet bumped to the new
   endpoint contract — local dev only for now.
 - `reap_safety_net` fires drainable reaps but does not yet delete

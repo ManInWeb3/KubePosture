@@ -28,8 +28,16 @@ from core.models import (
 from core.parsers.inventory import reap_inventory_diff
 from core.signals import SIGNALS
 from core.urgency import recompute_batch
+from core.services.inventory import (
+    default_finding_qs,
+    restrict_to_currently_deployed_images,
+)
 from core.services.queue import drain_check, transition_mark_to_reaped
-from core.services.snapshot import capture_cluster_heartbeat
+from core.services.snapshot import (
+    _priority_counts,
+    _severity_counts,
+    capture_cluster_heartbeat,
+)
 
 log = logging.getLogger("core.reaper")
 
@@ -175,35 +183,28 @@ def _write_event_path_workload_snapshots(cluster: Cluster, mark: ImportMark) -> 
                 change_kind = ImageSetChangeKind.MIXED.value
             changed = True
 
+        # Scope to findings on currently-deployed images (or image-less
+        # workload-level findings). Without this, the snapshot captures
+        # findings tied to the just-rolled-out image — Trivy can hold a
+        # stale VulnerabilityReport CRD past Pod deletion, and the
+        # ingest path bumps `last_seen` past `last_complete_inventory_at`,
+        # so `default_finding_qs` alone wouldn't filter them out.
+        wf = restrict_to_currently_deployed_images(
+            default_finding_qs(cluster=cluster).filter(workload=wl)
+        )
         Snapshot.objects.create(
             scope_kind=SnapshotScope.WORKLOAD.value,
             cluster=cluster,
             namespace=wl.namespace,
             workload=wl,
-            severity_counts=_severity_counts_for_workload(wl),
-            priority_counts=_priority_counts_for_workload(wl),
-            total_active=wl.findings.count(),
+            severity_counts=_severity_counts(wf),
+            priority_counts=_priority_counts(wf),
+            total_active=wf.count(),
             import_id=mark.import_id,
             image_digest_set=current_set,
             image_set_changed_from_previous=changed,
             change_kind=change_kind,
         )
-
-
-def _severity_counts_for_workload(workload) -> dict:
-    counts = workload.findings.values_list("severity").order_by()
-    out: dict[str, int] = {}
-    for (sev,) in counts:
-        out[sev] = out.get(sev, 0) + 1
-    return out
-
-
-def _priority_counts_for_workload(workload) -> dict:
-    counts = workload.findings.values_list("effective_priority").order_by()
-    out: dict[str, int] = {}
-    for (band,) in counts:
-        out[band] = out.get(band, 0) + 1
-    return out
 
 
 # ── Scan-kind reap (zero-input gate) ------------------------------
