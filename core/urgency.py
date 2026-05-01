@@ -32,10 +32,6 @@ def _epss(finding: Finding) -> float:
     return float(finding.epss_percentile or 0.0)
 
 
-def _has_fix(finding: Finding) -> bool:
-    return bool(finding.fixed_version)
-
-
 def _is_exposed(workload, namespace) -> bool:
     """workload.publicly_exposed OR namespace.internet_exposed.
 
@@ -69,22 +65,21 @@ def score(finding: Finding) -> PriorityResult:
 
     severity = finding.severity
     epss = _epss(finding)
-    has_fix = _has_fix(finding)
 
     # Cluster-scoped finding (e.g. ClusterRole RBAC) — no workload.
-    # Cluster-scoped findings cap at OutOfCycle in v1; the absence of
+    # Cluster-scoped findings cap at OutOfBand in v1; the absence of
     # a workload context means we can't reason about exposure or
     # escalation, so we deliberately don't promote to Immediate.
     if finding.workload_id is None:
         env = (finding.cluster.environment or Environment.DEV.value) if finding.cluster else Environment.DEV.value
         if severity == Severity.CRITICAL.value:
             return PriorityResult(
-                PriorityBand.OUT_OF_CYCLE.value,
+                PriorityBand.OUT_OF_BAND.value,
                 ("critical", "cluster-scoped", env),
             )
         if severity == Severity.HIGH.value and env == Environment.PROD.value:
             return PriorityResult(
-                PriorityBand.OUT_OF_CYCLE.value,
+                PriorityBand.OUT_OF_BAND.value,
                 ("high", "cluster-scoped", "prod"),
             )
         return PriorityResult(PriorityBand.SCHEDULED.value, ("cluster-scoped",))
@@ -120,51 +115,41 @@ def score(finding: Finding) -> PriorityResult:
     if severity in (Severity.CRITICAL.value, Severity.HIGH.value) \
             and env == Environment.PROD.value and has_escalation:
         return PriorityResult(
-            PriorityBand.OUT_OF_CYCLE.value,
+            PriorityBand.OUT_OF_BAND.value,
             ("severity", "prod", "escalation-signal"),
         )
 
     if epss >= 0.9 and env == Environment.PROD.value:
         return PriorityResult(
-            PriorityBand.OUT_OF_CYCLE.value,
+            PriorityBand.OUT_OF_BAND.value,
             ("EPSS>=0.9", "prod"),
         )
 
     if severity == Severity.CRITICAL.value and env == Environment.PROD.value:
         return PriorityResult(
-            PriorityBand.OUT_OF_CYCLE.value,
+            PriorityBand.OUT_OF_BAND.value,
             ("critical", "prod"),
         )
 
     if severity == Severity.HIGH.value and is_exposed and env == Environment.PROD.value:
         return PriorityResult(
-            PriorityBand.OUT_OF_CYCLE.value,
+            PriorityBand.OUT_OF_BAND.value,
             ("high", "exposed", "prod"),
         )
 
-    # Sensitive-namespace bump for no-fix medium/high findings —
-    # checked *before* the no-fix-Defer rule so an unfixed CVE in a
-    # sensitive namespace surfaces as Scheduled rather than Defer.
+    # Sensitive-namespace bump for medium/high findings.
     if severity in (Severity.HIGH.value, Severity.MEDIUM.value) \
-            and not has_fix \
             and namespace is not None and namespace.contains_sensitive_data:
         return PriorityResult(
             PriorityBand.SCHEDULED.value,
-            ("severity", "sensitive-ns", "no-fix"),
+            ("severity", "sensitive-ns"),
         )
 
-    # No-fix / no-context branches
-    if not has_fix and not is_exposed and not has_escalation:
-        return PriorityResult(
-            PriorityBand.DEFER.value,
-            ("no-fix", "no-exposure", "no-escalation"),
-        )
-
-    if not has_fix and severity in (Severity.CRITICAL.value, Severity.HIGH.value) \
+    if severity in (Severity.CRITICAL.value, Severity.HIGH.value) \
             and (is_exposed or has_escalation):
         return PriorityResult(
             PriorityBand.SCHEDULED.value,
-            ("no-fix", "exposed-or-escalation"),
+            ("severity", "exposed-or-escalation"),
         )
 
     if severity == Severity.CRITICAL.value and env != Environment.PROD.value:

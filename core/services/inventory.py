@@ -32,15 +32,6 @@ from core.models import (
 )
 
 
-def _resolve_cluster(cluster):
-    """Accept a Cluster instance, a name string, or None. Returns a
-    Cluster instance or None (None when name doesn't match anything).
-    """
-    if cluster is None or isinstance(cluster, Cluster):
-        return cluster
-    return Cluster.objects.filter(name=cluster).first()
-
-
 # ── Filter primitives ────────────────────────────────────────────
 
 
@@ -101,7 +92,7 @@ def default_finding_qs(*, include_muted: bool = False, cluster=None):
 
 _BANDS = (
     PriorityBand.IMMEDIATE,
-    PriorityBand.OUT_OF_CYCLE,
+    PriorityBand.OUT_OF_BAND,
     PriorityBand.SCHEDULED,
     PriorityBand.DEFER,
 )
@@ -111,11 +102,24 @@ def _empty_band_counts() -> dict[str, int]:
     return {b.value: 0 for b in _BANDS}
 
 
+def _band_counts_by(qs, *key_fields: str):
+    """Group findings by the given column(s) and tally `effective_priority`.
+
+    Single key field → keys are scalars; multiple → keys are tuples.
+    """
+    counts: dict = defaultdict(_empty_band_counts)
+    for row in qs.values_list(*key_fields, "effective_priority"):
+        *key_parts, priority = row
+        key = key_parts[0] if len(key_parts) == 1 else tuple(key_parts)
+        counts[key][priority] = counts[key].get(priority, 0) + 1
+    return counts
+
+
 # ── Per-workload priority-band counts ────────────────────────────
 
 
 _ALLOWED_SORTS = {
-    "n_immediate", "n_out_of_cycle", "n_scheduled", "n_defer",
+    "n_immediate", "n_out_of_band", "n_scheduled", "n_defer",
     "name", "cluster", "namespace",
 }
 
@@ -125,10 +129,6 @@ def list_workloads(
     cluster: str | None = None,
     namespace: str | None = None,
     name_contains: str | None = None,
-    has_immediate: bool = False,
-    has_out_of_cycle: bool = False,
-    include_muted: bool = False,
-    deployed_only: bool = True,
     sort: str | None = None,
     sort_dir: str = "desc",
 ):
@@ -138,9 +138,7 @@ def list_workloads(
     four priority-band counts, default-filtered through `default_finding_qs`.
     Mirrors [Architecture/dev_docs/08-ui.md §1](Architecture/dev_docs/08-ui.md#L100).
     """
-    qs = Workload.objects.select_related("cluster", "namespace")
-    if deployed_only:
-        qs = qs.filter(deployed=True)
+    qs = Workload.objects.select_related("cluster", "namespace").filter(deployed=True)
     if cluster:
         qs = qs.filter(cluster__name=cluster)
     if namespace:
@@ -152,25 +150,15 @@ def list_workloads(
     if not workload_ids:
         return []
 
-    findings_qs = default_finding_qs(include_muted=include_muted).filter(
+    findings_qs = default_finding_qs().filter(
         workload_id__in=workload_ids,
     )
 
-    counts: dict[int, dict[str, int]] = defaultdict(_empty_band_counts)
-    for wid, priority in findings_qs.values_list(
-        "workload_id", "effective_priority",
-    ):
-        counts[wid][priority] = counts[wid].get(priority, 0) + 1
+    counts = _band_counts_by(findings_qs, "workload_id")
 
     rows: list[dict] = []
     for w in qs:
         c = counts.get(w.pk, _empty_band_counts())
-        n_immediate = c[PriorityBand.IMMEDIATE.value]
-        n_out_of_cycle = c[PriorityBand.OUT_OF_CYCLE.value]
-        if has_immediate and n_immediate == 0:
-            continue
-        if has_out_of_cycle and n_out_of_cycle == 0:
-            continue
         rows.append(
             {
                 "workload": w,
@@ -178,8 +166,8 @@ def list_workloads(
                 "namespace": w.namespace.name,
                 "kind": w.kind,
                 "name": w.name,
-                "n_immediate": n_immediate,
-                "n_out_of_cycle": n_out_of_cycle,
+                "n_immediate": c[PriorityBand.IMMEDIATE.value],
+                "n_out_of_band": c[PriorityBand.OUT_OF_BAND.value],
                 "n_scheduled": c[PriorityBand.SCHEDULED.value],
                 "n_defer": c[PriorityBand.DEFER.value],
             }
@@ -196,7 +184,7 @@ def list_workloads(
         rows.sort(
             key=lambda r: (
                 -r["n_immediate"],
-                -r["n_out_of_cycle"],
+                -r["n_out_of_band"],
                 -r["n_scheduled"],
                 r["name"].lower(),
             )
@@ -275,13 +263,7 @@ def list_workload_images(workloads, *, include_history: bool = False):
     findings_qs = default_finding_qs().filter(
         workload_id__in=workload_ids, image_id__in=image_ids,
     )
-    band_counts: dict[tuple[int, int], dict[str, int]] = defaultdict(_empty_band_counts)
-    for wid, image_id, priority in findings_qs.values_list(
-        "workload_id", "image_id", "effective_priority"
-    ):
-        band_counts[(wid, image_id)][priority] = (
-            band_counts[(wid, image_id)].get(priority, 0) + 1
-        )
+    band_counts = _band_counts_by(findings_qs, "workload_id", "image_id")
 
     rows = []
     for obs in obs_qs:
@@ -299,7 +281,7 @@ def list_workload_images(workloads, *, include_history: bool = False):
                 "first_seen_at": obs.first_seen_at,
                 "last_seen_at": obs.last_seen_at,
                 "n_immediate": c[PriorityBand.IMMEDIATE.value],
-                "n_out_of_cycle": c[PriorityBand.OUT_OF_CYCLE.value],
+                "n_out_of_band": c[PriorityBand.OUT_OF_BAND.value],
                 "n_scheduled": c[PriorityBand.SCHEDULED.value],
                 "n_defer": c[PriorityBand.DEFER.value],
                 "n_total": sum(c.values()),
@@ -309,7 +291,7 @@ def list_workload_images(workloads, *, include_history: bool = False):
         key=lambda r: (
             not r["currently_deployed"],  # deployed rows first
             -r["n_immediate"],
-            -r["n_out_of_cycle"],
+            -r["n_out_of_band"],
             -r["n_scheduled"],
             -r["n_defer"],
             r["cluster"].name,

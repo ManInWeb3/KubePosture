@@ -11,7 +11,8 @@ from django.db import transaction
 from django.db.models import Count
 
 from core.constants import ImageSetChangeKind, SnapshotScope
-from core.models import Cluster, Finding, Namespace, Snapshot, Workload
+from core.models import Cluster, Namespace, Snapshot, Workload
+from core.services.inventory import default_finding_qs
 
 
 def _severity_counts(qs) -> dict:
@@ -28,50 +29,103 @@ def _priority_counts(qs) -> dict:
     return dict(out)
 
 
+def capture_cluster_snapshot(cluster: Cluster) -> Snapshot:
+    """Write one cluster-scope Snapshot row from current finding state.
+
+    Used by the daily heartbeat and by admin cluster-save (pre/post
+    around a priority recompute) to bracket flag transitions on the
+    trend.
+    """
+    cf = default_finding_qs(cluster=cluster)
+    return Snapshot.objects.create(
+        scope_kind=SnapshotScope.CLUSTER.value,
+        cluster=cluster,
+        severity_counts=_severity_counts(cf),
+        priority_counts=_priority_counts(cf),
+        total_active=cf.count(),
+        change_kind=ImageSetChangeKind.NONE.value,
+    )
+
+
+def capture_namespace_snapshot(namespace: Namespace) -> Snapshot:
+    """Write one namespace-scope Snapshot row from current finding state.
+
+    Used by the daily heartbeat and by exposure / sensitivity flip
+    handlers (pre/post around a priority recompute) to bracket flag
+    transitions on the trend.
+    """
+    nf = default_finding_qs(cluster=namespace.cluster).filter(
+        workload__namespace=namespace,
+    )
+    return Snapshot.objects.create(
+        scope_kind=SnapshotScope.NAMESPACE.value,
+        cluster=namespace.cluster,
+        namespace=namespace,
+        severity_counts=_severity_counts(nf),
+        priority_counts=_priority_counts(nf),
+        total_active=nf.count(),
+        change_kind=ImageSetChangeKind.NONE.value,
+    )
+
+
+@transaction.atomic
+def capture_cluster_heartbeat(cluster: Cluster) -> int:
+    """Write a heartbeat snapshot covering one cluster: cluster row +
+    one row per active namespace in the cluster + one row per deployed
+    workload in the cluster.
+
+    Used at the end of an import session (last drainable mark for the
+    cluster) to refresh trend datapoints with the post-reap state.
+    Skips the global row — that's the daily heartbeat's job.
+    """
+    written = 0
+    capture_cluster_snapshot(cluster)
+    written += 1
+    for ns in Namespace.objects.filter(cluster=cluster, active=True):
+        capture_namespace_snapshot(ns)
+        written += 1
+    for wl in Workload.objects.filter(
+        cluster=cluster, deployed=True,
+    ).select_related("namespace"):
+        wf = default_finding_qs(cluster=cluster).filter(workload=wl)
+        Snapshot.objects.create(
+            scope_kind=SnapshotScope.WORKLOAD.value,
+            cluster=cluster,
+            namespace=wl.namespace,
+            workload=wl,
+            severity_counts=_severity_counts(wf),
+            priority_counts=_priority_counts(wf),
+            total_active=wf.count(),
+            change_kind=ImageSetChangeKind.NONE.value,
+        )
+        written += 1
+    return written
+
+
 @transaction.atomic
 def capture_daily_heartbeat() -> int:
     """Write today's heartbeat snapshots. Returns row count written."""
     written = 0
-    all_findings = Finding.objects.all()
+    all_findings = default_finding_qs()
     Snapshot.objects.create(
         scope_kind=SnapshotScope.GLOBAL.value,
         severity_counts=_severity_counts(all_findings),
         priority_counts=_priority_counts(all_findings),
         total_active=all_findings.count(),
-        total_actioned=0,
         change_kind=ImageSetChangeKind.NONE.value,
     )
     written += 1
 
     for cluster in Cluster.objects.all():
-        cf = all_findings.filter(cluster=cluster)
-        Snapshot.objects.create(
-            scope_kind=SnapshotScope.CLUSTER.value,
-            cluster=cluster,
-            severity_counts=_severity_counts(cf),
-            priority_counts=_priority_counts(cf),
-            total_active=cf.count(),
-            total_actioned=0,
-            change_kind=ImageSetChangeKind.NONE.value,
-        )
+        capture_cluster_snapshot(cluster)
         written += 1
 
     for ns in Namespace.objects.filter(active=True):
-        nf = all_findings.filter(workload__namespace=ns)
-        Snapshot.objects.create(
-            scope_kind=SnapshotScope.NAMESPACE.value,
-            cluster=ns.cluster,
-            namespace=ns,
-            severity_counts=_severity_counts(nf),
-            priority_counts=_priority_counts(nf),
-            total_active=nf.count(),
-            total_actioned=0,
-            change_kind=ImageSetChangeKind.NONE.value,
-        )
+        capture_namespace_snapshot(ns)
         written += 1
 
     for wl in Workload.objects.filter(deployed=True).select_related("cluster", "namespace"):
-        wf = all_findings.filter(workload=wl)
+        wf = default_finding_qs(cluster=wl.cluster).filter(workload=wl)
         Snapshot.objects.create(
             scope_kind=SnapshotScope.WORKLOAD.value,
             cluster=wl.cluster,
@@ -80,7 +134,6 @@ def capture_daily_heartbeat() -> int:
             severity_counts=_severity_counts(wf),
             priority_counts=_priority_counts(wf),
             total_active=wf.count(),
-            total_actioned=0,
             change_kind=ImageSetChangeKind.NONE.value,
         )
         written += 1

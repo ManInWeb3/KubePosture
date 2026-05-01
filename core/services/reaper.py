@@ -29,6 +29,7 @@ from core.parsers.inventory import reap_inventory_diff
 from core.signals import SIGNALS
 from core.urgency import recompute_batch
 from core.services.queue import drain_check, transition_mark_to_reaped
+from core.services.snapshot import capture_cluster_heartbeat
 
 log = logging.getLogger("core.reaper")
 
@@ -182,7 +183,6 @@ def _write_event_path_workload_snapshots(cluster: Cluster, mark: ImportMark) -> 
             severity_counts=_severity_counts_for_workload(wl),
             priority_counts=_priority_counts_for_workload(wl),
             total_active=wl.findings.count(),
-            total_actioned=0,  # FindingAction overlay computed at query time
             import_id=mark.import_id,
             image_digest_set=current_set,
             image_set_changed_from_previous=changed,
@@ -343,8 +343,11 @@ def maybe_reap(mark: ImportMark) -> dict | None:
     ):
         return None
     if mark.kind == "inventory":
-        return _reap_inventory(mark)
-    return _reap_scan(mark)
+        result = _reap_inventory(mark)
+    else:
+        result = _reap_scan(mark)
+    _maybe_capture_heartbeat(mark.cluster)
+    return result
 
 
 def reap_all_drainable() -> int:
@@ -352,6 +355,7 @@ def reap_all_drainable() -> int:
     queue is drained and fire its reap. Returns count of marks reaped.
     """
     fired = 0
+    touched_clusters: set[int] = set()
     qs = ImportMark.objects.filter(state=ImportMarkState.DRAINING.value).select_related("cluster")
     for mark in qs:
         if not drain_check(
@@ -366,6 +370,35 @@ def reap_all_drainable() -> int:
             else:
                 _reap_scan(mark)
             fired += 1
+            touched_clusters.add(mark.cluster_id)
         except Exception:  # pragma: no cover
             log.exception("reap_all_drainable failed for mark id=%s", mark.id)
+    # Run the heartbeat once per touched cluster, after all of its
+    # marks have settled — avoids re-capturing per-kind in the sweep.
+    for cluster in Cluster.objects.filter(pk__in=touched_clusters):
+        _maybe_capture_heartbeat(cluster)
     return fired
+
+
+def _maybe_capture_heartbeat(cluster: Cluster) -> None:
+    """If `cluster` has no remaining `draining` marks, capture a
+    cluster-scope heartbeat to refresh trend datapoints with the
+    post-reap state. No-op while other kinds are still draining for
+    the same import session.
+    """
+    remaining = ImportMark.objects.filter(
+        cluster=cluster,
+        state=ImportMarkState.DRAINING.value,
+    ).count()
+    if remaining:
+        return
+    try:
+        n = capture_cluster_heartbeat(cluster)
+        log.info(
+            "reap.heartbeat",
+            extra={"cluster": cluster.name, "rows": n},
+        )
+    except Exception:  # pragma: no cover
+        log.exception(
+            "reap.heartbeat failed for cluster=%s", cluster.name,
+        )

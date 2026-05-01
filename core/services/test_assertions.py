@@ -5,7 +5,7 @@ the actual mock_tests/<scenario>/assertions.yaml shapes. Returns
 [{index, kind, pass, details, spec}, ...].
 
 Severity / priority labels accept both PascalCase fixture form
-("Critical", "OutOfCycle") and the lower-case enum form.
+("Critical", "OutOfBand") and the lower-case enum form.
 """
 from __future__ import annotations
 
@@ -43,8 +43,8 @@ _SEVERITY_ALIAS = {
 
 _PRIORITY_ALIAS = {
     "immediate": PriorityBand.IMMEDIATE.value,
-    "out_of_cycle": PriorityBand.OUT_OF_CYCLE.value,
-    "outofcycle": PriorityBand.OUT_OF_CYCLE.value,
+    "out_of_band": PriorityBand.OUT_OF_BAND.value,
+    "outofcycle": PriorityBand.OUT_OF_BAND.value,
     "scheduled": PriorityBand.SCHEDULED.value,
     "defer": PriorityBand.DEFER.value,
 }

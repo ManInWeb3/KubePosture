@@ -11,27 +11,63 @@
 (function (global) {
   "use strict";
 
+  // Right-edge pad past the last snapshot. ApexCharts auto-pads datetime
+  // axes by ~10-15% of the data range when no min/max is set; for a 90-day
+  // window that's ~12 days of empty space, which buries the latest tick.
+  var FUTURE_PAD_MS = 12 * 60 * 60 * 1000;
+  var HOUR_MS = 60 * 60 * 1000;
+  var DAY_MS = 24 * HOUR_MS;
+
+  // Map an interval token to the chart window + matching API days param.
+  //   1d → rolling 24-hour view, future-pad 6h
+  //   1w → 7 calendar days starting at midnight of the oldest day, future-pad 12h
+  //   2w → same but 14 days
+  // Returns null for unknown tokens so the caller can fall back to the
+  // legacy "show every datapoint we got back" behaviour.
+  function intervalBounds(interval) {
+    var now = Date.now();
+    if (interval === "1d") {
+      return {
+        xMin: now - 24 * HOUR_MS,
+        xMax: now + 6 * HOUR_MS,
+        padMs: 6 * HOUR_MS,
+        days: 2,
+      };
+    }
+    var lookback = interval === "2w" ? 14 : (interval === "1w" ? 7 : 0);
+    if (!lookback) return null;
+    var oldest = new Date();
+    oldest.setDate(oldest.getDate() - (lookback - 1));
+    oldest.setHours(0, 0, 0, 0);
+    return {
+      xMin: oldest.getTime(),
+      xMax: now + 12 * HOUR_MS,
+      padMs: 12 * HOUR_MS,
+      days: lookback + 1,
+    };
+  }
+
   // Severity color tokens — aligned to Tabler badges in templates.
   var SEVERITY_COLORS = {
     critical: "#d63939", // red
     high:     "#f76707", // orange
     medium:   "#f59f00", // yellow
     low:      "#206bc4", // azure
-    info:     "#74c0fc", // blue-light
+    info:     "#adb5bd", // gray
     unknown:  "#adb5bd", // gray
   };
   var SEVERITY_ORDER = ["critical", "high", "medium", "low", "info", "unknown"];
 
   var PRIORITY_COLORS = {
-    immediate:    "#d63939",
-    out_of_cycle: "#f76707",
-    scheduled:    "#206bc4",
-    defer:        "#adb5bd",
+    immediate:    "#d63939", // red
+    out_of_band:  "#f76707", // orange
+    scheduled:    "#f59f00", // yellow
+    defer:        "#adb5bd", // gray
   };
-  var PRIORITY_ORDER = ["immediate", "out_of_cycle", "scheduled", "defer"];
+  var PRIORITY_ORDER = ["immediate", "out_of_band", "scheduled", "defer"];
   var PRIORITY_LABELS = {
     immediate: "Immediate",
-    out_of_cycle: "Out-of-Cycle",
+    out_of_band: "Out-of-Band",
     scheduled: "Scheduled",
     defer: "Defer",
   };
@@ -80,16 +116,19 @@
     return { xaxis: xann };
   }
 
-  function timestampSeries(captured_at, series) {
+  function timestampSeries(captured_at, series, padToTs) {
     // ApexCharts area chart with a datetime x-axis wants
-    // [{x: ts, y: value}, ...] pairs.
+    // [{x: ts, y: value}, ...] pairs. `padToTs` extends each series
+    // by one duplicate point at the right-edge pad so the latest
+    // state stays visible across the future-pad gap.
     return series.map(function (s) {
-      return {
-        name: s.name,
-        data: s.data.map(function (v, i) {
-          return { x: new Date(captured_at[i]).getTime(), y: v };
-        }),
-      };
+      var data = s.data.map(function (v, i) {
+        return { x: new Date(captured_at[i]).getTime(), y: v };
+      });
+      if (padToTs && data.length) {
+        data.push({ x: padToTs, y: data[data.length - 1].y });
+      }
+      return { name: s.name, data: data };
     });
   }
 
@@ -115,7 +154,17 @@
       emptyState(el, "All series are zero in this window.");
       return;
     }
-    var ts = timestampSeries(data.captured_at, built.series);
+    var bounds = opts.bounds || null;
+    var firstX = new Date(data.captured_at[0]).getTime();
+    var lastX = new Date(data.captured_at[data.captured_at.length - 1]).getTime();
+    var padMs = bounds ? bounds.padMs : FUTURE_PAD_MS;
+    // Pad-point lands at the chart's right edge so the dashed forecast
+    // segment extends all the way to xMax (no gap between last real
+    // datapoint and the right boundary).
+    var xMax = bounds ? bounds.xMax : (lastX + padMs);
+    var xMin = bounds ? bounds.xMin : firstX;
+    var padToX = xMax;
+    var ts = timestampSeries(data.captured_at, built.series, padToX);
     var annotations = (opts.scope === "workload")
       ? buildAnnotations(data.events, data.captured_at)
       : { xaxis: [] };
@@ -142,9 +191,16 @@
         type: "gradient",
         gradient: { opacityFrom: 0.55, opacityTo: 0.15 },
       },
+      forecastDataPoints: {
+        count: 1,
+        dashArray: 4,
+        fillOpacity: 0.3,
+      },
       dataLabels: { enabled: false },
       xaxis: {
         type: "datetime",
+        min: xMin,
+        max: xMax,
         labels: { datetimeUTC: false },
       },
       yaxis: {
@@ -154,7 +210,16 @@
         title: { text: "Active findings" },
       },
       legend: { position: "top", horizontalAlign: "right" },
-      tooltip: { x: { format: "yyyy-MM-dd HH:mm" } },
+      tooltip: {
+        x: {
+          formatter: function (val) {
+            return new Date(val).toLocaleString(undefined, {
+              year: "numeric", month: "short", day: "2-digit",
+              hour: "2-digit", minute: "2-digit",
+            });
+          },
+        },
+      },
       annotations: annotations,
       grid: { borderColor: dark ? "#373e47" : "#e9ecef" },
     });
@@ -174,9 +239,20 @@
       el._snapshotChart = null;
     }
 
+    // Resolve interval → bounds + matching API days. Bounds get
+    // attached to opts so buildChart sees them; params.days is
+    // overridden so the API window matches the visible window.
+    var bounds = intervalBounds(opts.interval);
+    var params = {};
+    Object.keys(opts.params || {}).forEach(function (k) { params[k] = opts.params[k]; });
+    if (bounds) {
+      params.days = bounds.days;
+      opts.bounds = bounds;
+    }
+
     var url = "/api/v1/snapshots/series/?scope=" + encodeURIComponent(opts.scope);
-    Object.keys(opts.params || {}).forEach(function (k) {
-      var v = opts.params[k];
+    Object.keys(params).forEach(function (k) {
+      var v = params[k];
       if (v === undefined || v === null || v === "") return;
       url += "&" + encodeURIComponent(k) + "=" + encodeURIComponent(v);
     });
@@ -187,6 +263,13 @@
       buildChart(el, el._snapshotData, opts);
       return;
     }
+
+    // Token guards against stale fetches: when the user toggles filters
+    // quickly, an older response settling later must not overwrite the
+    // newer one's cache, or the next render with the same (newer) URL
+    // would short-circuit to bad data.
+    el._snapshotToken = (el._snapshotToken || 0) + 1;
+    var token = el._snapshotToken;
 
     el.innerHTML = '<div class="text-center text-muted py-4">Loading…</div>';
 
@@ -199,11 +282,13 @@
         return r.json();
       })
       .then(function (data) {
+        if (token !== el._snapshotToken) return;
         el._snapshotUrl = url;
         el._snapshotData = data;
         buildChart(el, data, opts);
       })
       .catch(function (err) {
+        if (token !== el._snapshotToken) return;
         el.innerHTML = (
           '<div class="text-center text-danger py-4">' +
           'Failed to load trend: ' + (err && err.message || err) +

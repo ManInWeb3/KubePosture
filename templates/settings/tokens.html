@@ -13,9 +13,11 @@
   <code>token.value</code> (or reference a Kubernetes secret), then run
   <code>helm install kubeposture-import</code>. The cluster auto-registers on first ingest;
   one token can write into any cluster.</p>
-  <p class="mb-0"><strong>Rotate:</strong> click <em>Regenerate</em> — a new secret is
-  minted and the old one stops working immediately. <strong>Revoke</strong> disables a
-  token while keeping the audit row; <strong>Delete</strong> removes the row entirely.</p>
+  <p><strong>Rotate:</strong> click <em>Regenerate</em> — a new secret is minted and
+  the old one stops working immediately. <strong>Delete</strong> removes the token
+  entirely.</p>
+  <p class="mb-0"><strong>Name:</strong> alphanumeric, dashes, and underscores only.
+  Typically the cluster name.</p>
 {% endhelp %}
 
 <!-- Create token form -->
@@ -29,7 +31,6 @@
         <input type="text" name="name" class="form-control" required
                pattern="[a-zA-Z0-9_-]+"
                placeholder="e.g. cluster-name-1">
-        <small class="form-hint">Alphanumeric, dashes, underscores. Typically the cluster name.</small>
       </div>
       <div class="col-md-6">
         <label class="form-label">Description</label>
@@ -88,18 +89,11 @@
           </td>
           <td>
             <div class="d-flex gap-1">
-              {% if not t.revoked_at %}
               <form method="post" action="{% url 'token-regenerate' t.pk %}" class="d-inline"
                     onsubmit="return confirm('Regenerate token {{ t.name }}? The old token will stop working immediately.');">
                 {% csrf_token %}
                 <button type="submit" class="btn btn-sm btn-outline-warning">Regenerate</button>
               </form>
-              <form method="post" action="{% url 'token-revoke' t.pk %}" class="d-inline"
-                    onsubmit="return confirm('Revoke token {{ t.name }}? The token will stop working immediately.');">
-                {% csrf_token %}
-                <button type="submit" class="btn btn-sm btn-outline-danger">Revoke</button>
-              </form>
-              {% endif %}
               <form method="post" action="{% url 'token-delete' t.pk %}" class="d-inline"
                     onsubmit="return confirm('Delete token {{ t.name }}? This is permanent.');">
                 {% csrf_token %}

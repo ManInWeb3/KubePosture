@@ -1,0 +1,52 @@
+{# Priority-band help — paraphrased from core/urgency.py:64-191. #}
+{# If urgency.py changes, re-sync this partial.                  #}
+<p class="mb-1"><strong>Priority bands</strong> — what each band <em>means</em>
+(per Spring et al.,
+<a href="https://weis2020.econinfosec.org/wp-content/uploads/sites/8/2020/06/weis20-final6.pdf"
+   target="_blank" rel="noopener">SSVC, WEIS 2020</a>, Table 2),
+followed by the conditions our scorer uses to land a finding there:</p>
+<dl class="mb-0">
+  <dt class="mt-2"><span class="badge bg-red-lt text-red">Immediate</span></dt>
+  <dd>
+    <em>Develop and release a fix as quickly as possible, drawing on all
+    available resources.</em>
+    <ul class="mb-0">
+      <li>any KEV-listed CVE</li>
+      <li>Critical/High with EPSS ≥ 0.9 on an internet-exposed workload in a prod cluster</li>
+      <li>any Critical on an internet-exposed workload in a prod cluster</li>
+      <li>cluster-scoped findings (e.g. ClusterRole RBAC) cap at Out-of-Band and never reach Immediate</li>
+    </ul>
+  </dd>
+  <dt class="mt-2"><span class="badge bg-orange-lt text-orange">Out-of-Band</span>
+    <span class="text-muted small">(SSVC: Out-of-Band)</span></dt>
+  <dd>
+    <em>Develop a fix out-of-band, taking resources from other projects and
+    releasing it as a security patch when it is ready.</em>
+    <ul class="mb-0">
+      <li>Critical/High in prod with an active escalation signal (host-escape, RBAC-elevation, or privilege-escalation)</li>
+      <li>EPSS ≥ 0.9 in prod</li>
+      <li>any Critical in prod</li>
+      <li>High on an internet-exposed workload in prod</li>
+      <li>cluster-scoped: any Critical, or High in a prod cluster</li>
+    </ul>
+  </dd>
+  <dt class="mt-2"><span class="badge bg-yellow-lt text-yellow">Scheduled</span></dt>
+  <dd>
+    <em>Develop a fix within regularly scheduled maintenance, using developer
+    resources as normal.</em>
+    <ul class="mb-0">
+      <li>High/Medium with no fix available in a namespace flagged as sensitive</li>
+      <li>no-fix Critical/High where the workload is exposed or has an escalation signal</li>
+      <li>Critical in staging/dev</li>
+      <li>High in prod</li>
+      <li>Medium in prod with an escalation signal</li>
+    </ul>
+  </dd>
+  <dt class="mt-2"><span class="badge bg-secondary-lt text-secondary">Defer</span></dt>
+  <dd class="mb-0">
+    <em>Do not work on the patch at present.</em>
+    <ul class="mb-0">
+      <li>everything else, including no-fix CVEs that are neither exposed nor have an escalation signal</li>
+    </ul>
+  </dd>
+</dl>

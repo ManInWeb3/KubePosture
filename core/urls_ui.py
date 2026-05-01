@@ -23,7 +23,6 @@ from core.views_ui import (
     TokenDeleteView,
     TokenListView,
     TokenRegenerateView,
-    TokenRevokeView,
     UserCreateView,
     UserEditView,
     UserListView,
@@ -75,11 +74,6 @@ urlpatterns = [
         "access/tokens/<int:pk>/regenerate/",
         TokenRegenerateView.as_view(),
         name="token-regenerate",
-    ),
-    path(
-        "access/tokens/<int:pk>/revoke/",
-        TokenRevokeView.as_view(),
-        name="token-revoke",
     ),
     path(
         "access/tokens/<int:pk>/delete/",

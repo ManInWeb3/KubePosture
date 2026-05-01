@@ -8,6 +8,7 @@ slice.
 from __future__ import annotations
 
 from django.contrib.auth.mixins import LoginRequiredMixin
+from django.db import transaction
 from django.db.models import Count, Q
 from django.http import Http404, HttpResponse, HttpResponseForbidden
 from django.shortcuts import render
@@ -20,7 +21,6 @@ from django.shortcuts import get_object_or_404, redirect
 
 from django.contrib.auth.models import Group, User
 from django.core.paginator import Paginator
-from django.utils import timezone
 
 from core.api.auth import generate_token
 from core.constants import WorkloadKind
@@ -30,6 +30,10 @@ from core.services.inventory import (
     list_workload_images,
     list_workloads,
     workloads_for_kind_name,
+)
+from core.services.snapshot import (
+    capture_cluster_snapshot,
+    capture_namespace_snapshot,
 )
 from core.urgency import recompute_batch
 
@@ -50,6 +54,21 @@ def _recompute_cluster(cluster: Cluster) -> int:
     """
     findings = list(Finding.objects.filter(cluster=cluster).only("id"))
     return recompute_batch(findings)
+
+
+@transaction.atomic
+def _bracketed_namespace_mutation(ns: Namespace, mutate) -> None:
+    """Wrap a namespace-flag mutation in pre/post cluster + namespace
+    Snapshot rows around a priority recompute, so trend charts show a
+    clean before/after step at the moment of the edit instead of waiting
+    for the next 06:30 daily heartbeat.
+    """
+    capture_cluster_snapshot(ns.cluster)
+    capture_namespace_snapshot(ns)
+    mutate()
+    _recompute_cluster(ns.cluster)
+    capture_cluster_snapshot(ns.cluster)
+    capture_namespace_snapshot(ns)
 
 
 def _is_htmx(request) -> bool:
@@ -81,10 +100,6 @@ class WorkloadsListView(LoginRequiredMixin, View):
         cluster = params.get("cluster") or None
         namespace = params.get("namespace") or None
         name_contains = params.get("name") or None
-        deployed_only = params.get("deployed_only", "true").lower() != "false"
-        include_muted = params.get("include_muted") == "true"
-        has_immediate = params.get("has_immediate") == "true"
-        has_out_of_cycle = params.get("has_out_of_cycle") == "true"
         sort = params.get("sort") or None
         sort_dir = params.get("dir") or "desc"
 
@@ -92,10 +107,6 @@ class WorkloadsListView(LoginRequiredMixin, View):
             cluster=cluster,
             namespace=namespace,
             name_contains=name_contains,
-            has_immediate=has_immediate,
-            has_out_of_cycle=has_out_of_cycle,
-            include_muted=include_muted,
-            deployed_only=deployed_only,
             sort=sort,
             sort_dir=sort_dir,
         )
@@ -120,10 +131,6 @@ class WorkloadsListView(LoginRequiredMixin, View):
                 "cluster": cluster or "",
                 "namespace": namespace or "",
                 "name": name_contains or "",
-                "deployed_only": deployed_only,
-                "include_muted": include_muted,
-                "has_immediate": has_immediate,
-                "has_out_of_cycle": has_out_of_cycle,
                 "sort": sort or "",
                 "dir": sort_dir,
             },
@@ -410,10 +417,12 @@ class NamespaceToggleView(LoginRequiredMixin, View):
         if manual_field is None:
             return HttpResponse(f"unknown field: {field}", status=400)
 
-        setattr(ns, field, not getattr(ns, field))
-        setattr(ns, manual_field, True)
-        ns.save(update_fields=[field, manual_field])
-        _recompute_cluster(ns.cluster)
+        def _flip():
+            setattr(ns, field, not getattr(ns, field))
+            setattr(ns, manual_field, True)
+            ns.save(update_fields=[field, manual_field])
+
+        _bracketed_namespace_mutation(ns, _flip)
 
         # Re-annotate finding_count so the row's count cell stays accurate.
         ns.finding_count = (
@@ -442,10 +451,12 @@ class NamespaceResetAutoView(LoginRequiredMixin, View):
             pk=ns_pk,
             cluster_id=cluster_pk,
         )
-        ns.exposure_is_manual = False
-        ns.sensitive_is_manual = False
-        ns.save(update_fields=["exposure_is_manual", "sensitive_is_manual"])
-        _recompute_cluster(ns.cluster)
+        def _reset():
+            ns.exposure_is_manual = False
+            ns.sensitive_is_manual = False
+            ns.save(update_fields=["exposure_is_manual", "sensitive_is_manual"])
+
+        _bracketed_namespace_mutation(ns, _reset)
 
         ns.finding_count = (
             ns.workloads.filter(deployed=True)
@@ -568,13 +579,17 @@ class UserCreateView(AdminRequiredMixin, View):
 
     template_name = "users/form.html"
 
-    def get(self, request):
-        return render(request, self.template_name, {
+    def _ctx(self, selected_role):
+        return {
+            "edit_user": None,
             "groups": _role_groups_qs(),
-            "selected_role": "viewer",
+            "selected_role": selected_role,
             "nav": "access",
             "settings_tab": "users",
-        })
+        }
+
+    def get(self, request):
+        return render(request, self.template_name, self._ctx("viewer"))
 
     def post(self, request):
         username = (request.POST.get("username") or "").strip()
@@ -590,7 +605,7 @@ class UserCreateView(AdminRequiredMixin, View):
         elif User.objects.filter(username=username).exists():
             messages.error(request, f"Username '{username}' already exists.")
         elif role not in ROLE_GROUPS:
-            messages.error(request, "Pick a role: viewer, operator, or admin.")
+            messages.error(request, "Pick a role: viewer, SecEngineer, or admin.")
         elif not password:
             messages.error(request, "Password is required for new users.")
         else:
@@ -607,12 +622,7 @@ class UserCreateView(AdminRequiredMixin, View):
             messages.success(request, f"User '{username}' created.")
             return redirect("user-list")
 
-        return render(request, self.template_name, {
-            "groups": _role_groups_qs(),
-            "selected_role": role or "viewer",
-            "nav": "access",
-            "settings_tab": "users",
-        })
+        return render(request, self.template_name, self._ctx(role or "viewer"))
 
 
 class UserEditView(AdminRequiredMixin, View):
@@ -750,20 +760,6 @@ class TokenRegenerateView(AdminRequiredMixin, View):
             request,
             f"Token '{tok.name}' regenerated. Old token is now invalid.",
         )
-        return redirect("token-list")
-
-
-class TokenRevokeView(AdminRequiredMixin, View):
-    """`POST /access/tokens/<pk>/revoke/` — set `revoked_at` (soft revoke)."""
-
-    def post(self, request, pk):
-        tok = get_object_or_404(IngestToken, pk=pk)
-        if tok.revoked_at is None:
-            tok.revoked_at = timezone.now()
-            tok.save(update_fields=["revoked_at"])
-            messages.success(request, f"Token '{tok.name}' revoked.")
-        else:
-            messages.info(request, f"Token '{tok.name}' was already revoked.")
         return redirect("token-list")
 
 

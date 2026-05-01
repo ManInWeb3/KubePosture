@@ -160,36 +160,9 @@
     </div>
   </div>
 
-  <!-- Right sidebar: priority preview + rollup -->
+  <!-- Right sidebar: cluster rollup -->
   <div class="col-lg-4">
     <div class="card">
-      <div class="card-header"><h3 class="card-title">Priority Decision Tree</h3></div>
-      <div class="card-body">
-        <p class="text-secondary mb-3">How namespace exposure + cluster environment affect priority:</p>
-        <table class="table table-sm table-borderless">
-          <tbody>
-            <tr>
-              <td><span class="badge bg-danger-lt text-danger">Immediate</span></td>
-              <td class="text-secondary">KEV-listed, or Critical/High-EPSS on exposed prod</td>
-            </tr>
-            <tr>
-              <td><span class="badge bg-orange-lt text-orange">Out-of-Cycle</span></td>
-              <td class="text-secondary">Critical in prod, High-EPSS in prod, High on exposed prod</td>
-            </tr>
-            <tr>
-              <td><span class="badge bg-azure-lt text-azure">Scheduled</span></td>
-              <td class="text-secondary">Critical in dev, High in prod, High/Medium with sensitive data</td>
-            </tr>
-            <tr>
-              <td><span class="badge bg-secondary-lt text-secondary">Defer</span></td>
-              <td class="text-secondary">Everything else</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="card mt-3">
       <div class="card-header"><h3 class="card-title">Cluster rollup</h3></div>
       <div class="card-body">
         <div class="datagrid">

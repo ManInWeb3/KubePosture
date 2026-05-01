@@ -32,7 +32,7 @@ class Source(models.TextChoices):
 
 class PriorityBand(models.TextChoices):
     IMMEDIATE = "immediate", "Immediate"
-    OUT_OF_CYCLE = "out_of_cycle", "Out-of-Cycle"
+    OUT_OF_BAND = "out_of_band", "Out-of-Band"
     SCHEDULED = "scheduled", "Scheduled"
     DEFER = "defer", "Defer"
 

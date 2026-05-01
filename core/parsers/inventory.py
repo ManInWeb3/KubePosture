@@ -275,7 +275,9 @@ def _ingress_backend_service_names(ing: dict) -> set[str]:
 _ENV_DETECTION_REGEX = [
     (r"(^|[-_])prod([-_]|$)", "prod"),
     (r"(^|[-_])production([-_]|$)", "prod"),
+    (r"(^|[-_])prd([-_]|$)", "prod"),
     (r"(^|[-_])stag(e|ing)?([-_]|$)", "staging"),
+    (r"(^|[-_])stg([-_]|$)", "staging"),
     (r"(^|[-_])(dev|development|test|sandbox|qa)([-_]|$)", "dev"),
 ]
 

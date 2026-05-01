@@ -60,38 +60,50 @@ Defaults work against the docker-compose database. The relevant vars:
 python manage.py migrate
 ```
 
-### 5. Create a Django superuser (for the admin UI)
+### 5. Seed the RBAC groups
+
+```bash
+python manage.py setup_rbac
+```
+
+Creates the three role Groups — `viewer`, `SecEngineer`, `admin` — that
+the Access UI assigns to users. Idempotent; re-run any time.
+
+### 6. Create a Django superuser (for the admin UI)
 
 ```bash
 python manage.py createsuperuser
 ```
 
-### 6. Run the dev server
+### 7. Run the dev server
 
 ```bash
 python manage.py runserver
 ```
 
 Open http://localhost:8000/admin/ and log in with the superuser. The
-admin lists every model — Cluster, Workload, Image, Finding,
-WorkloadSignal, ImportMark, IngestQueue, Snapshot, FindingAction,
-EpssScore, KevEntry, VexStatement, ScanInconsistency.
+admin lists every model — Cluster, Namespace, Workload, WorkloadAlias,
+WorkloadImageObservation, WorkloadSignal, Image, Finding, FindingAction,
+ImportMark, IngestQueue, IngestToken, Snapshot, EpssScore, KevEntry,
+ScanInconsistency, UserPreference.
 
 There is no custom UI in this milestone. Read + act through Django
 admin.
 
-### 7. Drain the ingest queue
+### 8. Drain the ingest queue
 
 In another terminal:
 
 ```bash
 source .venv/bin/activate
-python manage.py process_ingest_queue
+python manage.py process_ingest_queue          # loop until empty (default)
+python manage.py process_ingest_queue --once   # single batch then exit
+python manage.py process_ingest_queue --limit 50
 ```
 
-This is one-shot — it drains everything currently `state=draining`
-and exits. In production it runs as a 1-min CronJob; locally re-run
-it whenever you've ingested new data.
+Default mode loops `drain_once` batches until the queue is empty, then
+exits. In production this runs as a CronJob every few minutes; locally
+re-run it whenever you've ingested new data.
 
 ---
 
@@ -107,7 +119,7 @@ plumbing.
 ```bash
 TESTING_HARNESS_ENABLED=true \
 DJANGO_SETTINGS_MODULE=kubeposture.settings \
-pytest tests/scenario_runner/   # all 7 scenarios pass
+pytest tests/scenario_runner/   # iterates Architecture/mock_tests/<NN-…>/ dirs
 ```
 
 That populates a throwaway test DB. To populate your real dev DB
@@ -160,7 +172,8 @@ kubectl get policyreports -A -o json          > /tmp/kp-snap/kyverno/policyrepor
 kubectl get clusterpolicyreports -o json      > /tmp/kp-snap/kyverno/clusterpolicyreports.json
 
 # 2. Mint a bearer token (only the plain token is shown — once).
-TOKEN=$(python manage.py create_cluster_token <cluster-name> | tail -1)
+#    Tokens are NOT cluster-bound; the name is just a human label.
+TOKEN=$(python manage.py create_ingest_token my-laptop | tail -1)
 
 # 3. Replay the capture into your local central.
 KUBEPOSTURE_URL=http://localhost:8000 KUBEPOSTURE_TOKEN=$TOKEN \
@@ -176,7 +189,7 @@ Same flow, but instead of `--from-folder` point the importer at a
 kubeconfig:
 
 ```bash
-TOKEN=$(python manage.py create_cluster_token <cluster-name> | tail -1)
+TOKEN=$(python manage.py create_ingest_token my-laptop | tail -1)
 
 KUBEPOSTURE_URL=http://localhost:8000 KUBEPOSTURE_TOKEN=$TOKEN \
   python scripts/import-cluster.py <cluster-name> \
@@ -206,22 +219,41 @@ no-op rule (empty/failed fetch leaves existing rows alone).
 In production both run as daily CronJobs. Locally, re-run when you
 want fresh threat-intel.
 
-VEX is admin-uploaded — drop OpenVEX / CSAF JSON files anywhere and
-load with:
+Offline / air-gapped variant — load from a local file instead of
+fetching over HTTP:
 
 ```bash
-python manage.py enrich_from_file --source vex /path/to/file.json
+python manage.py enrich_from_file --source kev /path/to/known_exploited_vulnerabilities.json
+python manage.py enrich_from_file --source epss /path/to/epss_scores.csv
 ```
 
 ---
 
-## Daily housekeeping
+## Cadence — how often to run each command
+
+The table is what the production CronJobs do. For a local dev setup,
+re-run on the same triggers (or just on demand).
+
+| Command | Cadence | Trigger |
+|---|---|---|
+| `migrate` | once per release | Code/schema change |
+| `setup_rbac` | once + idempotent re-run | Install or after RBAC group rename |
+| `createsuperuser` | once per env | Initial admin |
+| `process_ingest_queue` | every 1–3 min (continuous) | Drains `IngestQueue`; reaps inline as marks finish draining |
+| `enrich_fetch --source kev` | daily | CISA KEV catalog refresh |
+| `enrich_fetch --source epss` | daily | first.org EPSS publishes daily |
+| `reap_safety_net` | hourly | Catches stuck `state=draining` ImportMarks the inline reaper missed |
+| `snapshot_capture` | daily (after enrichment + reaper) | End-of-day heartbeat at global / cluster / namespace / workload scopes; feeds trend charts |
+| `prune_snapshots` | daily or weekly | Deletes Snapshot rows older than `SNAPSHOT_RETENTION_DAYS` (default 365) |
+| `recalculate_priorities` | on-demand or weekly | After a scoring tweak in `core/urgency.py`, or after a bulk enrichment refresh |
+| `reset_runtime_data --yes` | manual only | Wipe runtime tables (workloads / findings / queue / marks / snapshots) while preserving Cluster + IngestToken + EPSS/KEV |
+
+Quick local cron (one-shot housekeeping pass):
 
 ```bash
-python manage.py snapshot_capture          # daily heartbeat snapshots (global / cluster / namespace / workload)
-python manage.py prune_snapshots           # delete Snapshot rows older than SNAPSHOT_RETENTION_DAYS (default 365)
-python manage.py reap_safety_net           # fire any stuck reaps
-python manage.py recalculate_priorities    # bulk recompute (after a scoring tweak)
+python manage.py reap_safety_net
+python manage.py snapshot_capture
+python manage.py prune_snapshots
 ```
 
 Snapshot rows feed the **CVE Trend** charts on `/workloads/` (fleet-wide
@@ -260,13 +292,18 @@ Each scenario:
 
 | Task | Command |
 |---|---|
-| Reset the dev DB | `docker compose exec db psql -U kubeposture -d postgres -c 'DROP DATABASE IF EXISTS kubeposture' -c 'CREATE DATABASE kubeposture'` then `python manage.py migrate` |
-| Mint a cluster bearer token | `python manage.py create_cluster_token <name>` |
-| Drain the ingest queue once | `python manage.py process_ingest_queue` |
+| Reset the dev DB (full schema rebuild) | `docker compose exec db psql -U kubeposture -d postgres -c 'DROP DATABASE IF EXISTS kubeposture' -c 'CREATE DATABASE kubeposture'` then `python manage.py migrate` |
+| Reset runtime data only (preserves clusters / tokens / EPSS / KEV) | `python manage.py reset_runtime_data --yes` |
+| Mint an ingest bearer token | `python manage.py create_ingest_token <name> [--description "..."]` |
+| Drain the ingest queue (loop) | `python manage.py process_ingest_queue` |
+| Drain the ingest queue (single batch) | `python manage.py process_ingest_queue --once [--limit 100]` |
 | Force a priority recompute | `python manage.py recalculate_priorities [--cluster <name>]` |
 | Capture a daily snapshot | `python manage.py snapshot_capture` |
 | Prune old snapshots | `python manage.py prune_snapshots [--dry-run]` |
+| Sweep stuck draining marks | `python manage.py reap_safety_net` |
 | Fetch latest EPSS / KEV | `python manage.py enrich_fetch --source {epss,kev}` |
+| Load EPSS / KEV from file (offline) | `python manage.py enrich_from_file --source {epss,kev} <path>` |
+| Seed RBAC groups | `python manage.py setup_rbac` |
 | Run scenario tests | `TESTING_HARNESS_ENABLED=true pytest tests/scenario_runner/` |
 | System check | `python manage.py check` |
 

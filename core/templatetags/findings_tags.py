@@ -23,14 +23,14 @@ _SEVERITY_COLOURS = {
 
 _PRIORITY_COLOURS = {
     "immediate": "bg-red-lt text-red",
-    "out_of_cycle": "bg-orange-lt text-orange",
+    "out_of_band": "bg-orange-lt text-orange",
     "scheduled": "bg-yellow-lt text-yellow",
     "defer": "bg-secondary-lt text-secondary",
 }
 
 _PRIORITY_LABELS = {
     "immediate": "Immediate",
-    "out_of_cycle": "Out-of-Cycle",
+    "out_of_band": "Out-of-Band",
     "scheduled": "Scheduled",
     "defer": "Defer",
 }
@@ -46,7 +46,7 @@ def severity_badge(severity):
 
 # Numeric ranks so kubeposture.js sortable tables order by urgency,
 # not alphabetic textContent. Higher = more urgent — pair with sort-desc.
-_PRIORITY_RANK = {"immediate": 3, "out_of_cycle": 2, "scheduled": 1, "defer": 0}
+_PRIORITY_RANK = {"immediate": 3, "out_of_band": 2, "scheduled": 1, "defer": 0}
 _SEVERITY_RANK = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1, "unknown": 0}
 
 

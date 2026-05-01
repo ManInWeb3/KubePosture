@@ -140,7 +140,7 @@ def finding_high(db, cluster_a, workload_api, image_api):
         cluster=cluster_a, workload=workload_api, image=image_api,
         source="trivy", category="vulnerability", vuln_id="CVE-2024-5678",
         pkg_name="openssl", title="high thing",
-        severity="high", effective_priority="out_of_cycle",
+        severity="high", effective_priority="out_of_band",
         kev_listed=False, hash_code="h2",
     )
 
@@ -281,7 +281,7 @@ def test_finding_filter_by_severity_and_priority_compose(
     authed_client, finding_critical, finding_high
 ):
     response = authed_client.get(
-        "/api/v1/findings/?severity=high&effective_priority=out_of_cycle"
+        "/api/v1/findings/?severity=high&effective_priority=out_of_band"
     )
     data = response.json()
     assert data["count"] == 1

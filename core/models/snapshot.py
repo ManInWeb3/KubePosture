@@ -52,10 +52,9 @@ class Snapshot(models.Model):
     priority_counts = models.JSONField(
         default=dict,
         blank=True,
-        help_text="{immediate: N, out_of_cycle: N, scheduled: N, defer: N}",
+        help_text="{immediate: N, out_of_band: N, scheduled: N, defer: N}",
     )
     total_active = models.PositiveIntegerField(default=0)
-    total_actioned = models.PositiveIntegerField(default=0)
 
     import_id = models.CharField(
         max_length=32,

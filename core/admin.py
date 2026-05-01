@@ -1,5 +1,6 @@
 """Django admin registration for KubePostureNG models."""
 from django.contrib import admin
+from django.db import transaction
 
 from core.models import (
     Cluster,
@@ -19,6 +20,11 @@ from core.models import (
     WorkloadImageObservation,
     WorkloadSignal,
 )
+from core.services.snapshot import (
+    capture_cluster_snapshot,
+    capture_namespace_snapshot,
+)
+from core.urgency import recompute_batch
 
 
 @admin.register(Workload)
@@ -89,6 +95,66 @@ class IngestTokenAdmin(admin.ModelAdmin):
     ordering = ("-created_at",)
 
 
+@admin.register(Namespace)
+class NamespaceAdmin(admin.ModelAdmin):
+    list_display = (
+        "name",
+        "cluster",
+        "active",
+        "internet_exposed",
+        "contains_sensitive_data",
+    )
+    list_filter = (
+        "cluster",
+        "active",
+        "internet_exposed",
+        "contains_sensitive_data",
+    )
+    search_fields = ("name", "cluster__name")
+    list_select_related = ("cluster",)
+    ordering = ("cluster", "name")
+
+    def save_model(self, request, obj, form, change):
+        # Bracket admin saves with pre/post cluster + namespace Snapshot
+        # rows around a priority recompute, so flag flips land visibly
+        # on the trend. Skip on initial create — no findings yet.
+        if not change:
+            super().save_model(request, obj, form, change)
+            return
+
+        with transaction.atomic():
+            capture_cluster_snapshot(obj.cluster)
+            capture_namespace_snapshot(obj)
+            super().save_model(request, obj, form, change)
+            recompute_batch(list(
+                Finding.objects.filter(cluster=obj.cluster).only("id")
+            ))
+            capture_cluster_snapshot(obj.cluster)
+            capture_namespace_snapshot(obj)
+
+
+@admin.register(Cluster)
+class ClusterAdmin(admin.ModelAdmin):
+    list_display = ("name", "environment", "provider", "region", "k8s_version")
+    list_filter = ("environment", "provider")
+    search_fields = ("name",)
+    ordering = ("name",)
+
+    def save_model(self, request, obj, form, change):
+        # Bracket admin saves with pre/post cluster-scope Snapshot rows
+        # so environment / exposure edits land visibly on the trend
+        # chart. Skip on initial create — no findings to count yet.
+        if not change:
+            super().save_model(request, obj, form, change)
+            return
+
+        with transaction.atomic():
+            capture_cluster_snapshot(obj)
+            super().save_model(request, obj, form, change)
+            recompute_batch(list(obj.findings.all().only("id")))
+            capture_cluster_snapshot(obj)
+
+
 @admin.register(Snapshot)
 class SnapshotAdmin(admin.ModelAdmin):
     list_display = (
@@ -115,14 +181,12 @@ class SnapshotAdmin(admin.ModelAdmin):
 
 # Bulk-register the rest with default options.
 for _model in (
-    Cluster,
     EpssScore,
     FindingAction,
     Image,
     ImportMark,
     IngestQueue,
     KevEntry,
-    Namespace,
     ScanInconsistency,
     WorkloadAlias,
     WorkloadSignal,

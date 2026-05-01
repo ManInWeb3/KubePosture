@@ -121,12 +121,12 @@ def scene(db, cluster_a, cluster_b):
         effective_priority="immediate", kev_listed=True,
         epss_score=0.92, hash_code="hi",
     )
-    # High → OUT_OF_CYCLE on shared image, cluster-b workload
+    # High → OUT_OF_BAND on shared image, cluster-b workload
     Finding.objects.create(
         cluster=cluster_b, workload=w_api_b, image=img_shared,
         source="trivy", category="vulnerability", vuln_id="CVE-2025-0002",
         title="high bug", severity="high",
-        effective_priority="out_of_cycle", epss_score=0.4,
+        effective_priority="out_of_band", epss_score=0.4,
         hash_code="ho",
     )
     # Medium → SCHEDULED on other image
@@ -141,7 +141,7 @@ def scene(db, cluster_a, cluster_b):
         cluster=cluster_a, workload=w_api_a, image=img_shared,
         source="trivy", category="vulnerability", vuln_id="CVE-2025-0004",
         title="accepted bug", severity="high",
-        effective_priority="out_of_cycle", hash_code="hm",
+        effective_priority="out_of_band", hash_code="hm",
     )
     FindingAction.objects.create(
         action_type=FindingActionType.ACCEPT,
@@ -209,9 +209,9 @@ def test_workloads_priority_counts_match(authed, scene):
     worker = by_key[("cluster-a", "worker")]
     # Muted CVE-0004 must be hidden by default predicate
     assert api_a["n_immediate"] == 1
-    assert api_a["n_out_of_cycle"] == 0
+    assert api_a["n_out_of_band"] == 0
     assert api_b["n_immediate"] == 0
-    assert api_b["n_out_of_cycle"] == 1
+    assert api_b["n_out_of_band"] == 1
     assert worker["n_scheduled"] == 1
 
 
@@ -221,14 +221,6 @@ def test_default_sort_floats_immediate_to_top(authed, scene):
     # cluster-a api carries the only IMMEDIATE finding
     assert rows[0]["cluster"] == "cluster-a"
     assert rows[0]["name"] == "api"
-
-
-def test_include_muted_reveals_accepted(authed, scene):
-    response = authed.get("/workloads/?include_muted=true")
-    rows = response.context["rows"]
-    api_a = next(r for r in rows if r["cluster"] == "cluster-a" and r["name"] == "api")
-    # Now the muted Out-of-Cycle finding is also counted
-    assert api_a["n_out_of_cycle"] == 1
 
 
 def test_cluster_filter(authed, scene):
@@ -248,14 +240,6 @@ def test_name_substring_filter(authed, scene):
     response = authed.get("/workloads/?name=work")
     rows = response.context["rows"]
     assert {r["name"] for r in rows} == {"worker"}
-
-
-def test_has_immediate_filter(authed, scene):
-    response = authed.get("/workloads/?has_immediate=true")
-    rows = response.context["rows"]
-    assert {(r["cluster"], r["name"]) for r in rows} == {
-        ("cluster-a", "api"),
-    }
 
 
 def test_namespace_selector_dedupes_across_clusters(authed, scene):
@@ -295,22 +279,13 @@ def test_namespace_selector_excludes_empty_namespaces(authed, scene):
     assert "vacant" not in names
 
 
-def test_deployed_only_default_excludes_undeployed(authed, scene):
+def test_undeployed_workloads_are_hidden(authed, scene):
     scene["w_other"].deployed = False
     scene["w_other"].save(update_fields=["deployed"])
     response = authed.get("/workloads/")
     rows = response.context["rows"]
     keys = {(r["cluster"], r["name"]) for r in rows}
     assert ("cluster-a", "worker") not in keys
-
-
-def test_deployed_only_off_includes_undeployed(authed, scene):
-    scene["w_other"].deployed = False
-    scene["w_other"].save(update_fields=["deployed"])
-    response = authed.get("/workloads/?deployed_only=false")
-    rows = response.context["rows"]
-    keys = {(r["cluster"], r["name"]) for r in rows}
-    assert ("cluster-a", "worker") in keys
 
 
 def test_sort_by_n_scheduled_desc(authed, scene):
