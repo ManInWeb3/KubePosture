@@ -13,6 +13,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -241,15 +242,25 @@ def _selector_subset(selector: dict, labels: dict) -> bool:
     return True
 
 
+def _configured_internal_ingress_classes() -> frozenset[str]:
+    raw = getattr(settings, "INTERNAL_INGRESS_CLASSES", []) or []
+    return frozenset(s.strip().lower() for s in raw if s and s.strip())
+
+
 def _is_internal_ingress(ing: dict) -> bool:
     spec = ing.get("spec") or {}
     cls = (spec.get("ingressClassName") or "").lower()
+    configured = _configured_internal_ingress_classes()
+    if cls and cls in configured:
+        return True
     if "internal" in cls or "private" in cls:
         return True
     annotations = (ing.get("metadata") or {}).get("annotations") or {}
     if str(annotations.get("alb.ingress.kubernetes.io/scheme", "")).lower() == "internal":
         return True
     cls_ann = str(annotations.get("kubernetes.io/ingress.class", "")).lower()
+    if cls_ann and cls_ann in configured:
+        return True
     if cls_ann.endswith("-internal") or "internal" in cls_ann:
         return True
     return False

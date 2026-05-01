@@ -22,11 +22,12 @@ app:
     CSRF_TRUSTED_ORIGINS: ""      # e.g. "https://kubeposture.example.com"
     LOG_LEVEL: "INFO"
     INGEST_QUEUE_MAX_ATTEMPTS: "3"
+    INTERNAL_INGRESS_CLASSES: ""  # CSV of ingress class names treated as not public, e.g. "pomerium,nginx-internal"
 
-# -- Compliance framework fixture files to load (paths relative to /app/fixtures/)
-# These are loaded by the post-install/upgrade job.
-frameworkFixtures:
-  - "k8s-cis-1.23-sample.yaml"
+# Compliance framework loading is not implemented in this milestone.
+# The fixtures/ directory holds sample YAMLs but no `load_frameworks`
+# command exists yet; the setup job will only seed RBAC + the default
+# admin user.
 
 # ── Web Deployment ──────────────────────────────────────────────
 
@@ -48,16 +49,17 @@ web:
     limits:
       cpu: 500m
       memory: 512Mi
+  # Liveness uses /healthz (process up); readiness uses /readyz (DB reachable).
   livenessProbe:
     httpGet:
-      path: /healthz/
+      path: /healthz
       port: http
     initialDelaySeconds: 5
     periodSeconds: 15
     timeoutSeconds: 3
   readinessProbe:
     httpGet:
-      path: /healthz/
+      path: /readyz
       port: http
     initialDelaySeconds: 3
     periodSeconds: 10
@@ -76,12 +78,14 @@ worker:
   concurrencyPolicy: Allow      # allow overlap during heavy imports
   parallelism: 1                # pods per job (increase for burst processing)
   activeDeadlineSeconds: 300
+  # Default mode loops drain_once batches until the queue is empty,
+  # then exits. --limit caps the number of items fetched per inner batch.
   command:
     - python
     - manage.py
     - process_ingest_queue
-    - --batch-size
-    - "10"
+    - --limit
+    - "100"
   resources:
     requests:
       cpu: 100m
@@ -107,11 +111,27 @@ migration:
 # used for seeding EPSS/KEV data immediately instead of waiting for the next tick.
 # Crons without initialRun only run on their schedule.
 cronJobs:
+  # CISA KEV catalog — small (~1.5k rows), refreshed daily by CISA.
+  enrichKev:
+    enabled: true
+    initialRun: true            # seed KEV on install
+    schedule: "15 3 * * *"      # daily 03:15 UTC
+    command: ["python", "manage.py", "enrich_fetch", "--source", "kev"]
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+    activeDeadlineSeconds: 300
+
+  # first.org EPSS feed — ~330k rows, published daily.
   enrichEpss:
     enabled: true
     initialRun: true            # seed EPSS on install
-    schedule: "15 3 * * *"      # daily 03:15 UTC
-    command: ["python", "manage.py", "enrich_epss"]
+    schedule: "30 3 * * *"      # daily 03:30 UTC (after KEV)
+    command: ["python", "manage.py", "enrich_fetch", "--source", "epss"]
     resources:
       requests:
         cpu: 50m
@@ -121,71 +141,14 @@ cronJobs:
         memory: 512Mi
     activeDeadlineSeconds: 600
 
-  enrichKev:
-    enabled: true
-    initialRun: true            # seed KEV on install
-    schedule: "30 3 * * *"      # daily 03:30 UTC
-    command: ["python", "manage.py", "enrich_kev"]
-    resources:
-      requests:
-        cpu: 50m
-        memory: 128Mi
-      limits:
-        cpu: 500m
-        memory: 256Mi
-    activeDeadlineSeconds: 300
-
-  enrichVex:
-    enabled: true
-    # Don't seed on install — OSV query cost scales with #distinct CVEs in
-    # Finding, which is zero on a fresh DB. First scheduled run after real
-    # ingest will populate it.
-    initialRun: false
-    schedule: "45 3 * * *"      # daily 03:45 UTC
-    command: ["python", "manage.py", "enrich_vex"]
-    resources:
-      requests:
-        cpu: 50m
-        memory: 128Mi
-      limits:
-        cpu: 500m
-        memory: 512Mi
-    activeDeadlineSeconds: 900  # OSV lookups are per-CVE; up to 500 CVEs/run
-
-  expireRiskAcceptances:
-    enabled: true
-    schedule: "0 4 * * *"       # daily 04:00 UTC
-    command: ["python", "manage.py", "expire_risk_acceptances"]
-    resources:
-      requests:
-        cpu: 50m
-        memory: 128Mi
-      limits:
-        cpu: 200m
-        memory: 256Mi
-    activeDeadlineSeconds: 120
-
-  cleanupIngestQueue:
-    enabled: true
-    schedule: "0 5 * * *"       # daily 05:00 UTC
-    command: ["python", "manage.py", "cleanup_ingest_queue", "--days", "7"]
-    resources:
-      requests:
-        cpu: 50m
-        memory: 128Mi
-      limits:
-        cpu: 200m
-        memory: 256Mi
-    activeDeadlineSeconds: 120
-
   # Safety-net for import-level auto-resolve. The queue processor reaps
   # inline after each item transitions to DONE (zero-latency); this
   # CronJob covers the case where the processor restarts or misses a
   # signal, so a stranded ImportMark doesn't leak findings indefinitely.
-  reapUnobservedFindings:
+  reapSafetyNet:
     enabled: true
     schedule: "7 * * * *"       # hourly at :07 to stagger from other crons
-    command: ["python", "manage.py", "reap_unobserved_findings"]
+    command: ["python", "manage.py", "reap_safety_net"]
     resources:
       requests:
         cpu: 50m
@@ -195,13 +158,13 @@ cronJobs:
         memory: 256Mi
     activeDeadlineSeconds: 300
 
-  # Daily FindingSnapshot rollup for trending. Scheduled after the
-  # reaper's hourly cycles and the enrichment runs have settled so the
-  # captured counts reflect end-of-day state, not mid-import churn.
-  snapshotFindings:
+  # Daily Snapshot heartbeat for the CVE-trend charts. Scheduled after
+  # the enrichment runs have settled so the captured counts reflect
+  # end-of-day state, not mid-import churn.
+  snapshotCapture:
     enabled: true
     schedule: "30 6 * * *"      # daily 06:30 UTC (after reaper + enrichment)
-    command: ["python", "manage.py", "snapshot_findings"]
+    command: ["python", "manage.py", "snapshot_capture"]
     resources:
       requests:
         cpu: 50m
@@ -211,6 +174,23 @@ cronJobs:
         memory: 256Mi
     activeDeadlineSeconds: 300
 
+  # Delete Snapshot rows older than SNAPSHOT_RETENTION_DAYS (default 365).
+  pruneSnapshots:
+    enabled: true
+    schedule: "0 7 * * *"       # daily 07:00 UTC (after snapshot_capture)
+    command: ["python", "manage.py", "prune_snapshots"]
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+    activeDeadlineSeconds: 300
+
+  # Recompute every Finding's effective_priority. Cheap when the urgency
+  # tree hasn't changed; expensive enough that we run it weekly rather
+  # than nightly.
   recalculatePriorities:
     enabled: true
     schedule: "0 6 * * 0"       # weekly Sunday 06:00 UTC
@@ -234,8 +214,9 @@ adminUser:
 # ── Post-install/upgrade Job ───────────────────────────────────
 
 setupJob:
-  # Runs: migrate, setup_roles, load_frameworks,
-  # ensure_adminuser (all idempotent)
+  # Runs: migrate, setup_rbac, createsuperuser (all idempotent — the
+  # superuser step uses `|| true` so a re-run after the user exists is
+  # a no-op).
   resources:
     requests:
       cpu: 100m

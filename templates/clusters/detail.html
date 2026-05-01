@@ -118,10 +118,17 @@
       <div class="card-header"><h3 class="card-title">Namespaces</h3></div>
       <div class="card-body">
         {% help "Namespaces" %}
-          <p>Each row is a namespace discovered by the import CronJob. <strong>Internet Exposed</strong>
-          is auto-detected from K8s state (Services of type LoadBalancer/NodePort, Ingresses).
-          <strong>Sensitive Data</strong> is always manual — admin declares which namespaces
-          process PII / financial / regulated data.</p>
+          <p>Each row is a namespace discovered by the import CronJob.</p>
+          <p><strong>Publicly Exposed</strong> is auto-detected from K8s state — true if any workload
+          in the namespace is backed by an external LoadBalancer Service or a non-internal Ingress.
+          In SSVC terms this is the <em>open</em> exposure state (internet-reachable). When the box
+          is unchecked the namespace is treated as <em>controlled</em>: still reachable from anywhere
+          else on the cluster network, just not from the public internet — not the same as isolated.
+          A future revision will add a <em>small</em> state for namespaces with deny-all NetworkPolicy
+          coverage and no listening ports; until then, every non-public namespace is controlled.</p>
+          <p><strong>Sensitive Data</strong> is always manual — admin declares which namespaces
+          process PII / financial / regulated data. A Critical CVE in a sensitive namespace is
+          promoted to Out-of-Cycle regardless of environment.</p>
           <p><strong>PSS</strong> shows the <code>pod-security.kubernetes.io/enforce</code> label
           (restricted / baseline / privileged). Missing label defaults to privileged semantically.</p>
           <p class="mb-0">Namespaces marked <span class="badge bg-danger-lt text-danger">deleted</span>
@@ -138,7 +145,7 @@
                 <th>Active findings</th>
                 <th title="Pod Security Standards enforce label on the namespace">PSS</th>
                 <th>Last seen</th>
-                <th>Internet exposed</th>
+                <th title="Auto-detected: true if any workload in the namespace is backed by an external LoadBalancer or non-internal Ingress. SSVC `open`. False = `controlled` (cluster-network-reachable, not isolated).">Publicly exposed</th>
                 <th>Sensitive data</th>
                 {% if is_admin %}<th class="text-end"></th>{% endif %}
               </tr>

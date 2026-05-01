@@ -139,6 +139,75 @@ def test_low_dev_no_context_defers():
     assert result.reasons == ("default",)
 
 
+# ── SSVC-aligned tightening branches ─────────────────────────────
+
+
+@pytest.mark.django_db
+def test_critical_sensitive_ns_non_prod_is_oob():
+    """Critical CVE in a sensitive-data namespace promotes to OOB in any
+    env. Pre-change this fell through to ('critical','non-prod')
+    SCHEDULED, undersizing the data-sensitivity signal."""
+    c = _cluster("dev-sens", env=Environment.DEV.value)
+    ns = _ns(c, "phi", sensitive=True)
+    w = _workload(c, ns, "vault")
+    f = _finding(
+        workload=w, severity=Severity.CRITICAL.value,
+        hash_code="crit-sens-dev",
+    )
+
+    result = score(f)
+
+    assert result.band == PriorityBand.OUT_OF_BAND.value
+    assert "critical" in result.reasons
+    assert "sensitive-ns" in result.reasons
+
+
+@pytest.mark.django_db
+def test_high_epss_non_prod_is_scheduled():
+    """High CVE with EPSS>=0.9 in a non-prod env routes to SCHEDULED via
+    the env-agnostic active-exploitation branch. Pre-change this hit
+    the default DEFER tail."""
+    c = _cluster("dev-epss", env=Environment.DEV.value)
+    ns = _ns(c, "default")
+    w = _workload(c, ns, "api", exposed=False)
+    f = _finding(
+        workload=w, severity=Severity.HIGH.value,
+        epss_percentile=0.92,
+        hash_code="high-epss-dev",
+    )
+
+    result = score(f)
+
+    assert result.band == PriorityBand.SCHEDULED.value
+    assert "EPSS>=0.9" in result.reasons
+    assert Environment.DEV.value in result.reasons
+
+
+@pytest.mark.django_db
+def test_medium_prod_escalation_is_oob():
+    """Medium CVE on a prod workload with an active host-escape signal
+    promotes to OOB. Pre-change this routed to SCHEDULED, undersizing
+    the pivot-path risk in production."""
+    c = _cluster("prod-pivot", env=Environment.PROD.value)
+    ns = _ns(c, "default")
+    w = _workload(c, ns, "api")
+    WorkloadSignal.objects.create(
+        workload=w,
+        signal_id="kyverno:disallow-host-namespaces",
+        currently_active=True,
+    )
+    f = _finding(
+        workload=w, severity=Severity.MEDIUM.value,
+        hash_code="med-prod-escalation",
+    )
+
+    result = score(f)
+
+    assert result.band == PriorityBand.OUT_OF_BAND.value
+    assert "medium" in result.reasons
+    assert "escalation-signal" in result.reasons
+
+
 # ── has_fix is invariant under scoring ───────────────────────────
 
 

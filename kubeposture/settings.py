@@ -172,6 +172,14 @@ LOGGING = {
 
 INGEST_QUEUE_MAX_ATTEMPTS = env.int("INGEST_QUEUE_MAX_ATTEMPTS", default=3)
 
+# ── Inventory exposure ─────────────────────────────────────────
+
+# Ingress class names to treat as non-public when computing
+# Workload.publicly_exposed. Adds to the built-in "internal"/"private"
+# substring heuristic in core/parsers/inventory.py:_is_internal_ingress.
+# Comma-separated, case-insensitive. Example: "pomerium,nginx-internal".
+INTERNAL_INGRESS_CLASSES = env.list("INTERNAL_INGRESS_CLASSES", default=[])
+
 # ── Snapshots ──────────────────────────────────────────────────
 
 # Sliding retention window for the Snapshot table. Per

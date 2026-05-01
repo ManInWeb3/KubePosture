@@ -1,7 +1,7 @@
 """Urgency scorer — pure decision tree for Finding.effective_priority.
 
 `score(finding)` is the editable function (decision tree per
-dev_docs/07-urgency-formula.md). `recompute_batch(findings)` is the
+docs/urgency-decision-tree.md). `recompute_batch(findings)` is the
 bulk fan-out path used by enrichment / signal-change triggers.
 """
 from __future__ import annotations
@@ -33,10 +33,14 @@ def _epss(finding: Finding) -> float:
 
 
 def _is_exposed(workload, namespace) -> bool:
-    """workload.publicly_exposed OR namespace.internet_exposed.
-
-    Namespace is the rollup; either firing is enough for the decision
-    tree.
+    """SSVC exposure check: True when the workload is `open`
+    (internet-reachable via external LB / non-internal Ingress, or its
+    namespace's rollup of the same). False does NOT mean isolated —
+    under v1 it means `controlled` (cluster-network-reachable, no
+    NetPol-enforced isolation). The decision tree's non-exposed
+    branches treat False as controlled, not small. A future revision
+    that detects deny-all NetPol + no listening port can introduce a
+    `small` lane below this.
     """
     if workload is None:
         return False
@@ -111,6 +115,18 @@ def score(finding: Finding) -> PriorityResult:
             ("critical", "exposed", "prod"),
         )
 
+    # Critical in a sensitive-data namespace is OOB regardless of env.
+    # Placed ahead of the EPSS / critical-prod / high-exposed lanes so
+    # the sensitive-ns reason wins over the generic prod/EPSS reasons
+    # at the same band, and so non-prod critical+sensitive cases don't
+    # fall through to SCHEDULED.
+    if severity == Severity.CRITICAL.value \
+            and namespace is not None and namespace.contains_sensitive_data:
+        return PriorityResult(
+            PriorityBand.OUT_OF_BAND.value,
+            ("critical", "sensitive-ns"),
+        )
+
     # Out-of-cycle
     if severity in (Severity.CRITICAL.value, Severity.HIGH.value) \
             and env == Environment.PROD.value and has_escalation:
@@ -123,6 +139,14 @@ def score(finding: Finding) -> PriorityResult:
         return PriorityResult(
             PriorityBand.OUT_OF_BAND.value,
             ("EPSS>=0.9", "prod"),
+        )
+
+    # EPSS>=0.9 outside prod still warrants SCHEDULED for C/H findings —
+    # active in-the-wild exploitation isn't bounded by environment.
+    if epss >= 0.9 and severity in (Severity.CRITICAL.value, Severity.HIGH.value):
+        return PriorityResult(
+            PriorityBand.SCHEDULED.value,
+            ("EPSS>=0.9", env),
         )
 
     if severity == Severity.CRITICAL.value and env == Environment.PROD.value:
@@ -164,12 +188,13 @@ def score(finding: Finding) -> PriorityResult:
             ("high", "prod"),
         )
 
-    # Medium-severity finding on a prod workload that has an
-    # escalation signal: bump to Scheduled. Without escalation the
+    # Medium-severity finding on a prod workload that has an active
+    # escalation signal: a real pivot path in production, treated on
+    # par with high-severity prod findings. Without escalation the
     # default Defer below applies.
     if severity == Severity.MEDIUM.value and env == Environment.PROD.value and has_escalation:
         return PriorityResult(
-            PriorityBand.SCHEDULED.value,
+            PriorityBand.OUT_OF_BAND.value,
             ("medium", "prod", "escalation-signal"),
         )
 

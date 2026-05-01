@@ -382,3 +382,51 @@ def test_two_workloads_same_name_different_namespace_kept_separate():
     assert ("a", WorkloadKind.DEPLOYMENT.value, "worker") in st.workloads
     assert ("b", WorkloadKind.DEPLOYMENT.value, "worker") in st.workloads
     assert len(st.workloads) == 2
+
+
+# ── _is_internal_ingress ──────────────────────────────────────────
+
+
+def _ingress_with_class(class_name: str, *, via_annotation: bool = False) -> dict:
+    md: dict = {"name": "ing", "namespace": "ns", "annotations": {}}
+    spec: dict = {}
+    if via_annotation:
+        md["annotations"]["kubernetes.io/ingress.class"] = class_name
+    else:
+        spec["ingressClassName"] = class_name
+    return {"apiVersion": "networking.k8s.io/v1", "kind": "Ingress", "metadata": md, "spec": spec}
+
+
+def test_is_internal_ingress_substring_heuristic_still_matches():
+    assert inv._is_internal_ingress(_ingress_with_class("nginx-internal")) is True
+    assert inv._is_internal_ingress(_ingress_with_class("private-router")) is True
+    assert inv._is_internal_ingress(_ingress_with_class("nginx-public")) is False
+
+
+def test_is_internal_ingress_unknown_class_is_public_by_default():
+    """Without configuration, "pomerium" is treated as public."""
+    from django.test import override_settings
+
+    with override_settings(INTERNAL_INGRESS_CLASSES=[]):
+        assert inv._is_internal_ingress(_ingress_with_class("pomerium")) is False
+
+
+def test_is_internal_ingress_configured_class_is_internal():
+    from django.test import override_settings
+
+    with override_settings(INTERNAL_INGRESS_CLASSES=["pomerium", "nginx-iap"]):
+        assert inv._is_internal_ingress(_ingress_with_class("pomerium")) is True
+        assert inv._is_internal_ingress(_ingress_with_class("nginx-iap")) is True
+        # Case-insensitive.
+        assert inv._is_internal_ingress(_ingress_with_class("Pomerium")) is True
+        # Unrelated class still public.
+        assert inv._is_internal_ingress(_ingress_with_class("nginx-public")) is False
+
+
+def test_is_internal_ingress_configured_class_via_legacy_annotation():
+    from django.test import override_settings
+
+    with override_settings(INTERNAL_INGRESS_CLASSES=["pomerium"]):
+        assert inv._is_internal_ingress(
+            _ingress_with_class("pomerium", via_annotation=True)
+        ) is True

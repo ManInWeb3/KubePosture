@@ -22,6 +22,10 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources:
       - ingresses
+      # NetworkPolicies feed the future east-west exposure heuristic;
+      # the script lists them today so the data is captured before the
+      # priority engine consumes it.
+      - networkpolicies
     verbs: ["get", "list"]
   # Workload controllers — per-workload exposure + security context drive
   # the priority tree (directly_exposed, host_network, privileged, RBAC).
@@ -42,16 +46,18 @@ rules:
       - jobs
     verbs: ["get", "list"]
   {{- if .Values.import.trivy }}
-  # Trivy Operator CRDs (7 types)
+  # Trivy Operator CRDs — must match the kinds listed in
+  # scripts/import-cluster.py; otherwise the script silently drops
+  # those reports.
   - apiGroups: ["aquasecurity.github.io"]
     resources:
       - vulnerabilityreports
       - configauditreports
       - exposedsecretreports
       - rbacassessmentreports
+      - clusterrbacassessmentreports
       - infraassessmentreports
       - clustercompliancereports
-      - sbomreports
     verbs: ["get", "list"]
   {{- end }}
   {{- if .Values.import.kyverno }}

@@ -35,20 +35,25 @@ from core.models import (
 # ── Filter primitives ────────────────────────────────────────────
 
 
-def base_finding_filter() -> Q:
+def base_finding_filter(*, include_stale: bool = False) -> Q:
     """Default-filter predicate as a Q expression on Finding.
 
     - Workload deployed (or NULL for cluster-scoped findings).
     - last_seen >= cluster.last_complete_inventory_at (NULL means
       no complete cycle has landed yet — keep the row visible).
+
+    `include_stale=True` drops the last_seen predicate, exposing rows
+    whose last observation predates the most recent complete inventory.
+    Used to show historical band counts for former (workload, image)
+    pairs on the Workload detail page.
     """
-    return (
-        (Q(workload__deployed=True) | Q(workload__isnull=True))
-        & (
+    q = Q(workload__deployed=True) | Q(workload__isnull=True)
+    if not include_stale:
+        q &= (
             Q(cluster__last_complete_inventory_at__isnull=True)
             | Q(last_seen__gte=F("cluster__last_complete_inventory_at"))
         )
-    )
+    return q
 
 
 def _muted_subquery():
@@ -64,19 +69,24 @@ def _muted_subquery():
     ).filter(Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()))
 
 
-def default_finding_qs(*, include_muted: bool = False, cluster=None):
+def default_finding_qs(
+    *, include_muted: bool = False, include_stale: bool = False, cluster=None,
+):
     """All currently-relevant findings, default-filtered.
 
     `cluster`: optional Cluster instance OR cluster name string to scope.
     `include_muted`: if False, drop findings with an active per-finding
     accept / false-positive overlay.
+    `include_stale`: if True, drop the last_seen >= last_complete_inventory_at
+    predicate so historical (former) findings are returned. See
+    `base_finding_filter`.
     """
     qs = Finding.objects.select_related(
         "cluster",
         "workload",
         "workload__namespace",
         "image",
-    ).filter(base_finding_filter())
+    ).filter(base_finding_filter(include_stale=include_stale))
     if cluster is not None:
         if isinstance(cluster, Cluster):
             qs = qs.filter(cluster=cluster)
@@ -258,12 +268,22 @@ def list_workload_images(workloads, *, include_history: bool = False):
         .select_related("image", "workload", "workload__cluster", "workload__namespace")
     )
 
-    image_ids = {obs.image_id for obs in obs_qs}
+    current_image_ids = {o.image_id for o in obs_qs if o.currently_deployed}
+    former_image_ids = {o.image_id for o in obs_qs if not o.currently_deployed}
 
-    findings_qs = default_finding_qs().filter(
-        workload_id__in=workload_ids, image_id__in=image_ids,
-    )
-    band_counts = _band_counts_by(findings_qs, "workload_id", "image_id")
+    band_counts: dict = {}
+    if current_image_ids:
+        live_qs = default_finding_qs().filter(
+            workload_id__in=workload_ids, image_id__in=current_image_ids,
+        )
+        band_counts.update(_band_counts_by(live_qs, "workload_id", "image_id"))
+    if former_image_ids:
+        # Former (workload, image) pairs fail the live last_seen predicate;
+        # use the stale-aware queryset so we surface the last-observed counts.
+        stale_qs = default_finding_qs(include_stale=True).filter(
+            workload_id__in=workload_ids, image_id__in=former_image_ids,
+        )
+        band_counts.update(_band_counts_by(stale_qs, "workload_id", "image_id"))
 
     rows = []
     for obs in obs_qs:

@@ -53,6 +53,7 @@ Defaults work against the docker-compose database. The relevant vars:
 | `DEBUG` | `True` in dev. |
 | `LOG_LEVEL` | `INFO` is fine; bump to `DEBUG` to see queue / reaper traces. |
 | `TESTING_HARNESS_ENABLED` | Set to `true` to expose `/api/v1/testing/*` (the scenario harness). Off in prod. |
+| `INTERNAL_INGRESS_CLASSES` | Comma-separated ingress class names treated as not publicly exposed (e.g. `pomerium`). Empty = built-in `internal`/`private` substring heuristic only. |
 
 ### 4. Apply migrations
 

@@ -41,17 +41,13 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           # Token comes from KUBEPOSTURE_TOKEN env var (not positional arg)
           # to keep it out of `ps` and `kubectl describe pod`.
+          # See cronjob.yaml for why import.trivy / import.kyverno are
+          # not passed as flags.
           command:
             - python
             - scripts/import-cluster.py
             - {{ required "clusterName is required" .Values.clusterName }}
             - --in-cluster
-            {{- if and .Values.import.trivy (not .Values.import.kyverno) }}
-            - --trivy
-            {{- end }}
-            {{- if and .Values.import.kyverno (not .Values.import.trivy) }}
-            - --kyverno
-            {{- end }}
           env:
             - name: KUBEPOSTURE_URL
               value: {{ .Values.kubepostureUrl | quote }}

@@ -36,17 +36,15 @@ spec:
               # Token is read from the KUBEPOSTURE_TOKEN env var below
               # (not passed as a positional arg) so it doesn't show up in
               # `ps` output inside the container or `kubectl describe pod`.
+              # The script lists every supported CRD; missing CRDs (e.g.
+              # Trivy not installed) are skipped silently. The
+              # `import.trivy` / `import.kyverno` toggles in values.yaml
+              # only narrow the ClusterRole, not the script invocation.
               command:
                 - python
                 - scripts/import-cluster.py
                 - {{ required "clusterName is required" .Values.clusterName }}
                 - --in-cluster
-                {{- if and .Values.import.trivy (not .Values.import.kyverno) }}
-                - --trivy
-                {{- end }}
-                {{- if and .Values.import.kyverno (not .Values.import.trivy) }}
-                - --kyverno
-                {{- end }}
               env:
                 - name: KUBEPOSTURE_URL
                   value: {{ .Values.kubepostureUrl | quote }}

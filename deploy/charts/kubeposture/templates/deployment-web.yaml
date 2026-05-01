@@ -45,8 +45,8 @@ spec:
               set -e
               echo "==> Migrating..."
               python manage.py migrate --noinput
-              echo "==> Setting up roles..."
-              python manage.py setup_roles
+              echo "==> Seeding RBAC groups..."
+              python manage.py setup_rbac
               echo "==> Init complete."
           env:
             {{- include "kubeposture.env" . | nindent 12 }}

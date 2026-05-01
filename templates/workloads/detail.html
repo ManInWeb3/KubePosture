@@ -151,7 +151,13 @@
           <td class="text-end">{% count_badge row.n_defer "defer" %}</td>
           <td class="text-end">{{ row.n_total }}</td>
           {% else %}
-          <td colspan="5" class="text-center fst-italic text-muted" title="No longer observed in this workload">not deployed</td>
+          {% with seen=row.last_seen_at|date:"Y-m-d H:i" %}
+          <td class="text-end" title="Last observed {{ seen }} — counts reflect that scan">{% count_badge row.n_immediate "immediate" %}</td>
+          <td class="text-end" title="Last observed {{ seen }} — counts reflect that scan">{% count_badge row.n_out_of_band "out_of_band" %}</td>
+          <td class="text-end" title="Last observed {{ seen }} — counts reflect that scan">{% count_badge row.n_scheduled "scheduled" %}</td>
+          <td class="text-end" title="Last observed {{ seen }} — counts reflect that scan">{% count_badge row.n_defer "defer" %}</td>
+          <td class="text-end" title="Last observed {{ seen }} — counts reflect that scan">{{ row.n_total }}</td>
+          {% endwith %}
           {% endif %}
         </tr>
         {% empty %}

@@ -414,3 +414,66 @@ def test_active_row_falls_back_when_image_param_unknown(authed, scene):
     active = response.context["active_row"]
     assert active is not None
     assert active["image"].digest == scene["img_shared"].digest
+
+
+# ── include_history (former images) ──────────────────────────────
+
+
+@pytest.fixture
+def scene_with_former(scene, cluster_a):
+    """Adds a former image observation + a stale finding on cluster-a's api
+    workload, so we can assert include_history urgency aggregation."""
+    img_legacy = Image.objects.create(
+        digest="sha256:" + "c" * 64,
+        ref="registry/api:v0",
+        repository="api",
+    )
+    obs = WorkloadImageObservation.objects.create(
+        workload=scene["w_api_a"], image=img_legacy, container_name="app",
+        init_container=False, currently_deployed=False,
+    )
+    # last_seen_at must predate the latest complete inventory.
+    WorkloadImageObservation.objects.filter(pk=obs.pk).update(
+        last_seen_at=cluster_a.last_complete_inventory_at - timedelta(days=2),
+    )
+    stale_finding = Finding.objects.create(
+        cluster=cluster_a, workload=scene["w_api_a"], image=img_legacy,
+        source="trivy", category="vulnerability", vuln_id="CVE-2024-9999",
+        title="legacy critical", severity="critical",
+        effective_priority="immediate", hash_code="hl",
+    )
+    Finding.objects.filter(pk=stale_finding.pk).update(
+        last_seen=cluster_a.last_complete_inventory_at - timedelta(days=2),
+    )
+    return {**scene, "img_legacy": img_legacy}
+
+
+def test_former_image_hidden_without_include_history(authed, scene_with_former):
+    url = reverse("workloads-detail", kwargs={"kind": "Deployment", "name": "api"})
+    response = authed.get(url + "?cluster=cluster-a")
+    digests = {r["image"].digest for r in response.context["image_rows"]}
+    assert scene_with_former["img_legacy"].digest not in digests
+
+
+def test_former_image_shows_band_counts_with_include_history(authed, scene_with_former):
+    url = reverse("workloads-detail", kwargs={"kind": "Deployment", "name": "api"})
+    response = authed.get(url + "?cluster=cluster-a&include_history=1")
+    rows = {r["image"].digest: r for r in response.context["image_rows"]}
+    legacy = rows[scene_with_former["img_legacy"].digest]
+    assert legacy["currently_deployed"] is False
+    assert legacy["n_immediate"] == 1
+    assert legacy["n_out_of_band"] == 0
+    assert legacy["n_scheduled"] == 0
+    assert legacy["n_defer"] == 0
+    assert legacy["n_total"] == 1
+
+
+def test_current_image_counts_unchanged_with_include_history(authed, scene_with_former):
+    """Regression: enabling include_history must not alter live rows' counts."""
+    url = reverse("workloads-detail", kwargs={"kind": "Deployment", "name": "api"})
+    response = authed.get(url + "?cluster=cluster-a&include_history=1")
+    rows = {r["image"].digest: r for r in response.context["image_rows"]}
+    shared = rows[scene_with_former["img_shared"].digest]
+    # Same expectations as test_workloads_priority_counts_match for cluster-a/api.
+    assert shared["n_immediate"] == 1
+    assert shared["n_out_of_band"] == 0
