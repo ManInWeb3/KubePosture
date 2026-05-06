@@ -35,6 +35,7 @@ field and is auto-registered on first observation.
 """
 from __future__ import annotations
 
+import os
 from datetime import timedelta
 
 from django.utils import timezone
@@ -56,9 +57,15 @@ from core.constants import ImportMarkState
 from core.models import Cluster, ImportMark
 from core.services.queue import enqueue
 
-# Stuck-mark cap for the in_flight check. A draining/open mark older than
-# this is treated as abandoned, not actively running.
-IN_FLIGHT_HORIZON = timedelta(minutes=30)
+# TTL for the in-flight-import "lock". An open/draining ImportMark older
+# than this is treated as abandoned (crashed importer), not actively
+# running, so the next on-demand trigger tick can start a fresh import.
+# Configurable via the IMPORT_LOCK_TIMEOUT_SECONDS env var (chart value
+# app.env). Default 1800s = 30min, matching the workload-cluster job's
+# activeDeadlineSeconds (900s) with 2x headroom for slow networks.
+IMPORT_LOCK_TIMEOUT = timedelta(
+    seconds=int(os.environ.get("IMPORT_LOCK_TIMEOUT_SECONDS", "1800"))
+)
 
 
 @api_view(["POST"])
@@ -166,10 +173,10 @@ def ingest(request):
 
 def _is_in_flight(cluster: Cluster) -> bool:
     """True if any open/draining ImportMark for the cluster started within
-    IN_FLIGHT_HORIZON. Stuck marks past the horizon don't gate a fresh
-    import — they're treated as abandoned.
+    IMPORT_LOCK_TIMEOUT. Marks past the timeout don't gate a fresh
+    import — they're treated as abandoned (crashed importer).
     """
-    cutoff = timezone.now() - IN_FLIGHT_HORIZON
+    cutoff = timezone.now() - IMPORT_LOCK_TIMEOUT
     return ImportMark.objects.filter(
         cluster=cluster,
         state__in=[ImportMarkState.OPEN.value, ImportMarkState.DRAINING.value],

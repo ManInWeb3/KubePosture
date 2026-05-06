@@ -25,6 +25,14 @@ app:
     INTERNAL_INGRESS_CLASSES: ""  # CSV of ingress class names treated as not public, e.g. "pomerium,nginx-internal"
     PROMETHEUS_MULTIPROC_DIR: "/tmp/prom_multiproc"
     METRICS_BUSINESS_TTL_SECONDS: "300"   # business gauges cached this long; finding counts only change when imports complete
+    # TTL for the in-flight-import "lock". An open/draining ImportMark
+    # older than this is treated as abandoned (crashed importer) and
+    # stops blocking new on-demand imports. Lower if a crashed importer
+    # leaves the in-cluster trigger skipping for too long; raise if
+    # legitimate slow imports get raced. Defaults to 30min, matching
+    # the workload-cluster job's activeDeadlineSeconds (900s) with 2x
+    # headroom for slow networks.
+    IMPORT_LOCK_TIMEOUT_SECONDS: "900"
 
 # Compliance framework loading is not implemented in this milestone.
 # The fixtures/ directory holds sample YAMLs but no `load_frameworks`
