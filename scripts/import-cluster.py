@@ -107,6 +107,60 @@ def _post(base_url: str, token: str, path: str, body: dict) -> tuple[bool, int, 
     return False, last_status, last_detail
 
 
+def _get(base_url: str, token: str, path: str) -> tuple[bool, int, str]:
+    """GET helper for the pending-poll endpoint. Lighter than _post —
+    no retries, no body. Trigger ticks should fail fast.
+    """
+    url = f"{base_url.rstrip('/')}{path}"
+    headers = {"Authorization": f"Bearer {token}"}
+    req = Request(url, headers=headers, method="GET")
+    try:
+        with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            return True, resp.status, resp.read().decode(errors="replace")
+    except HTTPError as e:
+        try:
+            detail = e.read().decode(errors="replace")[:300]
+        except Exception:
+            detail = ""
+        return False, e.code, detail
+    except (URLError, socket.timeout) as e:
+        return False, 0, str(e)
+
+
+def check_pending(*, base_url: str, token: str, cluster: str) -> dict | None:
+    """Returns the parsed pending-poll JSON, or None if the GET failed."""
+    ok, status, body = _get(
+        base_url, token,
+        f"/api/v1/imports/pending/?cluster={cluster}",
+    )
+    if not ok:
+        print(
+            f"  pending poll FAILED ({status}): {body[:200]}",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError:
+        print(f"  pending poll: unparseable response: {body[:200]}",
+              file=sys.stderr)
+        return None
+
+
+def clear_pending(*, base_url: str, token: str, cluster: str, satisfied_at: str) -> bool:
+    ok, status, detail = _post(
+        base_url, token,
+        "/api/v1/imports/pending/clear/",
+        {"cluster": cluster, "satisfied_at": satisfied_at},
+    )
+    if not ok:
+        print(
+            f"  pending/clear FAILED ({status}): {detail}",
+            file=sys.stderr,
+        )
+    return ok
+
+
 # ── Trim helpers ──────────────────────────────────────────────────
 
 _TRIM_METADATA_KEYS = {
@@ -499,6 +553,16 @@ def main() -> int:
                         help="Use in-cluster ServiceAccount config.")
     parser.add_argument("--from-folder", default=None,
                         help="Replay a captured `kubectl get -o json` dump tree.")
+    parser.add_argument(
+        "--on-demand-only", action="store_true",
+        help=(
+            "Pull-pattern trigger mode. Poll /api/v1/imports/pending/; "
+            "exit fast if no admin has clicked 'Re-import' or if an "
+            "import is already in flight. Otherwise run the full import "
+            "and clear the pending flag. Intended for the per-minute "
+            "trigger CronJob."
+        ),
+    )
     args = parser.parse_args()
 
     base_url = os.environ.get("KUBEPOSTURE_URL", "http://localhost:8000")
@@ -506,6 +570,28 @@ def main() -> int:
     if not token:
         print("error: token required (positional arg or $KUBEPOSTURE_TOKEN)", file=sys.stderr)
         return 2
+
+    requested_at: str | None = None
+    if args.on_demand_only:
+        info = check_pending(
+            base_url=base_url, token=token, cluster=args.cluster_name,
+        )
+        if info is None:
+            return 1
+        if not info.get("pending"):
+            print(f"on-demand: no pending request for {args.cluster_name}, exiting")
+            return 0
+        if info.get("in_flight"):
+            print(
+                f"on-demand: pending request for {args.cluster_name} but import "
+                f"is already in flight, exiting"
+            )
+            return 0
+        requested_at = info.get("requested_at")
+        print(
+            f"on-demand: pending request for {args.cluster_name} "
+            f"(requested_at={requested_at}), running full import"
+        )
 
     if args.from_folder:
         root = Path(args.from_folder).resolve()
@@ -524,12 +610,22 @@ def main() -> int:
         print("Listing from kube-api...")
         by_kind = collect_from_kube_api(client_module)
 
-    return post_cycle(
+    rc = post_cycle(
         base_url=base_url,
         token=token,
         cluster=args.cluster_name,
         by_kind=by_kind,
     )
+
+    # Only clear the pending flag on successful import. A newer click
+    # mid-import is preserved server-side via the conditional clear.
+    if args.on_demand_only and rc == 0 and requested_at:
+        clear_pending(
+            base_url=base_url, token=token,
+            cluster=args.cluster_name, satisfied_at=requested_at,
+        )
+
+    return rc
 
 
 if __name__ == "__main__":

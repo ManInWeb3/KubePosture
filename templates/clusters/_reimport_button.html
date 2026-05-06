@@ -1,0 +1,22 @@
+<div id="reimport-{{ cluster.pk }}" class="d-flex align-items-center gap-2">
+  {% if cluster.reimport_requested_at %}
+    <span class="badge bg-azure-lt text-azure">
+      Re-import requested {{ cluster.reimport_requested_at|timesince }} ago
+    </span>
+    <small class="text-muted">picked up within 1 minute by the in-cluster trigger</small>
+  {% else %}
+    {% if is_admin %}
+    <form method="post"
+          hx-post="{% url 'cluster-reimport' cluster.pk %}"
+          hx-target="#reimport-{{ cluster.pk }}"
+          hx-swap="outerHTML"
+          class="m-0">
+      {% csrf_token %}
+      <button type="submit" class="btn btn-outline-primary btn-sm">
+        Re-import
+      </button>
+    </form>
+    <small class="text-muted">queue a fresh import on the next minute tick</small>
+    {% endif %}
+  {% endif %}
+</div>

@@ -2,19 +2,25 @@
 Run the import once on install/upgrade so findings appear immediately,
 instead of waiting for the first scheduled tick. Shares the same pod spec
 as the CronJob. Set initialRun: false in values to skip.
+
+Not a Helm hook by design: under ArgoCD, hooks rerun on every sync and
+gate sync completion. As a regular resource with a stable name the Job
+is created once on install and only recreated when its spec changes.
+Set jobAnnotations in values.yaml to add ArgoCD-specific behavior — see
+the comment there.
 */}}
 {{- if ne .Values.initialRun false }}
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "kubeposture-import.fullname" . }}-init-{{ .Release.Revision }}
+  name: {{ include "kubeposture-import.fullname" . }}-init
   labels:
     {{- include "kubeposture-import.labels" . | nindent 4 }}
     app.kubernetes.io/component: import-initial
+  {{- with .Values.jobAnnotations }}
   annotations:
-    helm.sh/hook: post-install,post-upgrade
-    helm.sh/hook-weight: "1"
-    helm.sh/hook-delete-policy: before-hook-creation
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   backoffLimit: 1
   activeDeadlineSeconds: {{ .Values.activeDeadlineSeconds }}

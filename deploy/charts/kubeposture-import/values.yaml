@@ -33,6 +33,29 @@ schedule: "0 */6 * * *"
 # -- Maximum run time for the import job
 activeDeadlineSeconds: 900
 
+# -- Extra annotations on the install/upgrade Job (NOT the CronJob).
+# The Job is rendered as a regular resource (no helm.sh/hook), so under
+# plain Helm or ArgoCD it's only created/replaced when its spec changes.
+# Under ArgoCD, uncomment the entry below: hooks would otherwise rerun
+# on every sync and gate sync completion. Force=true,Replace=true is
+# needed because Jobs are immutable — without it, ArgoCD can't update
+# the Job spec on chart upgrades (e.g. new image tag).
+jobAnnotations: {}
+  # argocd.argoproj.io/sync-options: Force=true,Replace=true
+
+# -- On-demand reimport trigger (pull pattern).
+# A second CronJob ticks every minute and only runs the full import when
+# an admin has clicked "Re-import" in KubePosture. Most ticks just hit
+# /api/v1/imports/pending/ and exit immediately. Disable to fall back to
+# the 6-hour cadence above.
+trigger:
+  enabled: true
+  schedule: "* * * * *"
+  # Tighter deadline than the main job: idle ticks complete in seconds.
+  # When a real import fires it inherits the main `activeDeadlineSeconds`
+  # because the on-demand job runs the same code path.
+  activeDeadlineSeconds: 900
+
 # -- Image containing the import script + kubernetes Python client
 image:
   repository: ghcr.io/maninweb3/kubeposture   # same image as the main app

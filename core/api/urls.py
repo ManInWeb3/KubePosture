@@ -8,6 +8,8 @@ urlpatterns = [
     # Ingest (bearer-token auth)
     path("imports/start/", views.imports_start),
     path("imports/finish/", views.imports_finish),
+    path("imports/pending/", views.imports_pending),
+    path("imports/pending/clear/", views.imports_pending_clear),
     path("ingest/", views.ingest),
     path("cluster-metadata/sync/", views.cluster_metadata_sync),
 

@@ -13,6 +13,7 @@ from django.db.models import Count, Q
 from django.http import Http404, HttpResponse, HttpResponseForbidden
 from django.shortcuts import render
 from django.urls import reverse
+from django.utils import timezone
 from django.views import View
 from django.views.generic import RedirectView
 
@@ -22,11 +23,14 @@ from django.shortcuts import get_object_or_404, redirect
 from django.contrib.auth.models import Group, User
 from django.core.paginator import Paginator
 
+from datetime import timedelta
+
 from core.api.auth import generate_token
-from core.constants import WorkloadKind
+from core.constants import PriorityBand, Source, WorkloadKind
 from core.models import Cluster, Finding, IngestToken, Namespace, UserPreference
 from core.services.inventory import (
     findings_for_workload_image,
+    list_findings,
     list_workload_images,
     list_workloads,
     workloads_for_kind_name,
@@ -211,6 +215,27 @@ class WorkloadDetailView(LoginRequiredMixin, View):
                         "cluster": w.cluster.name,
                     })
 
+        # Per-cluster import rows: one entry per cluster in scope, with
+        # the most-recent last_seen_at across that cluster's workloads
+        # in scope (a workload can sit in multiple namespaces). The
+        # template renders one Re-import button per row.
+        seen: dict[int, dict] = {}
+        for w in scoped:
+            row = seen.get(w.cluster_id)
+            if row is None:
+                seen[w.cluster_id] = {
+                    "cluster": w.cluster,
+                    "last_seen_at": w.last_seen_at,
+                }
+            elif w.last_seen_at and (
+                row["last_seen_at"] is None
+                or w.last_seen_at > row["last_seen_at"]
+            ):
+                row["last_seen_at"] = w.last_seen_at
+        cluster_imports = sorted(
+            seen.values(), key=lambda r: r["cluster"].name,
+        )
+
         return render(request, self.template_name, {
             "nav": "workloads",
             "kind": kind,
@@ -226,7 +251,141 @@ class WorkloadDetailView(LoginRequiredMixin, View):
             "active_row": active_row,
             "findings": findings,
             "include_history": include_history,
+            "cluster_imports": cluster_imports,
+            "is_admin": _is_admin(request.user),
         })
+
+
+# ── Findings list (fleet-wide triage) ────────────────────────────
+
+
+_EPSS_THRESHOLDS = {"10": 0.10, "50": 0.50}
+_AGE_DAYS = {"1": 1, "7": 7, "30": 30}
+
+_PRESETS = {
+    "today":      {"priority": "immediate", "internet": "1"},
+    "kev":        {"kev": "1"},
+    "high_epss":  {"epss": "50"},
+    "new_week":   {"age": "7"},
+    "policy":     {"source": "kyverno", "priority": "immediate"},
+}
+
+
+def _exposure_arg(internet: bool, sensitive: bool) -> str | None:
+    """Combine the two exposure checkboxes into the service-layer
+    `exposure` enum: 'internet', 'sensitive', 'either', or None."""
+    if internet and sensitive:
+        return "either"
+    if internet:
+        return "internet"
+    if sensitive:
+        return "sensitive"
+    return None
+
+
+def _active_preset(filters: dict) -> str:
+    """Return the preset key whose dimensions exactly match the active
+    filters, or "" for no match. Best-effort string compare."""
+    for name, expected in _PRESETS.items():
+        if all(str(filters.get(k, "")) == v for k, v in expected.items()):
+            non_preset = {k: v for k, v in filters.items()
+                          if k not in expected and k not in {"sort", "dir", "page"}}
+            if not any(non_preset.values()):
+                return name
+    return ""
+
+
+class FindingsListView(LoginRequiredMixin, View):
+    """`/findings/` — fleet-wide triage list.
+
+    Filters slice by triage signals (priority, source, exposure, KEV,
+    EPSS, name) — not topology. For "findings on cluster X / workload Y"
+    use `/workloads/`. Click a row to open the existing
+    `#finding-detail-offcanvas`.
+    """
+
+    template_name = "findings/list.html"
+
+    def get(self, request):
+        params = request.GET
+        filters = {
+            "name":      params.get("name", ""),
+            "priority":  params.get("priority", ""),
+            "source":    params.get("source", ""),
+            "internet":  "1" if params.get("internet") == "1" else "",
+            "sensitive": "1" if params.get("sensitive") == "1" else "",
+            "kev":       "1" if params.get("kev") == "1" else "",
+            "epss":      params.get("epss", ""),
+            "age":       params.get("age", ""),
+            "sort":      params.get("sort", ""),
+            "dir":       params.get("dir") or "desc",
+        }
+        if filters["epss"] not in {"", *_EPSS_THRESHOLDS}:
+            filters["epss"] = ""
+        if filters["age"] not in {"", *_AGE_DAYS}:
+            filters["age"] = ""
+
+        common = dict(
+            name_contains=filters["name"] or None,
+            priority=filters["priority"] or None,
+            source=filters["source"] or None,
+            exposure=_exposure_arg(bool(filters["internet"]), bool(filters["sensitive"])),
+            kev=bool(filters["kev"]),
+            epss_min=_EPSS_THRESHOLDS.get(filters["epss"]),
+            age_days=_AGE_DAYS.get(filters["age"]),
+            sort=filters["sort"] or None,
+            sort_dir=filters["dir"],
+        )
+
+        qs = list_findings(**common)
+        page = Paginator(qs, 50).get_page(params.get("page") or 1)
+
+        if _is_htmx(request) and request.headers.get("HX-Target") == "finding-rows":
+            return render(request, "findings/_rows.html", {
+                "page_obj": page,
+                "findings": page.object_list,
+                "filters": filters,
+                "request_qs": _qs_without_page(request.GET),
+            })
+
+        # Tile counts respect the current filter scope MINUS the dimension
+        # each tile reflects, so they update as you narrow but don't
+        # zero themselves out.
+        tiles = {
+            "immediate": list_findings(**{**common, "priority": None}).filter(
+                effective_priority=PriorityBand.IMMEDIATE).count(),
+            "kev": list_findings(**{**common, "kev": False}).filter(
+                kev_listed=True).count(),
+            # Tile drops the two exposure checkboxes from the count so
+            # ?priority=defer still shows non-zero exposed-namespace findings.
+            "exposed": list_findings(
+                **{**common, "exposure": None}
+            ).filter(
+                Q(workload__namespace__internet_exposed=True)
+                | Q(workload__namespace__contains_sensitive_data=True)
+            ).count(),
+            "new_week": list_findings(**{**common, "age_days": None}).filter(
+                first_seen__gte=timezone.now() - timedelta(days=7)).count(),
+        }
+
+        return render(request, self.template_name, {
+            "nav": "findings",
+            "page_obj": page,
+            "findings": page.object_list,
+            "filters": filters,
+            "tiles": tiles,
+            "active_preset": _active_preset(filters),
+            "priority_choices": PriorityBand.choices,
+            "source_choices": Source.choices,
+            "request_qs": _qs_without_page(request.GET),
+        })
+
+
+def _qs_without_page(get_params) -> str:
+    """Return URL-encoded querystring excluding the `page` key — used
+    so pagination links can append `?<other_filters>&page=N`."""
+    pairs = [(k, v) for k, v in get_params.items() if k != "page"]
+    return "&".join(f"{k}={v}" for k, v in pairs if v != "")
 
 
 # ── Finding detail (HTMX fragment for workload-page offcanvas) ────
@@ -387,6 +546,29 @@ class ClusterDetailView(LoginRequiredMixin, View):
             messages.info(request, "No changes to save.")
 
         return redirect("cluster-detail", pk=cluster.pk)
+
+
+class ClusterReimportView(LoginRequiredMixin, View):
+    """HTMX endpoint that flags a cluster for an on-demand re-import.
+
+    Sets `Cluster.reimport_requested_at = now()` and records the actor.
+    The workload-cluster trigger CronJob polls /api/v1/imports/pending/
+    every minute and runs a full import the next tick. Admin only.
+    """
+
+    template_name = "clusters/_reimport_button.html"
+
+    def post(self, request, pk):
+        if not _is_admin(request.user):
+            return HttpResponseForbidden("admin only")
+        cluster = get_object_or_404(Cluster, pk=pk)
+        cluster.reimport_requested_at = timezone.now()
+        cluster.reimport_requested_by = request.user
+        cluster.save(update_fields=["reimport_requested_at", "reimport_requested_by"])
+        return render(request, self.template_name, {
+            "cluster": cluster,
+            "is_admin": True,
+        })
 
 
 class NamespaceToggleView(LoginRequiredMixin, View):

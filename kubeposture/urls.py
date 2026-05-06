@@ -5,6 +5,8 @@ from django.db import connection
 from django.http import JsonResponse
 from django.urls import include, path
 
+from core.metrics.views import metrics_view
+
 
 def healthz(request):
     """Liveness probe — process is up."""
@@ -41,6 +43,7 @@ urlpatterns = [
     path("api/v1/", include("core.api.urls")),
     path("healthz", healthz),
     path("readyz", readyz),
+    path("metrics", metrics_view),
 
     # UI (must come last — root path lives here)
     path("", include("core.urls_ui")),

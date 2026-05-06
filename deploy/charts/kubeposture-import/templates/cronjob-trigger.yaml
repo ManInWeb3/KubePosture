@@ -1,0 +1,90 @@
+{{/*
+On-demand reimport trigger. Fires every minute and exits in <2s when no
+admin has clicked "Re-import" — the heavy import only runs when the
+KubePosture API reports a pending request. Same image, SA, RBAC, and
+script as the scheduled CronJob; the only difference is `--on-demand-only`
+on the script command line.
+
+Disable with `trigger.enabled: false` to fall back to the 6h-only cadence.
+*/}}
+{{- if .Values.trigger.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "kubeposture-import.fullname" . }}-trigger
+  labels:
+    {{- include "kubeposture-import.labels" . | nindent 4 }}
+    app.kubernetes.io/component: import-trigger
+spec:
+  schedule: {{ .Values.trigger.schedule | quote }}
+  concurrencyPolicy: Forbid
+  failedJobsHistoryLimit: 3
+  successfulJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ .Values.trigger.activeDeadlineSeconds }}
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            {{- include "kubeposture-import.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: import-trigger
+        spec:
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          serviceAccountName: {{ include "kubeposture-import.serviceAccountName" . }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+          restartPolicy: Never
+          containers:
+            - name: import-trigger
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              # --on-demand-only short-circuits when no Re-import request
+              # is pending; the GET is the only API call most ticks make.
+              command:
+                - python
+                - scripts/import-cluster.py
+                - {{ required "clusterName is required" .Values.clusterName }}
+                - --in-cluster
+                - --on-demand-only
+              env:
+                - name: KUBEPOSTURE_URL
+                  value: {{ .Values.kubepostureUrl | quote }}
+                - name: KUBEPOSTURE_TOKEN
+                {{- if .Values.token.secretRef.name }}
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.token.secretRef.name }}
+                      key: {{ .Values.token.secretRef.key }}
+                {{- else }}
+                  value: {{ .Values.token.value | quote }}
+                {{- end }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+              resources:
+                {{- toYaml .Values.resources | nindent 16 }}
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

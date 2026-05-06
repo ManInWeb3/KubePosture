@@ -156,6 +156,12 @@
               </a>
             </li>
             <li class="nav-item">
+              <a class="nav-link{% if nav == 'findings' %} active{% endif %}" href="{% url 'findings-list' %}" title="Findings — fleet-wide triage: priority, exposure, KEV, EPSS">
+                <span class="nav-link-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 4v5c0 5-3.5 9-8 10-4.5-1-8-5-8-10V7l8-4z"/><path d="M12 8v4"/><path d="M12 16v.01"/></svg></span>
+                <span class="nav-link-title">Findings</span>
+              </a>
+            </li>
+            <li class="nav-item">
               <a class="nav-link{% if nav == 'clusters' %} active{% endif %}" href="{% url 'cluster-list' %}" title="Clusters — per-cluster environment, namespaces, exposure flags">
                 <span class="nav-link-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg></span>
                 <span class="nav-link-title">Clusters</span>

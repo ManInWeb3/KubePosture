@@ -23,7 +23,10 @@
 
     <!-- Cluster info -->
     <div class="card mb-3">
-      <div class="card-header"><h3 class="card-title">Cluster Info</h3></div>
+      <div class="card-header d-flex align-items-center justify-content-between">
+        <h3 class="card-title mb-0">Cluster Info</h3>
+        {% include "clusters/_reimport_button.html" %}
+      </div>
       <div class="card-body">
         {% help "Cluster Info" %}
           <p class="mb-0"><strong>Name</strong> is set at first ingest and is immutable.

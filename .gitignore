@@ -209,3 +209,5 @@ __marimo__/
 Architecture/
 **/CLAUDE.md
 .claude/
+Notes.md
+test.db

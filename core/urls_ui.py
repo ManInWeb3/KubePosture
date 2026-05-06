@@ -14,7 +14,9 @@ from django.urls import path
 from core.views_ui import (
     ClusterDetailView,
     ClusterListView,
+    ClusterReimportView,
     FindingDetailPanelView,
+    FindingsListView,
     NamespaceResetAutoView,
     NamespaceToggleView,
     ProfileView,
@@ -40,6 +42,7 @@ urlpatterns = [
         name="workloads-detail",
     ),
 
+    path("findings/", FindingsListView.as_view(), name="findings-list"),
     path(
         "findings/<int:pk>/panel/",
         FindingDetailPanelView.as_view(),
@@ -47,6 +50,11 @@ urlpatterns = [
     ),
     path("clusters/", ClusterListView.as_view(), name="cluster-list"),
     path("clusters/<int:pk>/", ClusterDetailView.as_view(), name="cluster-detail"),
+    path(
+        "clusters/<int:pk>/re-import/",
+        ClusterReimportView.as_view(),
+        name="cluster-reimport",
+    ),
     path(
         "clusters/<int:cluster_pk>/namespaces/<int:ns_pk>/toggle/",
         NamespaceToggleView.as_view(),

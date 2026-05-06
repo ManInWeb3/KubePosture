@@ -1,0 +1,209 @@
+{% extends "base.html" %}
+{% load help_tags findings_tags %}
+
+{% block title %}Findings — KubePosture{% endblock %}
+{% block breadcrumbs %}
+<ol class="breadcrumb" aria-label="breadcrumbs">
+  <li class="breadcrumb-item active" aria-current="page">Findings</li>
+</ol>
+{% endblock %}
+
+{% block content %}
+{% help "Findings" %}
+  <p><strong>Fleet-wide triage list.</strong> Every active finding across
+  every cluster, ranked by <em>effective priority</em>. Use this page to
+  answer "what should I act on right now?" — not "what's on cluster X?"
+  (for that, use Workloads).</p>
+  <p><strong>Filters are triage signals only:</strong> priority, source,
+  exposure (namespace internet-exposed / sensitive), KEV, EPSS, name.
+  Cluster / namespace / workload appear as columns; click the workload cell
+  to drill into the per-workload view.</p>
+  <p><strong>Default sort:</strong> Immediate → Out-of-Band → Scheduled
+  → Defer, then most recently seen first. Click a column header to override.</p>
+{% endhelp %}
+
+<!-- Summary tiles — clickable, each appends its dimension to the URL -->
+<div class="row row-deck row-cards mb-3">
+  <div class="col-sm-6 col-lg-3">
+    <a href="?priority=immediate" class="card card-link">
+      <div class="card-body">
+        <div class="subheader">Immediate active</div>
+        <div class="h1 m-0 text-red">{{ tiles.immediate }}</div>
+        <div class="text-muted small">Click to filter</div>
+      </div>
+    </a>
+  </div>
+  <div class="col-sm-6 col-lg-3">
+    <a href="?kev=1" class="card card-link">
+      <div class="card-body">
+        <div class="subheader">KEV-listed active</div>
+        <div class="h1 m-0 text-red">{{ tiles.kev }}</div>
+        <div class="text-muted small">Known exploited in the wild</div>
+      </div>
+    </a>
+  </div>
+  <div class="col-sm-6 col-lg-3">
+    <a href="?internet=1&sensitive=1" class="card card-link">
+      <div class="card-body">
+        <div class="subheader">On exposed namespaces</div>
+        <div class="h1 m-0 text-orange">{{ tiles.exposed }}</div>
+        <div class="text-muted small">Internet-exposed or sensitive-data</div>
+      </div>
+    </a>
+  </div>
+  <div class="col-sm-6 col-lg-3">
+    <a href="?age=7" class="card card-link">
+      <div class="card-body">
+        <div class="subheader">New this week</div>
+        <div class="h1 m-0 text-yellow">{{ tiles.new_week }}</div>
+        <div class="text-muted small">First-seen ≤ 7 days ago</div>
+      </div>
+    </a>
+  </div>
+</div>
+
+<!-- Preset chips — each is a query-string preset -->
+<div class="mb-3 d-flex flex-wrap gap-2" aria-label="Preset filters">
+  <span class="text-muted small align-self-center me-1">Presets:</span>
+  <a class="btn btn-sm btn-outline-primary{% if active_preset == 'today' %} active{% endif %}"
+     href="?priority=immediate&internet=1">Today's triage</a>
+  <a class="btn btn-sm btn-outline-primary{% if active_preset == 'kev' %} active{% endif %}"
+     href="?kev=1">KEV exploited</a>
+  <a class="btn btn-sm btn-outline-primary{% if active_preset == 'high_epss' %} active{% endif %}"
+     href="?epss=50">High EPSS</a>
+  <a class="btn btn-sm btn-outline-primary{% if active_preset == 'new_week' %} active{% endif %}"
+     href="?age=7">New this week</a>
+  <a class="btn btn-sm btn-outline-primary{% if active_preset == 'policy' %} active{% endif %}"
+     href="?source=kyverno&priority=immediate">Policy violations</a>
+  <a class="btn btn-sm btn-link" href="{% url 'findings-list' %}">Reset</a>
+</div>
+
+<!-- Filter form: 6 triage-signal filters -->
+<form id="findings-filters" method="get" class="card mb-3"
+      hx-get="{% url 'findings-list' %}"
+      hx-target="#finding-rows"
+      hx-headers='{"HX-Target": "finding-rows"}'
+      hx-push-url="true"
+      hx-trigger="change, submit, keyup changed delay:400ms from:input[type=text]">
+  <div class="card-body">
+    <div class="row g-2 align-items-center flex-nowrap overflow-auto">
+      <div class="col-auto">
+        <input type="text" name="name" class="form-control form-control-sm"
+               placeholder="title or CVE…" value="{{ filters.name }}" style="min-width: 14rem;">
+      </div>
+      <div class="col-auto">
+        <select name="priority" class="form-select form-select-sm">
+          <option value="">Any priority</option>
+          {% for value, label in priority_choices %}
+            <option value="{{ value }}"{% if filters.priority == value %} selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-auto">
+        <select name="source" class="form-select form-select-sm">
+          <option value="">Any source</option>
+          {% for value, label in source_choices %}
+            <option value="{{ value }}"{% if filters.source == value %} selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-auto">
+        <select name="epss" class="form-select form-select-sm" title="Minimum EPSS score">
+          <option value="">Any EPSS</option>
+          <option value="10"{% if filters.epss == "10" %} selected{% endif %}>≥ 10%</option>
+          <option value="50"{% if filters.epss == "50" %} selected{% endif %}>≥ 50%</option>
+        </select>
+      </div>
+      <div class="col-auto">
+        <label class="form-check form-switch m-0" title="Namespace marked internet-exposed">
+          <input type="checkbox" name="internet" value="1" class="form-check-input"
+                 {% if filters.internet %}checked{% endif %}>
+          <span class="form-check-label">Internet-exposed</span>
+        </label>
+      </div>
+      <div class="col-auto">
+        <label class="form-check form-switch m-0" title="Namespace marked sensitive-data">
+          <input type="checkbox" name="sensitive" value="1" class="form-check-input"
+                 {% if filters.sensitive %}checked{% endif %}>
+          <span class="form-check-label">Sensitive data</span>
+        </label>
+      </div>
+      <div class="col-auto">
+        <label class="form-check form-switch m-0" title="CISA Known Exploited Vulnerability">
+          <input type="checkbox" name="kev" value="1" class="form-check-input"
+                 {% if filters.kev %}checked{% endif %}>
+          <span class="form-check-label">KEV only</span>
+        </label>
+      </div>
+      <div class="col-auto ms-auto">
+        <a href="{% url 'findings-list' %}" class="btn btn-sm btn-outline-secondary">Clear</a>
+      </div>
+    </div>
+    <input type="hidden" name="sort" value="{{ filters.sort }}">
+    <input type="hidden" name="dir" value="{{ filters.dir }}">
+    {# Preserve current age filter (set via tile/chip) across HTMX swaps #}
+    {% if filters.age %}<input type="hidden" name="age" value="{{ filters.age }}">{% endif %}
+  </div>
+</form>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table">
+      <thead>
+        <tr>
+          <th>Cluster</th>
+          <th>Namespace</th>
+          <th>Workload</th>
+          <th>Vuln ID</th>
+          <th>Title</th>
+          {% include "workloads/_sort_header.html" with col="priority" label="Priority" align="" %}
+          {% include "workloads/_sort_header.html" with col="severity" label="Severity" align="" %}
+          {% include "workloads/_sort_header.html" with col="epss" label="EPSS" align="text-end" %}
+          <th>KEV</th>
+          <th>Source</th>
+          {% include "workloads/_sort_header.html" with col="last_seen" label="Last seen" align="" %}
+        </tr>
+      </thead>
+      <tbody id="finding-rows">
+        {% include "findings/_rows.html" %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Finding detail offcanvas (loaded via HTMX from row clicks) -->
+<div class="offcanvas offcanvas-end" tabindex="-1" id="finding-detail-offcanvas"
+     aria-labelledby="finding-detail-offcanvas-label"
+     style="--tblr-offcanvas-width: 640px; width: 640px;">
+  <div class="offcanvas-header">
+    <h2 class="offcanvas-title" id="finding-detail-offcanvas-label">Finding</h2>
+    <button type="button" class="btn-close" data-bs-dismiss="offcanvas" aria-label="Close"></button>
+  </div>
+  <div class="offcanvas-body">
+    <p class="text-muted">Click a finding row to load details.</p>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+  (function() {
+    var form = document.getElementById('findings-filters');
+    if (!form) return;
+    var sortIn = form.querySelector('[name="sort"]');
+    var dirIn  = form.querySelector('[name="dir"]');
+    document.querySelectorAll('th.sortable').forEach(function(th) {
+      th.addEventListener('click', function() {
+        var col = th.dataset.sortCol;
+        if (sortIn.value === col) {
+          dirIn.value = (dirIn.value === 'asc') ? 'desc' : 'asc';
+        } else {
+          sortIn.value = col;
+          dirIn.value = 'desc';
+        }
+        htmx.trigger(form, 'submit');
+      });
+    });
+  })();
+</script>
+{% endblock %}

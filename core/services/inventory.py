@@ -13,7 +13,9 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Iterable
 
-from django.db.models import Exists, F, OuterRef, Q
+from datetime import timedelta
+
+from django.db.models import Case, Exists, F, IntegerField, OuterRef, Q, Value, When
 from django.utils import timezone
 
 from core.constants import (
@@ -346,6 +348,126 @@ def list_workload_images(workloads, *, include_history: bool = False):
         )
     )
     return rows
+
+
+# ── /findings/ list-page query helpers ──────────────────────────
+
+
+_EXPOSURE_VALUES = {"internet", "sensitive", "either"}
+_FINDING_LIST_SORTS = {
+    "last_seen": "last_seen",
+    "first_seen": "first_seen",
+    "title": "title",
+    "epss": "epss_score",
+    "priority": "_priority_rank",  # numeric annotation, see _priority_rank_annotation
+    "severity": "_severity_rank",
+}
+
+
+def _priority_rank_annotation():
+    """Numeric ranking on `effective_priority` so the SQL sort orders
+    immediate→defer regardless of the alphabetic value. Higher = more urgent.
+    """
+    return Case(
+        When(effective_priority=PriorityBand.IMMEDIATE, then=Value(3)),
+        When(effective_priority=PriorityBand.OUT_OF_BAND, then=Value(2)),
+        When(effective_priority=PriorityBand.SCHEDULED, then=Value(1)),
+        When(effective_priority=PriorityBand.DEFER, then=Value(0)),
+        default=Value(-1),
+        output_field=IntegerField(),
+    )
+
+
+def _severity_rank_annotation():
+    return Case(
+        When(severity=Severity.CRITICAL, then=Value(5)),
+        When(severity=Severity.HIGH, then=Value(4)),
+        When(severity=Severity.MEDIUM, then=Value(3)),
+        When(severity=Severity.LOW, then=Value(2)),
+        When(severity=Severity.INFO, then=Value(1)),
+        When(severity=Severity.UNKNOWN, then=Value(0)),
+        default=Value(-1),
+        output_field=IntegerField(),
+    )
+
+
+def _exposure_q(value: str) -> Q | None:
+    """Q expression for the exposure filter. Cluster-scoped findings
+    (workload IS NULL) are excluded — they don't have a namespace
+    exposure context. This matches `core/urgency.py` semantics, where
+    only workload-scoped findings get the exposure boost.
+    """
+    if value == "internet":
+        return Q(workload__namespace__internet_exposed=True)
+    if value == "sensitive":
+        return Q(workload__namespace__contains_sensitive_data=True)
+    if value == "either":
+        return (
+            Q(workload__namespace__internet_exposed=True)
+            | Q(workload__namespace__contains_sensitive_data=True)
+        )
+    return None
+
+
+def list_findings(
+    *,
+    name_contains: str | None = None,
+    priority: str | None = None,
+    source: str | None = None,
+    exposure: str | None = None,
+    kev: bool = False,
+    epss_min: float | None = None,
+    age_days: int | None = None,
+    sort: str | None = None,
+    sort_dir: str = "desc",
+):
+    """Return a Finding queryset for the `/findings/` triage page.
+
+    Triage-signal filters only — topology (cluster / namespace / workload)
+    is NOT exposed here; that drill-down lives on `/workloads/`. Severity
+    and `fixed_version` are not filterable either; severity is folded
+    into `effective_priority` and `fixed_version` is upstream metadata,
+    not a KubePosture mitigation state.
+
+    `exposure` excludes cluster-scoped findings (workload IS NULL) — see
+    `_exposure_q`. Set to None / empty to include them.
+
+    Default ordering when `sort` is None: priority rank desc, then
+    last_seen desc. Sort keys: see `_FINDING_LIST_SORTS`.
+    """
+    qs = restrict_to_currently_deployed_images(default_finding_qs())
+
+    if name_contains:
+        qs = qs.filter(
+            Q(title__icontains=name_contains)
+            | Q(vuln_id__icontains=name_contains)
+        )
+    if priority:
+        qs = qs.filter(effective_priority=priority)
+    if source:
+        qs = qs.filter(source=source)
+    if exposure:
+        eq = _exposure_q(exposure)
+        if eq is not None:
+            qs = qs.filter(eq)
+    if kev:
+        qs = qs.filter(kev_listed=True)
+    if epss_min is not None:
+        qs = qs.filter(epss_score__gte=epss_min)
+    if age_days is not None:
+        qs = qs.filter(first_seen__gte=timezone.now() - timedelta(days=age_days))
+
+    qs = qs.annotate(
+        _priority_rank=_priority_rank_annotation(),
+        _severity_rank=_severity_rank_annotation(),
+    )
+
+    field = _FINDING_LIST_SORTS.get(sort or "")
+    if field is None:
+        # Default: priority desc, last_seen desc.
+        return qs.order_by("-_priority_rank", "-last_seen")
+    prefix = "" if sort_dir == "asc" else "-"
+    return qs.order_by(f"{prefix}{field}", "-last_seen")
 
 
 def findings_for_workload_image(

@@ -23,6 +23,8 @@ app:
     LOG_LEVEL: "INFO"
     INGEST_QUEUE_MAX_ATTEMPTS: "3"
     INTERNAL_INGRESS_CLASSES: ""  # CSV of ingress class names treated as not public, e.g. "pomerium,nginx-internal"
+    PROMETHEUS_MULTIPROC_DIR: "/tmp/prom_multiproc"
+    METRICS_BUSINESS_TTL_SECONDS: "300"   # business gauges cached this long; finding counts only change when imports complete
 
 # Compliance framework loading is not implemented in this milestone.
 # The fixtures/ directory holds sample YAMLs but no `load_frameworks`
@@ -35,6 +37,8 @@ web:
   replicaCount: 2
   command:
     - gunicorn
+    - -c
+    - gunicorn.conf.py
     - kubeposture.wsgi:application
     - --bind
     - 0.0.0.0:8000
@@ -138,7 +142,7 @@ cronJobs:
         memory: 128Mi
       limits:
         cpu: 500m
-        memory: 512Mi
+        memory: 1Gi
     activeDeadlineSeconds: 600
 
   # Safety-net for import-level auto-resolve. The queue processor reaps
@@ -224,6 +228,15 @@ setupJob:
     limits:
       cpu: 500m
       memory: 512Mi
+  # -- Extra annotations on the setup Job.
+  # The Job is rendered as a regular resource (no helm.sh/hook), so under
+  # plain Helm or ArgoCD it's only created/replaced when its spec changes.
+  # Under ArgoCD, uncomment the entry below: hooks would otherwise rerun
+  # on every sync and gate sync completion. Force=true,Replace=true is
+  # needed because Jobs are immutable — without it, ArgoCD can't update
+  # the Job spec on chart upgrades (e.g. new image tag).
+  annotations: {}
+    # argocd.argoproj.io/sync-options: Force=true,Replace=true
 
 # ── Image ──────────────────────────────────────────────────────
 
@@ -265,6 +278,20 @@ ingress:
         - path: /
           pathType: Prefix
   tls: []
+
+# ── Monitoring ─────────────────────────────────────────────────
+#
+# /metrics is always exposed. Setting `enabled: true` renders a
+# ServiceMonitor for the Prometheus Operator (gated on the CRD being
+# present in the cluster — bare clusters without the operator install
+# fine with the flag set, the template just renders empty).
+
+monitoring:
+  enabled: false
+  serviceMonitor:
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}                  # extra labels for Prometheus selector matching, e.g. release: kube-prometheus
 
 # ── Pod config ─────────────────────────────────────────────────
 

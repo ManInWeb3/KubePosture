@@ -13,6 +13,7 @@ reset to 0 on the next successful reap. A non-zero value means the
 tool is preserving stale `deployed` flags — Scan Health surfaces this
 as a data-quality incident past a configurable threshold.
 """
+from django.conf import settings
 from django.db import models
 
 from core.constants import Environment
@@ -73,6 +74,25 @@ class Cluster(models.Model):
         null=True,
         blank=True,
         help_text="Bumped on every successful inventory sync.",
+    )
+
+    reimport_requested_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Set when an admin clicks 'Re-import'. The workload-cluster "
+            "trigger CronJob polls /api/v1/imports/pending/ and runs a full "
+            "import when this is non-NULL and no import is in flight. "
+            "Cleared by /imports/pending/clear/ once an import that started "
+            "after the request finishes."
+        ),
+    )
+    reimport_requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reimport_requests",
     )
 
     class Meta:

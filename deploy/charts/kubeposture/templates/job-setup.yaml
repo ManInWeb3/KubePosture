@@ -1,14 +1,24 @@
+{{/*
+Not a Helm hook by design: under ArgoCD, hooks rerun on every sync and
+gate sync completion. As a regular resource with a stable name the Job
+is created once on install and only recreated when its spec changes.
+Set setupJob.annotations in values.yaml to add ArgoCD-specific behavior
+— see the comment there.
+
+Migrations are handled independently by the web deployment's `migrate`
+init container, so this Job no longer gates app startup.
+*/}}
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "kubeposture.fullname" . }}-setup-{{ .Release.Revision }}
+  name: {{ include "kubeposture.fullname" . }}-setup
   labels:
     {{- include "kubeposture.labels" . | nindent 4 }}
     app.kubernetes.io/component: setup
+  {{- with .Values.setupJob.annotations }}
   annotations:
-    helm.sh/hook: post-install,post-upgrade
-    helm.sh/hook-weight: "0"
-    helm.sh/hook-delete-policy: before-hook-creation
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   backoffLimit: 3
   activeDeadlineSeconds: 300

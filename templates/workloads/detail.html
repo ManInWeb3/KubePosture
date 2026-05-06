@@ -69,6 +69,27 @@
         <span class="text-muted small">No active signals.</span>
       {% endfor %}
     </div>
+
+    <!-- Imports (per cluster in scope) -->
+    <div class="mt-3">
+      <div class="text-muted small mb-1">Imports</div>
+      {% for row in cluster_imports %}
+      <div class="d-flex align-items-center mb-1">
+        <code class="me-2">{{ row.cluster.name }}</code>
+        <span class="text-muted small me-3">
+          {% if row.last_seen_at %}
+            last {{ row.last_seen_at|timesince }} ago
+            ({{ row.last_seen_at|date:"Y-m-d H:i" }})
+          {% else %}
+            never
+          {% endif %}
+        </span>
+        {% include "clusters/_reimport_button.html" with cluster=row.cluster is_admin=is_admin %}
+      </div>
+      {% empty %}
+      <div class="text-muted small">No clusters in scope.</div>
+      {% endfor %}
+    </div>
   </div>
 </div>
 

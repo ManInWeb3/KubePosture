@@ -27,7 +27,6 @@ class Category(models.TextChoices):
 class Source(models.TextChoices):
     TRIVY = "trivy", "Trivy"
     KYVERNO = "kyverno", "Kyverno"
-    KUBEPOSTURE = "kubepostureng-policy", "KubePostureNG"
 
 
 class PriorityBand(models.TextChoices):

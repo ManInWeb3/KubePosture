@@ -1,7 +1,8 @@
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PROMETHEUS_MULTIPROC_DIR=/tmp/prom_multiproc
 
 WORKDIR /app
 
@@ -16,7 +17,7 @@ RUN SECRET_KEY=build-collectstatic \
 
 EXPOSE 8000
 
-CMD ["gunicorn", "kubeposture.wsgi:application", \
+CMD ["gunicorn", "-c", "gunicorn.conf.py", "kubeposture.wsgi:application", \
      "--bind", "0.0.0.0:8000", \
      "--workers", "2", \
      "--access-logfile", "-"]
