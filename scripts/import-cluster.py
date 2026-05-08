@@ -38,6 +38,7 @@ Auth:
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import secrets
@@ -70,9 +71,9 @@ def _ulid() -> str:
 # ── HTTP helpers ──────────────────────────────────────────────────
 
 K8S_TIMEOUT: tuple[int, int] = (10, 60)
-HTTP_TIMEOUT: int = 30
+HTTP_TIMEOUT: int = int(os.environ.get("KUBEPOSTURE_HTTP_TIMEOUT", "60"))
 HTTP_MAX_ATTEMPTS: int = 3
-HTTP_RETRY_BASE_DELAY: float = 1.5
+HTTP_RETRY_BASE_DELAY: float = 2.5
 
 
 def _post(base_url: str, token: str, path: str, body: dict) -> tuple[bool, int, str]:
@@ -97,10 +98,12 @@ def _post(base_url: str, token: str, path: str, body: dict) -> tuple[bool, int, 
                 last_detail = ""
             if 400 <= e.code < 500:
                 return False, e.code, last_detail
-        except URLError as e:
-            last_detail = f"connection error: {e.reason}"
-        except socket.timeout:
-            last_detail = f"timeout after {HTTP_TIMEOUT}s"
+        # OSError covers URLError, socket.timeout, ConnectionResetError,
+        # and http.client.RemoteDisconnected — the last raised straight
+        # from getresponse() when an LB or worker drops the connection
+        # between request and response, and would otherwise escape.
+        except (OSError, http.client.HTTPException) as e:
+            last_detail = f"connection error: {e}"
 
         if attempt < HTTP_MAX_ATTEMPTS:
             time.sleep(HTTP_RETRY_BASE_DELAY * (2 ** (attempt - 1)))
@@ -123,7 +126,7 @@ def _get(base_url: str, token: str, path: str) -> tuple[bool, int, str]:
         except Exception:
             detail = ""
         return False, e.code, detail
-    except (URLError, socket.timeout) as e:
+    except (OSError, http.client.HTTPException) as e:
         return False, 0, str(e)
 
 

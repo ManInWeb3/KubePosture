@@ -33,6 +33,12 @@ schedule: "0 */6 * * *"
 # -- Maximum run time for the import job
 activeDeadlineSeconds: 900
 
+# -- Per-request HTTP timeout (seconds) for POSTs to the KubePosture API.
+# Bump this if your import job sees intermittent connection-reset failures
+# during long ingest cycles — the central server can occasionally take
+# >30s to respond under burst load via an LB/ingress.
+httpTimeoutSeconds: 60
+
 # -- Extra annotations on the install/upgrade Job (NOT the CronJob).
 # The Job is rendered as a regular resource (no helm.sh/hook), so under
 # plain Helm or ArgoCD it's only created/replaced when its spec changes.
@@ -68,10 +74,10 @@ imagePullSecrets: []
 resources:
   requests:
     cpu: 50m
-    memory: 128Mi
-  limits:
-    cpu: 500m
     memory: 256Mi
+  limits:
+    cpu: 1
+    memory: 512Mi
 
 # -- Naming
 nameOverride: ""

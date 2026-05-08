@@ -48,6 +48,8 @@ spec:
               env:
                 - name: KUBEPOSTURE_URL
                   value: {{ .Values.kubepostureUrl | quote }}
+                - name: KUBEPOSTURE_HTTP_TIMEOUT
+                  value: {{ .Values.httpTimeoutSeconds | quote }}
                 - name: KUBEPOSTURE_TOKEN
                 {{- if .Values.token.secretRef.name }}
                   valueFrom:
