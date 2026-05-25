@@ -58,6 +58,7 @@ rules:
       - clusterrbacassessmentreports
       - infraassessmentreports
       - clustercompliancereports
+      - sbomreports
     verbs: ["get", "list"]
   {{- end }}
   {{- if .Values.import.kyverno }}
