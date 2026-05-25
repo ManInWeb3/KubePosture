@@ -19,7 +19,9 @@ URL surface (mounted at /api/v1/):
 """
 from __future__ import annotations
 
-from rest_framework import generics
+from rest_framework import generics, status
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from core.api.filters import (
     ClusterFilter,
@@ -36,6 +38,7 @@ from core.api.serializers import (
     WorkloadSerializer,
 )
 from core.models import Cluster, Finding, Image, Namespace, Workload
+from core.services.components import search_by_purls
 
 
 # ── Cluster ──────────────────────────────────────────────────────
@@ -165,3 +168,62 @@ class ImageDetailView(generics.RetrieveAPIView):
         if cluster_name:
             cluster = Cluster.objects.filter(name=cluster_name).first()
         return Image.objects.with_currently_deployed(cluster=cluster)
+
+
+# ── SBOM search ──────────────────────────────────────────────────
+
+
+class SbomSearchView(APIView):
+    """`POST /api/v1/sbom/search/` — purl-keyed component lookup.
+
+    Body:
+        {
+          "purls": ["pkg:npm/lodash@4.17.21", ...],
+          "purl_prefixes": ["pkg:npm/eslint-config-prettier"],
+          "cluster": "prod-east"      // optional, scopes both selection and counts
+        }
+
+    Query params:
+        ?include_inactive=true        // include components from
+                                      // currently-undeployed images.
+
+    Returns a flat list, one row per (cluster, workload, purl).
+    """
+
+    def post(self, request):
+        body = request.data or {}
+        purls = body.get("purls") or []
+        prefixes = body.get("purl_prefixes") or []
+        if not isinstance(purls, list) or not isinstance(prefixes, list):
+            return Response(
+                {"error": "purls and purl_prefixes must be arrays"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not purls and not prefixes:
+            return Response(
+                {"error": "supply at least one of purls / purl_prefixes"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        cluster = None
+        cluster_name = (body.get("cluster") or "").strip()
+        if cluster_name:
+            cluster = Cluster.objects.filter(name=cluster_name).first()
+            if cluster is None:
+                return Response(
+                    {"error": f"cluster {cluster_name!r} not found"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+        include_inactive = (
+            request.query_params.get("include_inactive", "").lower()
+            in ("1", "true", "yes")
+        )
+
+        rows = search_by_purls(
+            purls=purls,
+            purl_prefixes=prefixes,
+            cluster=cluster,
+            include_inactive=include_inactive,
+        )
+        return Response({"count": len(rows), "matches": rows})

@@ -1,0 +1,19 @@
+{% for c in components %}
+<tr class="cursor-pointer"
+    hx-get="{% url 'components-detail-panel' %}?purl={{ c.purl|urlencode }}{% if filters.cluster %}&cluster={{ filters.cluster }}{% endif %}{% if filters.include_inactive %}&include_inactive=1{% endif %}"
+    hx-target="#component-detail-offcanvas .offcanvas-body"
+    hx-swap="innerHTML"
+    data-bs-toggle="offcanvas"
+    data-bs-target="#component-detail-offcanvas">
+  <td><strong>{{ c.name }}</strong></td>
+  <td><code class="small">{{ c.version|default:"—" }}</code></td>
+  <td><span class="badge bg-secondary-lt text-secondary">{{ c.ecosystem|default:"—" }}</span></td>
+  <td><code class="small text-muted">{{ c.purl }}</code></td>
+  <td class="text-end">{{ c.image_count }}</td>
+  <td class="text-end">{{ c.workload_count }}</td>
+  <td class="text-end">{{ c.cluster_count }}</td>
+</tr>
+{% empty %}
+<tr><td colspan="7" class="text-center text-muted py-4">No components match the current filters.</td></tr>
+{% endfor %}
+{% include "widgets/_pagination.html" with hx_target="component-rows" noun="components" colspan=7 %}

@@ -5,6 +5,7 @@ from django.db import transaction
 from core.models import (
     Cluster,
     EpssScore,
+    FeedFetchState,
     Finding,
     FindingAction,
     Image,
@@ -13,8 +14,10 @@ from core.models import (
     IngestToken,
     KevEntry,
     Namespace,
+    SbomComponent,
     ScanInconsistency,
     Snapshot,
+    SupplyChainIoc,
     Workload,
     WorkloadAlias,
     WorkloadImageObservation,
@@ -177,6 +180,52 @@ class SnapshotAdmin(admin.ModelAdmin):
     )
     list_select_related = ("cluster", "namespace", "workload")
     ordering = ("-captured_at",)
+
+
+@admin.register(SbomComponent)
+class SbomComponentAdmin(admin.ModelAdmin):
+    list_display = (
+        "name",
+        "version",
+        "ecosystem",
+        "purl",
+        "image",
+        "last_seen_at",
+    )
+    list_filter = ("ecosystem", "component_type")
+    search_fields = (
+        "name",
+        "purl",
+        "image__ref",
+        "image__digest",
+    )
+    list_select_related = ("image",)
+    ordering = ("name", "version")
+    readonly_fields = ("first_seen_at", "last_seen_at", "raw")
+
+
+@admin.register(SupplyChainIoc)
+class SupplyChainIocAdmin(admin.ModelAdmin):
+    list_display = (
+        "advisory_id",
+        "feed_source",
+        "purl",
+        "severity",
+        "published_at",
+        "last_seen_at",
+    )
+    list_filter = ("feed_source", "severity")
+    search_fields = ("advisory_id", "purl", "title", "summary")
+    ordering = ("-last_seen_at",)
+    readonly_fields = ("first_seen_at", "last_seen_at", "raw")
+
+
+@admin.register(FeedFetchState)
+class FeedFetchStateAdmin(admin.ModelAdmin):
+    list_display = ("state_key", "last_modified", "etag", "last_success_at")
+    search_fields = ("state_key",)
+    ordering = ("state_key",)
+    readonly_fields = ("last_success_at",)
 
 
 # Bulk-register the rest with default options.

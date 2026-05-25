@@ -22,11 +22,13 @@ class Category(models.TextChoices):
     RBAC = "rbac", "RBAC"
     COMPLIANCE = "compliance", "Compliance"
     POLICY = "policy", "Policy"
+    SUPPLY_CHAIN = "supply_chain", "Supply Chain"
 
 
 class Source(models.TextChoices):
     TRIVY = "trivy", "Trivy"
     KYVERNO = "kyverno", "Kyverno"
+    SUPPLY_CHAIN_IOC = "supply_chain_ioc", "Supply-Chain IoC"
 
 
 class PriorityBand(models.TextChoices):

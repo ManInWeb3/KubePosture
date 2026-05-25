@@ -33,35 +33,4 @@
 {% empty %}
 <tr><td colspan="11" class="text-center text-muted py-4">No findings match the current filters.</td></tr>
 {% endfor %}
-{% if page_obj.has_other_pages %}
-<tr>
-  <td colspan="11">
-    <nav class="d-flex align-items-center justify-content-between">
-      <span class="text-muted small">
-        Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}
-        ({{ page_obj.paginator.count }} findings)
-      </span>
-      <ul class="pagination pagination-sm m-0">
-        {% if page_obj.has_previous %}
-        <li class="page-item">
-          <a class="page-link" href="?{{ request_qs }}&page={{ page_obj.previous_page_number }}"
-             hx-get="?{{ request_qs }}&page={{ page_obj.previous_page_number }}"
-             hx-target="#finding-rows"
-             hx-headers='{"HX-Target": "finding-rows"}'
-             hx-push-url="true">‹ Prev</a>
-        </li>
-        {% endif %}
-        {% if page_obj.has_next %}
-        <li class="page-item">
-          <a class="page-link" href="?{{ request_qs }}&page={{ page_obj.next_page_number }}"
-             hx-get="?{{ request_qs }}&page={{ page_obj.next_page_number }}"
-             hx-target="#finding-rows"
-             hx-headers='{"HX-Target": "finding-rows"}'
-             hx-push-url="true">Next ›</a>
-        </li>
-        {% endif %}
-      </ul>
-    </nav>
-  </td>
-</tr>
-{% endif %}
+{% include "widgets/_pagination.html" with hx_target="finding-rows" noun="findings" colspan=11 %}

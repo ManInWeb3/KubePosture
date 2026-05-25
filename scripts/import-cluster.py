@@ -288,6 +288,7 @@ def collect_from_kube_api(client_module) -> dict:
     out["ClusterRbacAssessmentReport"] = _list_crds(custom, "aquasecurity.github.io", "v1alpha1", "clusterrbacassessmentreports", cluster_scoped=True)
     out["InfraAssessmentReport"] = _list_crds(custom, "aquasecurity.github.io", "v1alpha1", "infraassessmentreports")
     out["ClusterComplianceReport"] = _list_crds(custom, "aquasecurity.github.io", "v1alpha1", "clustercompliancereports", cluster_scoped=True)
+    out["SbomReport"] = _list_crds(custom, "aquasecurity.github.io", "v1alpha1", "sbomreports")
     out["PolicyReport"] = _list_crds(custom, "wgpolicyk8s.io", "v1alpha2", "policyreports")
     out["ClusterPolicyReport"] = _list_crds(custom, "wgpolicyk8s.io", "v1alpha2", "clusterpolicyreports", cluster_scoped=True)
 
@@ -326,6 +327,7 @@ def _kind_for_plural(plural: str) -> str:
         "clusterrbacassessmentreports": "ClusterRbacAssessmentReport",
         "infraassessmentreports": "InfraAssessmentReport",
         "clustercompliancereports": "ClusterComplianceReport",
+        "sbomreports": "SbomReport",
         "policyreports": "PolicyReport",
         "clusterpolicyreports": "ClusterPolicyReport",
     }
@@ -364,6 +366,7 @@ _FROM_FOLDER_TRIVY = {
     "clusterrbacassessmentreports.json": "ClusterRbacAssessmentReport",
     "infraassessmentreports.json": "InfraAssessmentReport",
     "clustercompliancereports.json": "ClusterComplianceReport",
+    "sbomreports.json": "SbomReport",
 }
 
 _FROM_FOLDER_KYVERNO = {
@@ -456,6 +459,7 @@ _SCAN_KINDS = [
     ("ClusterRbacAssessmentReport", "trivy.ClusterRbacAssessmentReport"),
     ("InfraAssessmentReport", "trivy.InfraAssessmentReport"),
     ("ClusterComplianceReport", "trivy.ClusterComplianceReport"),
+    ("SbomReport", "trivy.SbomReport"),
     ("PolicyReport", "kyverno.PolicyReport"),
     ("ClusterPolicyReport", "kyverno.ClusterPolicyReport"),
 ]

@@ -24,6 +24,7 @@ urlpatterns = [
     path("findings/<int:pk>/", views_read.FindingDetailView.as_view(), name="finding-detail"),
     path("images/", views_read.ImageListView.as_view(), name="image-list"),
     path("images/<str:digest>/", views_read.ImageDetailView.as_view(), name="image-detail"),
+    path("sbom/search/", views_read.SbomSearchView.as_view(), name="sbom-search"),
 
     # Snapshot trends (session auth — IsAuthenticated default)
     path("snapshots/series/", views_snapshot.SnapshotSeriesView.as_view(), name="snapshot-series"),

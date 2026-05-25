@@ -14,6 +14,7 @@ from core.models import (
     ImportMark,
     IngestQueue,
     Namespace,
+    SbomComponent,
     Workload,
     WorkloadAlias,
     WorkloadImageObservation,
@@ -44,7 +45,7 @@ def _get_or_create_image(*, ref: str, digest: str) -> Image | None:
         return None
     img, _ = Image.objects.get_or_create(
         digest=digest,
-        defaults={"ref": ref or "", "deployed": True},
+        defaults={"ref": ref or ""},
     )
     if ref and ref != img.ref and len(ref) > len(img.ref or ""):
         img.ref = ref
@@ -217,12 +218,77 @@ def _process_kyverno(item: IngestQueue) -> dict:
     return {"signals_set": signals_set}
 
 
+def _process_sbom(item: IngestQueue, parser_func) -> dict:
+    """Trivy SbomReport → SbomComponent rows keyed by (image, purl).
+
+    The CRD ships the image's full CycloneDX BOM. We persist one row per
+    (image, purl); cluster/workload activity is derived later via
+    `WorkloadImageObservation.currently_deployed`, so we don't touch
+    those tables here. The workload only matters for image observation
+    upsert (so the image is linked to a workload even if Trivy scanned
+    it before inventory observed the workload).
+    """
+    cluster = _get_cluster(item.cluster_name)
+    if cluster is None:
+        return {"skipped": "cluster_not_registered"}
+    parsed = parser_func(item.raw_json or {})
+    if not parsed:
+        return {"skipped": "empty"}
+
+    image = _get_or_create_image(
+        ref=parsed.get("image_ref") or "",
+        digest=parsed.get("image_digest") or "",
+    )
+    if image is None:
+        return {"skipped": "no_image_digest"}
+
+    workload = _resolve_workload(
+        cluster,
+        parsed.get("namespace") or "",
+        parsed.get("resource_kind") or "",
+        parsed.get("resource_name") or "",
+    )
+    if workload:
+        WorkloadImageObservation.objects.get_or_create(
+            workload=workload,
+            image=image,
+            container_name=parsed.get("container_name") or "",
+        )
+
+    components = parsed.get("components") or []
+    created, updated = 0, 0
+    for c in components:
+        _, was_created = SbomComponent.objects.update_or_create(
+            image=image,
+            purl=c["purl"],
+            defaults={
+                "name": c["name"],
+                "version": c["version"],
+                "ecosystem": c["ecosystem"],
+                "component_type": c["component_type"],
+                "supplier": c["supplier"],
+                "license": c["license"],
+                "layer_digest": c["layer_digest"],
+                "raw": c["raw"],
+            },
+        )
+        if was_created:
+            created += 1
+        else:
+            updated += 1
+
+    return {"components": len(components), "created": created, "updated": updated}
+
+
 # ── Top-level dispatch --------------------------------------------
 
 def process_item(item: IngestQueue) -> dict:
     kind = item.kind
     if kind == "inventory":
         return _process_inventory(item)
+
+    if kind == "trivy.SbomReport":
+        return _process_sbom(item, trivy_parser.PARSERS_BY_KIND[kind])
 
     if kind in trivy_parser.PARSERS_BY_KIND:
         return _process_trivy_per_workload(item, trivy_parser.PARSERS_BY_KIND[kind])

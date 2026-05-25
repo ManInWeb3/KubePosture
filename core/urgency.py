@@ -11,7 +11,7 @@ from typing import Iterable
 
 from django.db import transaction
 
-from core.constants import Environment, PriorityBand, Severity
+from core.constants import Category, Environment, PriorityBand, Severity
 from core.models import Finding
 from core.signals import (
     HOST_ESCAPE_SIGNALS,
@@ -63,6 +63,11 @@ def _active_signal_ids(workload) -> set[str]:
 
 def score(finding: Finding) -> PriorityResult:
     """v1 decision tree. Pure: no DB I/O beyond preloaded relations."""
+    # Supply-chain IoC matches short-circuit to Immediate. Placed before
+    # KEV so the reason chip reads "supply-chain" if both flags ever
+    # combine on the same row.
+    if finding.category == Category.SUPPLY_CHAIN.value:
+        return PriorityResult(PriorityBand.IMMEDIATE.value, ("supply-chain",))
     # KEV short-circuits to Immediate.
     if finding.kev_listed:
         return PriorityResult(PriorityBand.IMMEDIATE.value, ("KEV",))

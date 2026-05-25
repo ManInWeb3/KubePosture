@@ -54,6 +54,19 @@ Sources of truth:
 
 KubePosture rule: **KEV match short-circuits to `Immediate`** regardless of all other inputs. This is stricter than SSVC, which still considers Mission/Safety even with `active` exploitation.
 
+A second, even-higher-precedence short-circuit applies to **supply-chain
+IoC matches** (`Category.SUPPLY_CHAIN`, produced by the matcher in
+`core/services/supply_chain_matcher.py` when a deployed `SbomComponent.purl`
+matches a `SupplyChainIoc.purl` from Aikido Intel or OSV.dev). Any match
+unconditionally resolves to `Immediate` with reason `("supply-chain",)`
+— see [urgency-decision-tree.md §Supply-chain short-circuit](urgency-decision-tree.md#supply-chain-short-circuit).
+This is stricter than SSVC too: SSVC has no decision point for
+"the artifact itself is attacker-supplied," because SSVC assumes the
+vulnerability is in legitimate code. Malicious-publish events
+(Shai-Hulud, `ctx`, `ua-parser-js`) sit outside SSVC's frame, so the
+mapping table below doesn't capture them — they're handled by the
+short-circuit before any SSVC-derived branch runs.
+
 EPSS≥0.9 promotes the finding regardless of environment: prod findings escalate to `OutOfCycle` (`("EPSS>=0.9","prod")`), non-prod Critical/High findings escalate to `Scheduled` (`("EPSS>=0.9","dev"|"staging")`). Active in-the-wild exploitation isn't bounded by env, even though the band is softened outside prod.
 
 **Read this priority correctly:**
@@ -183,6 +196,7 @@ Each `Finding.effective_priority` is computed by `core/urgency.py: score()` and 
 3. **DB**: `core_finding.effective_priority` column.
 
 Reason tuples to expect:
+- `("supply-chain",)` → supply-chain IoC match (Aikido / OSV malicious-publish feed), short-circuited to `immediate`. Outside SSVC's frame; see §3.1.
 - `("KEV",)` → KEV match, short-circuited to `immediate`.
 - `("severity","EPSS>=0.9","exposed","prod")` → top-of-tree branch.
 - `("critical","exposed","prod")`, `("high","exposed","prod")` → severity-driven prod branches.

@@ -110,6 +110,11 @@ data actually says. Until then, leave the defaults alone.
 
 ```python
 def score(finding: Finding) -> PriorityResult:
+    # Supply-chain IoC match short-circuits to Immediate (placed before
+    # KEV so the reason chip reads "supply-chain" if both ever combine).
+    if finding.category == Category.SUPPLY_CHAIN.value:
+        return PriorityResult(PriorityBand.IMMEDIATE, ("supply-chain",))
+
     # KEV short-circuits to Immediate
     if finding.kev_listed:
         return PriorityResult(PriorityBand.IMMEDIATE, ("KEV",))
@@ -194,6 +199,43 @@ Category sets (`HOST_ESCAPE_SIGNALS`, `RBAC_ELEVATION_SIGNALS`,
 `PRIV_ESCALATION_SIGNALS`) are built from `core/signals.py` by
 filtering `SIGNALS` on `category` — so adding a new signal to the
 registry automatically extends the set used here.
+
+## Supply-chain short-circuit
+
+`Category.SUPPLY_CHAIN` findings (source = `supply_chain_ioc`, produced
+by `core/services/supply_chain_matcher.py` when a `SbomComponent.purl`
+matches a `SupplyChainIoc.purl`) **unconditionally resolve to
+`IMMEDIATE`**. The check is the first branch in `score()`, before KEV.
+
+**Rationale.** A match means a feed (Aikido Intel or OSV.dev) has
+explicitly flagged this exact `(name, version)` as malicious — a
+maintainer-account takeover, attacker-published version, or
+intentionally backdoored release. There is no benign middle ground.
+The package contains attacker code by design, so neither severity nor
+exposure nor EPSS reduces the urgency. The KEV-style short-circuit
+applies for the same reason it does to KEV: known exploitation
+trumps everything else in the tree.
+
+**What it ignores by design:**
+
+| Input | Why ignored |
+|---|---|
+| Feed-supplied severity | Most feeds publish "critical"; some omit it. The matcher defaults to `Severity.CRITICAL.value` when absent. The band stays IMMEDIATE regardless. |
+| CVSS / EPSS | Malicious-publish events typically have no CVSS or EPSS score; `_enrichment_for` only fires on `CVE-*` IDs anyway. |
+| Namespace exposure / cluster environment | A flagged purl in a sealed dev cluster still ranks IMMEDIATE — the deployed artifact contains attacker code regardless of network reachability. |
+| Multi-feed confirmation | Aikido + OSV reporting the same compromise produces two findings (different `vuln_id`), both IMMEDIATE. No "confidence boost" sub-band. |
+
+**Reason chip.** The `PriorityResult.reasons` tuple is `("supply-chain",)`
+so the UI displays "Immediate · supply-chain" — distinct from "Immediate
+· KEV" so triage knows at a glance what fired.
+
+**If you ever want to soften this rule** (e.g. demote internal-only
+deployments to OUT_OF_BAND, or respect feed-supplied severity), see
+"Tweaking the formula" below — the supply-chain branch is a one-block
+edit. The locked v1 decision was unconditional IMMEDIATE because
+real-world supply-chain incidents (Shai-Hulud, `ctx`, `ua-parser-js`,
+`eslint-config-prettier`) ship credential-stealing payloads on first
+import, so the cost of demoting and being wrong is high.
 
 ## Tweaking the formula
 
@@ -297,6 +339,7 @@ updates `effective_priority`.
 
 | CVE severity | EPSS% | KEV | Env | Exposed | Signals | Sensitive | Priority |
 |---|---|---|---|---|---|---|---|
+| _supply-chain match_ | n/a | n/a | _any_ | _any_ | _any_ | _any_ | **Immediate** (supply-chain) |
 | Critical | 0.95 | no | prod | yes | — | — | **Immediate** |
 | Critical | 0.4 | yes | dev | no | — | — | **Immediate** (KEV) |
 | High | 0.92 | no | prod | no | `kyverno:disallow-privileged-containers` | — | **OutOfCycle** (prod + escalation) |

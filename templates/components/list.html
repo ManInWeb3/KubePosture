@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% load help_tags %}
+
+{% block title %}Components — KubePosture{% endblock %}
+{% block breadcrumbs %}
+<ol class="breadcrumb" aria-label="breadcrumbs">
+  <li class="breadcrumb-item active" aria-current="page">Components</li>
+</ol>
+{% endblock %}
+
+{% block content %}
+{% help "Components" %}
+  <p><strong>Every software component currently running across the fleet</strong>,
+  sourced from Trivy SbomReports. Each row is one unique package URL (purl);
+  two versions of the same library appear as two rows.</p>
+  <p><strong>How data:</strong> Trivy Operator emits one SbomReport per
+  workload-container; KubePosture ingests it per Image (deduplicated cross-cluster).
+  A component is "active" iff its image is currently deployed somewhere — driven
+  by the existing image-deployment tracking, not a separate flag.</p>
+  <p><strong>How to use:</strong> Search by name to find a package, or paste a
+  known-bad purl/name from a security advisory to see which workloads have it
+  deployed. Click a row for affected images and workloads. Toggle
+  <em>Include undeployed</em> to also search historical inventory.</p>
+{% endhelp %}
+
+{% include "components/_summary_tiles.html" %}
+
+<!-- Filter form -->
+<form id="components-filters" method="get" class="card mb-3"
+      hx-get="{% url 'components-list' %}"
+      hx-target="#component-rows"
+      hx-headers='{"HX-Target": "component-rows"}'
+      hx-push-url="true"
+      hx-trigger="change, submit, keyup changed delay:400ms from:input[type=text]">
+  <div class="card-body">
+    <div class="row g-2 align-items-center flex-nowrap overflow-auto">
+      <div class="col-auto">
+        <input type="text" name="name" class="form-control form-control-sm"
+               placeholder="search name, version, or purl…" value="{{ filters.name }}" style="min-width: 18rem;">
+      </div>
+      <div class="col-auto">
+        <select name="ecosystem" class="form-select form-select-sm">
+          <option value="">Any ecosystem</option>
+          {% for eco in ecosystems %}
+            <option value="{{ eco }}"{% if filters.ecosystem == eco %} selected{% endif %}>{{ eco }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-auto">
+        <select name="cluster" class="form-select form-select-sm">
+          <option value="">Any cluster</option>
+          {% for c in clusters %}
+            <option value="{{ c }}"{% if filters.cluster == c %} selected{% endif %}>{{ c }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-auto">
+        <label class="form-check form-switch m-0" title="Include components from currently-undeployed images.">
+          <input type="checkbox" name="include_inactive" value="1" class="form-check-input"
+                 {% if filters.include_inactive %}checked{% endif %}>
+          <span class="form-check-label">Include undeployed</span>
+        </label>
+      </div>
+      <div class="col-auto ms-auto">
+        <a href="{% url 'components-list' %}" class="btn btn-sm btn-outline-secondary">Clear</a>
+      </div>
+    </div>
+    <input type="hidden" name="sort" value="{{ filters.sort }}">
+    <input type="hidden" name="dir" value="{{ filters.dir }}">
+  </div>
+</form>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table">
+      <thead>
+        <tr>
+          {% include "workloads/_sort_header.html" with col="name" label="Name" align="" %}
+          {% include "workloads/_sort_header.html" with col="version" label="Version" align="" %}
+          {% include "workloads/_sort_header.html" with col="ecosystem" label="Ecosystem" align="" %}
+          <th>Purl</th>
+          {% include "workloads/_sort_header.html" with col="image_count" label="Images" align="text-end" %}
+          {% include "workloads/_sort_header.html" with col="workload_count" label="Workloads" align="text-end" %}
+          {% include "workloads/_sort_header.html" with col="cluster_count" label="Clusters" align="text-end" %}
+        </tr>
+      </thead>
+      <tbody id="component-rows">
+        {% include "components/_rows.html" %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Component detail offcanvas (loaded via HTMX from row clicks) -->
+<div class="offcanvas offcanvas-end" tabindex="-1" id="component-detail-offcanvas"
+     aria-labelledby="component-detail-offcanvas-label"
+     style="--tblr-offcanvas-width: 720px; width: 720px;">
+  <div class="offcanvas-header">
+    <h2 class="offcanvas-title" id="component-detail-offcanvas-label">Component</h2>
+    <button type="button" class="btn-close" data-bs-dismiss="offcanvas" aria-label="Close"></button>
+  </div>
+  <div class="offcanvas-body">
+    <p class="text-muted">Click a component row to load details.</p>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+  (function() {
+    var form = document.getElementById('components-filters');
+    if (!form) return;
+    var sortIn = form.querySelector('[name="sort"]');
+    var dirIn  = form.querySelector('[name="dir"]');
+    document.querySelectorAll('th.sortable').forEach(function(th) {
+      th.addEventListener('click', function() {
+        var col = th.dataset.sortCol;
+        if (sortIn.value === col) {
+          dirIn.value = (dirIn.value === 'asc') ? 'desc' : 'asc';
+        } else {
+          sortIn.value = col;
+          dirIn.value = 'asc';
+        }
+        htmx.trigger(form, 'submit');
+      });
+    });
+  })();
+</script>
+{% endblock %}

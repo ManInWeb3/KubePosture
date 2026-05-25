@@ -1,0 +1,75 @@
+{% load pagination_tags %}
+{% comment %}
+Shared paginator footer for list-table partials.
+
+Required context vars:
+  page_obj    — Django page object
+  request_qs  — URL-encoded querystring (no `page=`)
+  hx_target   — id of the <tbody> to swap (e.g. "component-rows", "finding-rows")
+  noun        — pluralised entity name for the count line (e.g. "components")
+  colspan     — number of columns in the table for the wrapping <td>
+{% endcomment %}
+{% if page_obj.has_other_pages %}
+<tr>
+  <td colspan="{{ colspan }}">
+    <nav class="d-flex align-items-center justify-content-between"
+         aria-label="Pagination">
+      <span class="text-muted small">
+        Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}
+        ({{ page_obj.paginator.count }} {{ noun }})
+      </span>
+      <ul class="pagination pagination-sm m-0">
+        {# Prev #}
+        {% if page_obj.has_previous %}
+        <li class="page-item">
+          <a class="page-link"
+             href="?{{ request_qs }}&page={{ page_obj.previous_page_number }}"
+             hx-get="?{{ request_qs }}&page={{ page_obj.previous_page_number }}"
+             hx-target="#{{ hx_target }}"
+             hx-headers='{"HX-Target": "{{ hx_target }}"}'
+             hx-push-url="true"
+             aria-label="Previous page">‹</a>
+        </li>
+        {% else %}
+        <li class="page-item disabled"><span class="page-link">‹</span></li>
+        {% endif %}
+
+        {# Numbered pages with ellipsis #}
+        {% for p in page_obj|elided_page_range %}
+          {% if p == page_obj.paginator.ELLIPSIS %}
+            <li class="page-item disabled"><span class="page-link">…</span></li>
+          {% elif p == page_obj.number %}
+            <li class="page-item active" aria-current="page">
+              <span class="page-link">{{ p }}</span>
+            </li>
+          {% else %}
+            <li class="page-item">
+              <a class="page-link"
+                 href="?{{ request_qs }}&page={{ p }}"
+                 hx-get="?{{ request_qs }}&page={{ p }}"
+                 hx-target="#{{ hx_target }}"
+                 hx-headers='{"HX-Target": "{{ hx_target }}"}'
+                 hx-push-url="true">{{ p }}</a>
+            </li>
+          {% endif %}
+        {% endfor %}
+
+        {# Next #}
+        {% if page_obj.has_next %}
+        <li class="page-item">
+          <a class="page-link"
+             href="?{{ request_qs }}&page={{ page_obj.next_page_number }}"
+             hx-get="?{{ request_qs }}&page={{ page_obj.next_page_number }}"
+             hx-target="#{{ hx_target }}"
+             hx-headers='{"HX-Target": "{{ hx_target }}"}'
+             hx-push-url="true"
+             aria-label="Next page">›</a>
+        </li>
+        {% else %}
+        <li class="page-item disabled"><span class="page-link">›</span></li>
+        {% endif %}
+      </ul>
+    </nav>
+  </td>
+</tr>
+{% endif %}

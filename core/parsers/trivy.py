@@ -17,6 +17,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from core.constants import Category, Severity, Source, TRIVY_SEVERITY_MAP
+from core.purl import normalize_purl, purl_ecosystem
 from core.signals import signal_for_trivy_avd
 
 
@@ -425,6 +426,91 @@ def parse_infra_assessment_report(obj: dict) -> dict:
     }
 
 
+# ── SbomReport ----------------------------------------------------
+
+
+def _component_property(comp: dict, name: str) -> str:
+    """Pull a value from CycloneDX `properties[]` by name."""
+    for p in comp.get("properties") or []:
+        if p.get("name") == name:
+            return p.get("value") or ""
+    return ""
+
+
+def _component_license(comp: dict) -> str:
+    """CycloneDX `licenses[].license.{id,name}` — first one wins."""
+    for lic in comp.get("licenses") or []:
+        sub = lic.get("license") or {}
+        val = sub.get("id") or sub.get("name") or ""
+        if val:
+            return val
+    return ""
+
+
+def _component_supplier(comp: dict) -> str:
+    sup = comp.get("supplier") or {}
+    return sup.get("name") or ""
+
+
+def parse_sbom_report(obj: dict) -> dict:
+    """Returns:
+        {
+          "kind": "trivy.SbomReport",
+          "namespace", "resource_kind", "resource_name", "container_name",
+          "image_ref", "image_digest",
+          "components": [<component dicts ready for SbomComponent upsert>],
+        }
+
+    Components without a `purl` (e.g. the root container/operating-system
+    metadata entry) are skipped. Trivy emits a top-level `metadata.component`
+    that describes the image itself and a `components[]` list that includes
+    OS packages and application dependencies — we only persist the latter.
+    """
+    namespace, kind, name = _resource_identity(obj)
+    container = _container_name(obj)
+    artifact = _artifact(obj)
+    report = obj.get("report") or {}
+
+    bom = report.get("components") or {}
+    raw_components = bom.get("components") or []
+
+    components: list[dict] = []
+    for c in raw_components:
+        purl = normalize_purl(c.get("purl") or "")
+        if not purl:
+            continue
+        name_ = c.get("name") or ""
+        version = c.get("version") or ""
+        ecosystem = (
+            purl_ecosystem(purl)
+            or _component_property(c, "aquasecurity:trivy:PkgType")
+        )
+        components.append({
+            "purl": purl,
+            "name": name_,
+            "version": version,
+            "ecosystem": ecosystem,
+            "component_type": c.get("type") or "",
+            "supplier": _component_supplier(c),
+            "license": _component_license(c),
+            "layer_digest": _component_property(
+                c, "aquasecurity:trivy:LayerDigest"
+            ),
+            "raw": c,
+        })
+
+    return {
+        "kind": "trivy.SbomReport",
+        "namespace": namespace,
+        "resource_kind": kind,
+        "resource_name": name,
+        "container_name": container,
+        "image_ref": _image_ref(artifact),
+        "image_digest": _image_digest(artifact),
+        "components": components,
+    }
+
+
 # ── Dispatch -------------------------------------------------------
 
 PARSERS_BY_KIND = {
@@ -435,4 +521,5 @@ PARSERS_BY_KIND = {
     "trivy.ClusterRbacAssessmentReport": parse_cluster_rbac_assessment_report,
     "trivy.InfraAssessmentReport": parse_infra_assessment_report,
     "trivy.ClusterComplianceReport": parse_infra_assessment_report,  # similar shape
+    "trivy.SbomReport": parse_sbom_report,
 }

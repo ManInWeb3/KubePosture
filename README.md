@@ -5,6 +5,11 @@ from each cluster, enriches with EPSS + KEV, scores each finding by
 urgency, and exposes a per-`(workload, image)` view of what to fix
 first.
 
+Also ingests Trivy `SbomReport` CRDs into a per-image component inventory
+(`/components/`), pulls supply-chain IoC feeds (Aikido Intel + OSV.dev),
+and matches them against deployed components — malicious-publish events
+surface as IMMEDIATE-priority findings alongside CVEs.
+
 Authoritative design lives in
 [`Architecture/dev_docs/`](Architecture/dev_docs/) and the executable
 test bundle in
@@ -230,6 +235,67 @@ python manage.py enrich_from_file --source epss /path/to/epss_scores.csv
 
 ---
 
+## Supply-chain detection (Aikido + OSV)
+
+Layered on top of Trivy SBOM ingest. Each cluster import now POSTs
+`SbomReport` CRDs alongside the existing scan kinds, which populate the
+`SbomComponent` table — one row per `(image, purl)`. Two feeds pull
+malicious-publish IoCs and a matcher joins them against currently-
+deployed components.
+
+```bash
+# Pull IoC feeds (writes SupplyChainIoc rows, runs the matcher inline).
+python manage.py enrich_fetch --source aikido            # ~15 min cadence in prod
+python manage.py enrich_fetch --source osv-supply-chain  # ~hourly in prod
+
+# Run the matcher manually (e.g. after seeding IoCs by hand for testing).
+python manage.py match_supply_chain
+python manage.py match_supply_chain --purl pkg:npm/lodash@4.17.21
+
+# Manual search of the SBOM inventory.
+python manage.py search_sbom --purl pkg:npm/lodash@4.17.21
+python manage.py search_sbom --prefix pkg:npm/eslint-config-prettier
+python manage.py search_sbom --purls-file /path/to/iocs.txt
+```
+
+OSV uses per-ecosystem bulk-zip snapshots
+(`osv-vulnerabilities.storage.googleapis.com/<eco>/all.zip`) with
+conditional GET. The fetcher only downloads ecosystems we actually
+deploy — read from `SbomComponent.ecosystem` distinct. Filtered to
+malicious-publish entries (`MAL-*` IDs or
+`database_specific.malicious=true`).
+
+Aikido's old free feed (`intel.aikido.dev/api/?format=json`) was
+retired in favour of an OAuth-gated endpoint
+(`app.aikido.dev/api/public/v1/research/malware/packages`). The
+default `AIKIDO_INTEL_URL` is therefore empty — the cron skips
+cleanly until an operator points it at a feed they can read (private
+mirror, internal proxy, or an org-specific endpoint with a shape
+compatible with [`fetch_aikido_iocs`](core/services/enrichment.py#L521)).
+OSV.dev remains the primary public supply-chain feed and works out
+of the box.
+
+Matches become normal `Finding` rows with
+`source=supply_chain_ioc`, `category=supply_chain`,
+`effective_priority=immediate`, and show up in `/findings/?source=supply_chain_ioc`.
+
+### End-to-end smoke test
+
+Seed a synthetic cluster + workload + image + component + IoC and run
+the matcher in one shot:
+
+```bash
+python manage.py seed_supply_chain_test               # default purl
+python manage.py seed_supply_chain_test --purl pkg:pypi/ctx@0.1.2
+python manage.py seed_supply_chain_test --use-existing-purl pkg:npm/lodash@4.17.21
+python manage.py seed_supply_chain_test --cleanup     # remove test rows
+```
+
+Verify in the UI at `/findings/?source=supply_chain_ioc` and
+`/components/?name=<your-purl-substring>`.
+
+---
+
 ## Cadence — how often to run each command
 
 The table is what the production CronJobs do. For a local dev setup,
@@ -243,8 +309,12 @@ re-run on the same triggers (or just on demand).
 | `process_ingest_queue` | every 1–3 min (continuous) | Drains `IngestQueue`; reaps inline as marks finish draining |
 | `enrich_fetch --source kev` | daily | CISA KEV catalog refresh |
 | `enrich_fetch --source epss` | daily | first.org EPSS publishes daily |
+| `enrich_fetch --source aikido` | every 15 min | Aikido Intel malicious-publish feed; calls the matcher inline |
+| `enrich_fetch --source osv-supply-chain` | hourly | OSV.dev per-ecosystem bulk-zip snapshots; conditional GET keeps off-cycle ticks cheap |
+| `match_supply_chain` | on-demand | Re-run matcher without re-fetching feeds (after seeding test IoCs, or after a matching-logic change) |
 | `reap_safety_net` | hourly | Catches stuck `state=draining` ImportMarks the inline reaper missed |
 | `snapshot_capture` | daily (after enrichment + reaper) | End-of-day heartbeat at global / cluster / namespace / workload scopes; feeds trend charts |
+| `prune_stale_data` | daily | DB hygiene — prunes `IngestQueue` (14d), `ImportMark` REAPED (90d), `ScanInconsistency` (30d), stale `Finding` rows (180d), `SbomComponent` on long-undeployed images (90d). Configurable per target. |
 | `prune_snapshots` | daily or weekly | Deletes Snapshot rows older than `SNAPSHOT_RETENTION_DAYS` (default 365) |
 | `recalculate_priorities` | on-demand or weekly | After a scoring tweak in `core/urgency.py`, or after a bulk enrichment refresh |
 | `reset_runtime_data --yes` | manual only | Wipe runtime tables (workloads / findings / queue / marks / snapshots) while preserving Cluster + IngestToken + EPSS/KEV |
@@ -301,9 +371,16 @@ Each scenario:
 | Force a priority recompute | `python manage.py recalculate_priorities [--cluster <name>]` |
 | Capture a daily snapshot | `python manage.py snapshot_capture` |
 | Prune old snapshots | `python manage.py prune_snapshots [--dry-run]` |
+| Daily DB hygiene (all targets) | `python manage.py prune_stale_data [--dry-run]` |
+| Dry-run DB hygiene (preview deletions) | `python manage.py prune_stale_data --dry-run` |
 | Sweep stuck draining marks | `python manage.py reap_safety_net` |
 | Fetch latest EPSS / KEV | `python manage.py enrich_fetch --source {epss,kev}` |
 | Load EPSS / KEV from file (offline) | `python manage.py enrich_from_file --source {epss,kev} <path>` |
+| Pull supply-chain IoC feed (Aikido) | `python manage.py enrich_fetch --source aikido` |
+| Pull supply-chain IoC feed (OSV bulk zip) | `python manage.py enrich_fetch --source osv-supply-chain` |
+| Re-run the supply-chain matcher | `python manage.py match_supply_chain [--purl <purl>]` |
+| Search the SBOM inventory for a purl | `python manage.py search_sbom --purl <purl> \| --prefix <pfx> \| --purls-file <path>` |
+| Seed an end-to-end supply-chain test | `python manage.py seed_supply_chain_test [--purl <purl>] [--cleanup]` |
 | Seed RBAC groups | `python manage.py setup_rbac` |
 | Run scenario tests | `TESTING_HARNESS_ENABLED=true pytest tests/scenario_runner/` |
 | System check | `python manage.py check` |

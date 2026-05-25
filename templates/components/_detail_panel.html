@@ -1,0 +1,102 @@
+<div class="offcanvas-header pb-1">
+  <div>
+    <h2 class="offcanvas-title mb-0">
+      <strong>{{ c.name }}</strong>
+      <code class="small text-muted ms-2">{{ c.version }}</code>
+    </h2>
+    <div class="text-muted small mt-1">
+      <code>{{ c.purl }}</code>
+    </div>
+  </div>
+  <button type="button" class="btn-close" data-bs-dismiss="offcanvas" aria-label="Close"></button>
+</div>
+<div class="offcanvas-body pt-2">
+  <div class="mb-3 d-flex flex-wrap gap-2">
+    {% if c.ecosystem %}
+      <span class="badge bg-secondary-lt text-secondary">{{ c.ecosystem }}</span>
+    {% endif %}
+    {% if c.component_type %}
+      <span class="badge bg-secondary-lt text-secondary">{{ c.component_type }}</span>
+    {% endif %}
+    {% if c.license %}
+      <span class="badge bg-azure-lt text-azure">license: {{ c.license }}</span>
+    {% endif %}
+    {% if c.supplier %}
+      <span class="badge bg-azure-lt text-azure">supplier: {{ c.supplier }}</span>
+    {% endif %}
+  </div>
+
+  <h3 class="h4 mt-3">Deployed in</h3>
+  {% for entry in c.images %}
+    <div class="card mb-3">
+      <div class="card-header py-2">
+        <div class="d-flex flex-wrap align-items-baseline gap-2">
+          <strong>{{ entry.image.ref|default:"(no ref)" }}</strong>
+          <code class="small text-muted">{{ entry.image.digest|slice:":24" }}…</code>
+        </div>
+      </div>
+      <div class="card-body p-0">
+        {% if entry.workloads %}
+          <table class="table table-vcenter table-sm m-0">
+            <thead>
+              <tr>
+                <th>Cluster</th>
+                <th>Namespace</th>
+                <th>Workload</th>
+                <th>Container</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for w in entry.workloads %}
+                <tr>
+                  <td>{{ w.workload.cluster.name }}</td>
+                  <td>{% if w.workload.namespace %}{{ w.workload.namespace.name }}{% else %}—{% endif %}</td>
+                  <td>
+                    <a href="{% url 'workloads-detail' w.workload.kind w.workload.name %}?cluster={{ w.workload.cluster.name }}"
+                       class="text-reset">
+                      <code class="small">{{ w.workload.kind }}/{{ w.workload.name }}</code>
+                    </a>
+                  </td>
+                  <td><code class="small">{{ w.container_name|default:"—" }}</code></td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <div class="p-3 text-muted small">No currently-deployed workloads — image is historical.</div>
+        {% endif %}
+      </div>
+    </div>
+  {% endfor %}
+
+  {% if c.other_versions %}
+    <h3 class="h4 mt-4">Other versions of <code>{{ c.name }}</code></h3>
+    <table class="table table-vcenter table-sm">
+      <thead>
+        <tr>
+          <th>Version</th>
+          <th>Purl</th>
+          <th class="text-end">Images</th>
+          <th class="text-end">Workloads</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for v in c.other_versions %}
+          <tr>
+            <td><code class="small">{{ v.version }}</code></td>
+            <td>
+              <a href="?purl={{ v.purl|urlencode }}{% if selected_cluster %}&cluster={{ selected_cluster }}{% endif %}"
+                 hx-get="{% url 'components-detail-panel' %}?purl={{ v.purl|urlencode }}{% if selected_cluster %}&cluster={{ selected_cluster }}{% endif %}"
+                 hx-target="#component-detail-offcanvas .offcanvas-body"
+                 hx-swap="innerHTML">
+                <code class="small text-muted">{{ v.purl }}</code>
+              </a>
+            </td>
+            <td class="text-end">{{ v.image_count }}</td>
+            <td class="text-end">{{ v.workload_count }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</div>

@@ -28,6 +28,12 @@ from datetime import timedelta
 from core.api.auth import generate_token
 from core.constants import PriorityBand, Source, WorkloadKind
 from core.models import Cluster, Finding, IngestToken, Namespace, UserPreference
+from core.services.components import (
+    component_detail,
+    list_components,
+    list_ecosystems,
+    summary_counts,
+)
 from core.services.inventory import (
     findings_for_workload_image,
     list_findings,
@@ -436,6 +442,101 @@ class FindingDetailPanelView(LoginRequiredMixin, View):
             "resource_kind": details.get("resource_kind") or "",
             "resource_name": details.get("resource_name") or "",
             "extra_details": extra_details,
+        })
+
+
+# ── Components (SBOM browser) ─────────────────────────────────────
+
+
+class ComponentsListView(LoginRequiredMixin, View):
+    """`/components/` — fleet-wide SBOM browser.
+
+    Rows are grouped by `purl` (so two different versions of the same
+    name show as separate rows). Counts reflect currently-deployed
+    images only unless `?include_inactive=1`. Cluster filter scopes
+    both the component selection AND the count joins.
+    """
+
+    template_name = "components/list.html"
+
+    def get(self, request):
+        params = request.GET
+        filters = {
+            "name":      params.get("name", ""),
+            "ecosystem": params.get("ecosystem", ""),
+            "cluster":   params.get("cluster", ""),
+            "sort":      params.get("sort", ""),
+            "dir":       params.get("dir") or "asc",
+            "include_inactive": "1" if params.get("include_inactive") == "1" else "",
+        }
+
+        cluster = None
+        if filters["cluster"]:
+            cluster = Cluster.objects.filter(name=filters["cluster"]).first()
+            if cluster is None:
+                filters["cluster"] = ""
+
+        rows = list_components(
+            name_contains=filters["name"] or None,
+            ecosystem=filters["ecosystem"] or None,
+            cluster=cluster,
+            include_inactive=bool(filters["include_inactive"]),
+            sort=filters["sort"] or None,
+            sort_dir=filters["dir"],
+        )
+
+        page = Paginator(rows, 50).get_page(params.get("page") or 1)
+
+        if _is_htmx(request) and request.headers.get("HX-Target") == "component-rows":
+            return render(request, "components/_rows.html", {
+                "page_obj": page,
+                "components": page.object_list,
+                "filters": filters,
+                "request_qs": _qs_without_page(request.GET),
+            })
+
+        return render(request, self.template_name, {
+            "nav": "components",
+            "page_obj": page,
+            "components": page.object_list,
+            "filters": filters,
+            "ecosystems": list_ecosystems(cluster=cluster),
+            "clusters": list(Cluster.objects.order_by("name").values_list("name", flat=True)),
+            "summary": summary_counts(cluster=cluster),
+            "request_qs": _qs_without_page(request.GET),
+        })
+
+
+class ComponentDetailPanelView(LoginRequiredMixin, View):
+    """`/components/detail/?purl=<urlencoded>` — HTMX offcanvas fragment.
+
+    Shows affected images (with per-cluster workload lists) and other
+    versions of the same name observed in the fleet.
+    """
+
+    template_name = "components/_detail_panel.html"
+
+    def get(self, request):
+        purl = request.GET.get("purl") or ""
+        if not purl:
+            raise Http404("purl is required")
+
+        cluster_name = request.GET.get("cluster") or ""
+        cluster = (
+            Cluster.objects.filter(name=cluster_name).first()
+            if cluster_name else None
+        )
+        include_inactive = request.GET.get("include_inactive") == "1"
+
+        detail = component_detail(
+            purl, cluster=cluster, include_inactive=include_inactive,
+        )
+        if detail is None:
+            raise Http404("component not found")
+
+        return render(request, self.template_name, {
+            "c": detail,
+            "selected_cluster": cluster_name,
         })
 
 
