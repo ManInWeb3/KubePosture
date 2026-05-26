@@ -8,3 +8,4 @@ psycopg[binary]>=3.2,<4
 pyyaml>=6.0,<7
 kubernetes>=32,<33
 prometheus-client>=0.20,<1
+PyJWT[crypto]>=2.8,<3

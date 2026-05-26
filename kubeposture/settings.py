@@ -57,6 +57,7 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "core.middleware.jwt_auth.ProxyJWTAuthMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -100,6 +101,21 @@ LOGOUT_REDIRECT_URL = "/accounts/login/"
 AUTH_PASSWORD_VALIDATORS = [] if DEBUG else [
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
 ]
+
+# ── Proxy-forwarded JWT auth (optional) ─────────────────────────
+# Generic header-JWT auth for reverse-proxy front-ends that
+# authenticate users upstream and forward a signed JWT (Pomerium,
+# oauth2-proxy JWT mode, Cloudflare Access, Authelia jwt mode,
+# Traefik forward-auth + OIDC).
+# When enabled, the middleware auto-creates a Django User in the
+# `viewer` group on first login. See docs/auth-jwt-proxy.md.
+
+JWT_AUTH_ENABLED = env.bool("JWT_AUTH_ENABLED", default=False)
+JWT_AUTH_HEADER = env("JWT_AUTH_HEADER", default="X-Pomerium-Jwt-Assertion")
+JWT_AUTH_JWKS_URL = env("JWT_AUTH_JWKS_URL", default="")
+JWT_AUTH_AUDIENCE = env("JWT_AUTH_AUDIENCE", default="")
+JWT_AUTH_ISSUER = env("JWT_AUTH_ISSUER", default="")
+JWT_AUTH_JWKS_CACHE_TTL = env.int("JWT_AUTH_JWKS_CACHE_TTL", default=3600)
 
 # ── Static files ────────────────────────────────────────────────
 

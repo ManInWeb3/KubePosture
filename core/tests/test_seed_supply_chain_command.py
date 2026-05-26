@@ -20,6 +20,69 @@ from core.models import (
 
 
 @pytest.mark.django_db
+def test_known_iocs_inserts_curated_list_and_no_findings_on_empty_db():
+    """--known-iocs only inserts IoC rows; no synthetic component is seeded,
+    so on a clean DB the matcher finds nothing — exactly the desired behaviour."""
+    from core.management.commands.seed_supply_chain_test import (
+        KNOWN_FEED,
+        KNOWN_HISTORICAL_IOCS,
+    )
+
+    out = io.StringIO()
+    call_command("seed_supply_chain_test", "--known-iocs", stdout=out, stderr=io.StringIO())
+
+    rows = SupplyChainIoc.objects.filter(feed_source=KNOWN_FEED)
+    assert rows.count() == len(KNOWN_HISTORICAL_IOCS)
+    # Every advisory id from the curated list landed in the DB.
+    expected_ids = {ioc["advisory_id"] for ioc in KNOWN_HISTORICAL_IOCS}
+    assert set(rows.values_list("advisory_id", flat=True)) == expected_ids
+    # No components seeded → no findings.
+    assert Finding.objects.filter(source="supply_chain_ioc").count() == 0
+    assert "No historical purls match" in out.getvalue()
+
+
+@pytest.mark.django_db
+def test_known_iocs_fires_finding_when_purl_already_deployed():
+    """If a deployed image happens to contain one of the historical purls,
+    --known-iocs creates a Finding for it."""
+    from core.management.commands.seed_supply_chain_test import KNOWN_HISTORICAL_IOCS
+
+    # Pick the first known purl and pre-seed it as if a real SBOM import
+    # had brought it in (via the existing --use-existing-purl path is
+    # awkward because we want the matcher to fire on the --known-iocs run).
+    target_purl = KNOWN_HISTORICAL_IOCS[0]["purl"]  # event-stream@3.3.6
+    # Seed cluster→workload→image→component for that purl.
+    call_command(
+        "seed_supply_chain_test", "--purl", target_purl,
+        stdout=io.StringIO(), stderr=io.StringIO(),
+    )
+    # Drop the synthetic IoC the previous command inserted so we can verify
+    # the --known-iocs run creates the real one.
+    SupplyChainIoc.objects.filter(feed_source="manual-test").delete()
+    Finding.objects.filter(source="supply_chain_ioc").delete()
+
+    out = io.StringIO()
+    call_command("seed_supply_chain_test", "--known-iocs", stdout=out, stderr=io.StringIO())
+
+    body = out.getvalue()
+    assert "1 historical purl(s) match deployed components" in body
+    f = Finding.objects.get(source="supply_chain_ioc")
+    assert f.vuln_id == KNOWN_HISTORICAL_IOCS[0]["advisory_id"]
+    assert f.effective_priority == "immediate"
+
+
+@pytest.mark.django_db
+def test_cleanup_removes_known_iocs_too():
+    from core.management.commands.seed_supply_chain_test import KNOWN_FEED
+
+    call_command("seed_supply_chain_test", "--known-iocs", stdout=io.StringIO(), stderr=io.StringIO())
+    assert SupplyChainIoc.objects.filter(feed_source=KNOWN_FEED).exists()
+
+    call_command("seed_supply_chain_test", "--cleanup", stdout=io.StringIO(), stderr=io.StringIO())
+    assert not SupplyChainIoc.objects.filter(feed_source=KNOWN_FEED).exists()
+
+
+@pytest.mark.django_db
 def test_seed_creates_full_chain_and_finding():
     out = io.StringIO()
     call_command("seed_supply_chain_test", stdout=out, stderr=io.StringIO())

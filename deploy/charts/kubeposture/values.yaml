@@ -23,6 +23,16 @@ app:
     LOG_LEVEL: "INFO"
     INGEST_QUEUE_MAX_ATTEMPTS: "3"
     INTERNAL_INGRESS_CLASSES: ""  # CSV of ingress class names treated as not public, e.g. "pomerium,nginx-internal"
+    # -- Proxy-forwarded JWT auth. When JWT_AUTH_ENABLED="true", requests
+    # carrying a valid JWT in JWT_AUTH_HEADER auto-create a Django User in
+    # the `viewer` group and start a session. Importer paths bypass this.
+    # Defaults shaped for Pomerium; adjust header/JWKS for oauth2-proxy /
+    # Cloudflare Access / Authelia. See docs/auth-jwt-proxy.md.
+    # JWT_AUTH_ENABLED: "true"
+    # JWT_AUTH_HEADER: "X-Pomerium-Jwt-Assertion"
+    # JWT_AUTH_JWKS_URL: "https://authenticate.pomerium.someorg.xyz/.well-known/pomerium/jwks.json"
+    # JWT_AUTH_AUDIENCE: "kubeposture.someorg.xyz"
+    # JWT_AUTH_ISSUER: "authenticate.pomerium.someorg.xyz"
     PROMETHEUS_MULTIPROC_DIR: "/tmp/prom_multiproc"
     METRICS_BUSINESS_TTL_SECONDS: "300"   # business gauges cached this long; finding counts only change when imports complete
     # TTL for the in-flight-import "lock". An open/draining ImportMark
