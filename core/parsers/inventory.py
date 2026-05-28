@@ -9,9 +9,7 @@ skipped.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any
 
 from django.conf import settings
 from django.db import transaction

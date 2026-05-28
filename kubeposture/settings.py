@@ -4,7 +4,6 @@ KubePosture Django settings.
 All configuration via environment variables (django-environ).
 See .env.example for available settings.
 """
-import os
 from pathlib import Path
 
 import environ

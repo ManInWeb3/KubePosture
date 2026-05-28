@@ -1,10 +1,7 @@
 """Tests for `core.services.supply_chain_matcher.match_iocs_to_components`."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 import pytest
-from django.utils import timezone as djtz
 
 from core.constants import (
     Category,
@@ -154,12 +151,12 @@ def test_matcher_cross_feed_produces_separate_findings():
     _observation(w, img, deployed=True)
     _component(img, "pkg:npm/lodash@4.17.21")
     _ioc("pkg:npm/lodash@4.17.21", feed="osv", advisory_id="MAL-osv-1")
-    _ioc("pkg:npm/lodash@4.17.21", feed="aikido", advisory_id="AIKIDO-1")
+    _ioc("pkg:npm/lodash@4.17.21", feed="vendor", advisory_id="VENDOR-1")
 
     match_iocs_to_components()
     findings = list(Finding.objects.order_by("vuln_id"))
     assert len(findings) == 2
-    assert {f.vuln_id for f in findings} == {"AIKIDO-1", "MAL-osv-1"}
+    assert {f.vuln_id for f in findings} == {"VENDOR-1", "MAL-osv-1"}
 
 
 @pytest.mark.django_db
@@ -346,9 +343,9 @@ def test_matcher_picks_up_redeployed_workload():
 
 
 @pytest.mark.django_db
-def test_matcher_two_aikido_advisory_ids_same_purl():
-    """Aikido publishes separate IDs for separate disclosures of the
-    same compromise → two findings, both tagged AIKIDO.
+def test_matcher_two_advisory_ids_same_purl():
+    """A feed publishes separate IDs for separate disclosures of the
+    same compromise → two findings, one per advisory_id.
     """
     c = _cluster("c1")
     ns = _ns(c)
@@ -356,13 +353,13 @@ def test_matcher_two_aikido_advisory_ids_same_purl():
     img = _image("sha256:" + "a" * 64)
     _observation(w, img, deployed=True)
     _component(img, "pkg:npm/lodash@4.17.21")
-    _ioc("pkg:npm/lodash@4.17.21", feed="aikido", advisory_id="AIKIDO-disc-1")
-    _ioc("pkg:npm/lodash@4.17.21", feed="aikido", advisory_id="AIKIDO-disc-2")
+    _ioc("pkg:npm/lodash@4.17.21", feed="osv", advisory_id="MAL-disc-1")
+    _ioc("pkg:npm/lodash@4.17.21", feed="osv", advisory_id="MAL-disc-2")
 
     match_iocs_to_components()
     assert Finding.objects.count() == 2
     assert set(Finding.objects.values_list("vuln_id", flat=True)) == {
-        "AIKIDO-disc-1", "AIKIDO-disc-2",
+        "MAL-disc-1", "MAL-disc-2",
     }
 
 

@@ -248,3 +248,94 @@ def test_crd_listing_path_unaffected_by_typed_list_bug():
     assert len(out["VulnerabilityReport"]) >= 1
     assert out["VulnerabilityReport"][0]["kind"] == "VulnerabilityReport"
     assert out["VulnerabilityReport"][0]["apiVersion"] == "aquasecurity.github.io/v1alpha1"
+
+
+# ── _get retry behaviour ──────────────────────────────────────────
+# The pending poll is an idempotent GET; a single transient RST used to
+# fail the whole trigger tick ("pending poll FAILED (0): [Errno 104]
+# Connection reset by peer"). It now retries connection errors and 5xx
+# while still failing fast on 4xx.
+
+
+class _FakeResp:
+    """Minimal stand-in for the urlopen context manager."""
+
+    def __init__(self, status: int, body: str):
+        self.status = status
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self._body.encode()
+
+
+def _patch_get(mod, monkeypatch, side_effects):
+    """Wire mod.urlopen to a queue of side effects (callables or raises)
+    and neutralise backoff sleeps. Returns the call counter list."""
+    calls = []
+    seq = iter(side_effects)
+
+    def fake_urlopen(req, timeout=None):
+        calls.append(req)
+        nxt = next(seq)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return nxt
+
+    monkeypatch.setattr(mod, "urlopen", fake_urlopen)
+    monkeypatch.setattr(mod.time, "sleep", lambda *_: None)
+    return calls
+
+
+def test_get_retries_transient_connection_reset(monkeypatch):
+    """A single RST is absorbed: retry succeeds, caller sees 200."""
+    mod = _load_importer_module()
+    calls = _patch_get(
+        mod, monkeypatch,
+        [ConnectionResetError(104, "Connection reset by peer"),
+         _FakeResp(200, '{"pending": false}')],
+    )
+
+    ok, status, body = mod._get("https://x", "tok", "/api/v1/imports/pending/")
+
+    assert (ok, status, body) == (True, 200, '{"pending": false}')
+    assert len(calls) == 2  # failed once, retried once
+
+
+def test_get_exhausts_retries_then_reports_reset(monkeypatch):
+    """Persistent RST burns all attempts and returns the (0, reset) error
+    that check_pending prints — proving we tried more than once."""
+    mod = _load_importer_module()
+    calls = _patch_get(
+        mod, monkeypatch,
+        [ConnectionResetError(104, "Connection reset by peer")] * mod.GET_MAX_ATTEMPTS,
+    )
+
+    ok, status, body = mod._get("https://x", "tok", "/api/v1/imports/pending/")
+
+    assert ok is False
+    assert status == 0
+    assert "Connection reset by peer" in body
+    assert len(calls) == mod.GET_MAX_ATTEMPTS
+
+
+def test_get_fails_fast_on_4xx(monkeypatch):
+    """4xx (auth/not-found) is not transient — no retry."""
+    from urllib.error import HTTPError
+
+    mod = _load_importer_module()
+    calls = _patch_get(
+        mod, monkeypatch,
+        [HTTPError("https://x", 403, "Forbidden", {}, None)],
+    )
+
+    ok, status, _ = mod._get("https://x", "tok", "/api/v1/imports/pending/")
+
+    assert ok is False
+    assert status == 403
+    assert len(calls) == 1  # no retry on 4xx

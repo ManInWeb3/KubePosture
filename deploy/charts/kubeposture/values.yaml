@@ -43,10 +43,6 @@ app:
     # the workload-cluster job's activeDeadlineSeconds (900s) with 2x
     # headroom for slow networks.
     IMPORT_LOCK_TIMEOUT_SECONDS: "900"
-    # Aikido Intel feed URL — public JSON feed of malicious-publish IoCs.
-    # Override here if Aikido moves the endpoint; set to "" to disable
-    # the aikido fetcher entirely.
-    # AIKIDO_INTEL_URL: "https://intel.aikido.dev/api/?format=json"
 
 # Compliance framework loading is not implemented in this milestone.
 # The fixtures/ directory holds sample YAMLs but no `load_frameworks`
@@ -58,6 +54,11 @@ app:
 web:
   replicaCount: 2
   command:
+    # gthread (not sync) — sync workers handle one socket at a time, so two
+    # half-open / slow-reading connections froze the whole pod and the arbiter
+    # SIGABRT'd both workers together (see kubeposture_gunicorn_worker_aborts_total).
+    # gthread gives 2 × 4 = 8 concurrent slots per pod; a stalled recv() ties up
+    # one thread, not the whole worker.
     - gunicorn
     - -c
     - gunicorn.conf.py
@@ -66,6 +67,14 @@ web:
     - 0.0.0.0:8000
     - --workers
     - "2"
+    - --worker-class
+    - gthread
+    - --threads
+    - "4"
+    - --timeout
+    - "60"
+    - --graceful-timeout
+    - "30"
     - --access-logfile
     - "-"
   resources:
@@ -167,29 +176,12 @@ cronJobs:
         memory: 2Gi
     activeDeadlineSeconds: 600
 
-  # # Aikido Intel feed — npm/PyPI malicious-publish IoCs, fast-moving.
-  # # OPT-IN: Aikido retired their free public feed; the cron is a no-op
-  # # unless AIKIDO_INTEL_URL is set (env / Helm values.env) to a feed
-  # # you can read (private mirror, paid Aikido endpoint, or an internal
-  # # proxy that adapts the new OAuth-gated API to the legacy shape).
-  # # Default disabled so a fresh install doesn't run a noisy no-op
-  # # every 15 min; flip `enabled: true` once you've wired a URL.
-  # enrichAikido:
-  #   enabled: false
-  #   schedule: "*/15 * * * *"    # every 15 minutes (when enabled)
-  #   command: ["python", "manage.py", "enrich_fetch", "--source", "aikido"]
-  #   resources:
-  #     requests:
-  #       cpu: 50m
-  #       memory: 128Mi
-  #     limits:
-  #       cpu: 300m
-  #       memory: 256Mi
-  #   activeDeadlineSeconds: 300
-
   # OSV.dev per-ecosystem bulk-zip snapshots. Conditional GET keeps
   # off-cycle ticks cheap; only ecosystems present in SbomComponent
-  # are fetched. ~100MB npm zip on actual fetches, so memory is bumped.
+  # are fetched. The npm zip is hundreds of MB on actual fetches, but
+  # the fetcher streams it to a temp file and decompresses one advisory
+  # at a time, so peak memory stays flat — the limit below is headroom,
+  # not a working-set requirement.
   enrichOsvSupplyChain:
     enabled: true
     schedule: "5 * * * *"       # hourly at :05 to avoid coinciding with EPSS

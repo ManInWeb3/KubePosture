@@ -1,7 +1,7 @@
 """Fetch enrichment feeds + apply.
 
 Usage:
-  manage.py enrich_fetch --source {epss|kev|osv-supply-chain|aikido}
+  manage.py enrich_fetch --source {epss|kev|osv-supply-chain}
 
 Network failures are non-fatal: the underlying loaders honour the
 zero-input rule and leave existing rows intact.
@@ -9,7 +9,6 @@ zero-input rule and leave existing rows intact.
 from django.core.management.base import BaseCommand
 
 from core.services.enrichment import (
-    fetch_aikido_iocs,
     fetch_epss,
     fetch_kev,
     fetch_osv_supply_chain,
@@ -20,7 +19,6 @@ _FETCHERS = {
     "epss": fetch_epss,
     "kev": fetch_kev,
     "osv-supply-chain": fetch_osv_supply_chain,
-    "aikido": fetch_aikido_iocs,
 }
 
 

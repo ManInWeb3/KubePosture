@@ -1,12 +1,12 @@
 """SupplyChainIoc — one purl flagged as malicious by an external feed.
 
-Populated by feed fetchers (`core.services.enrichment.fetch_aikido_iocs`,
-`core.services.enrichment.fetch_osv_supply_chain`). One row per
-(feed_source, advisory_id, purl) — the same advisory affecting multiple
-purls produces multiple rows; the same purl flagged by two feeds
-produces two rows. Both intentional — the matcher emits one Finding
-per row (so users see "Aikido says malicious" and "OSV says malicious"
-as distinct evidence).
+Populated by feed fetchers (`core.services.enrichment.fetch_osv_supply_chain`).
+One row per (feed_source, advisory_id, purl) — the same advisory affecting
+multiple purls produces multiple rows; the same purl flagged by two feeds
+produces two rows. Both intentional — the matcher emits one Finding per row,
+so distinct evidence stays distinct. `feed_source` is a free-text label
+(currently only "osv"), kept generic so additional feeds can be added
+without a schema change.
 
 Matched against `SbomComponent.purl` by `core.services.supply_chain_matcher`.
 """
@@ -19,11 +19,11 @@ class SupplyChainIoc(models.Model):
     purl = models.CharField(max_length=512, db_index=True)
     feed_source = models.CharField(
         max_length=32,
-        help_text='Feed identifier — currently "osv" or "aikido".',
+        help_text='Feed identifier — currently "osv".',
     )
     advisory_id = models.CharField(
         max_length=128,
-        help_text="Feed-native ID: GHSA-xxxx, MAL-xxxx, AIKIDO-xxxx, etc.",
+        help_text="Feed-native ID: GHSA-xxxx, MAL-xxxx, etc.",
     )
     severity = models.CharField(max_length=16, blank=True)
     title = models.CharField(max_length=512, blank=True)

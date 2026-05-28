@@ -11,6 +11,7 @@ import io
 import json
 import logging
 import os
+import shutil
 import socket
 import tempfile
 import time
@@ -42,14 +43,6 @@ log = logging.getLogger("core.enrichment")
 EPSS_URL = "https://epss.cyentia.com/epss_scores-current.csv.gz"
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 OSV_ZIP_URL = "https://osv-vulnerabilities.storage.googleapis.com/{eco}/all.zip"
-# Aikido's old public feed (intel.aikido.dev/api/?format=json) was retired
-# in favour of an OAuth-gated endpoint at
-# app.aikido.dev/api/public/v1/research/malware/packages — so there is no
-# longer a working out-of-the-box URL. Operators wanting Aikido coverage
-# must set AIKIDO_INTEL_URL to a feed they can read (private mirror,
-# internal proxy, or org-specific compatible shape). Leaving the default
-# empty makes the cron a no-op instead of a 404 loop.
-AIKIDO_INTEL_URL_DEFAULT = ""
 
 # purl ecosystem (as stored on SbomComponent.ecosystem) → OSV bulk-zip path.
 PURL_TO_OSV = {
@@ -95,10 +88,22 @@ def _http_get(url: str) -> bytes | None:
     return None
 
 
-def _http_get_conditional(url: str, *, state_key: str) -> bytes | None:
-    """Fetch `url` with If-Modified-Since / If-None-Match headers from
-    `FeedFetchState[state_key]`. Returns:
-      - bytes on 200 (and persists new ETag/Last-Modified)
+def _http_download_conditional(
+    url: str, *, state_key: str, suffix: str = ".bin"
+) -> str | None:
+    """Conditional GET that **streams** the response body to a temp file
+    and returns its path (the caller must unlink it). Same
+    If-Modified-Since / If-None-Match handling as a plain conditional GET,
+    but the payload never lives in RAM as one object.
+
+    This matters for OSV's bulk zips (npm/all.zip is hundreds of MB):
+    `resp.read()` into a `bytes` plus the `io.BytesIO` copy briefly held
+    ~2× the compressed size and tripped the cgroup OOM killer. Streaming
+    to disk with `shutil.copyfileobj` keeps memory flat, and
+    `zipfile.ZipFile` then decompresses one entry at a time off the file.
+
+    Returns:
+      - path to a temp file on 200 (and persists new ETag/Last-Modified)
       - None on 304, network failure, or non-2xx
     """
     state = FeedFetchState.objects.filter(state_key=state_key).first()
@@ -113,18 +118,22 @@ def _http_get_conditional(url: str, *, state_key: str) -> bytes | None:
         try:
             req = Request(url, headers=headers)
             with urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
-                body = resp.read()
-                etag = resp.headers.get("ETag", "")
-                last_modified = resp.headers.get("Last-Modified", "")
+                fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+                try:
+                    with os.fdopen(fd, "wb") as out:
+                        shutil.copyfileobj(resp, out, length=1024 * 1024)
+                except BaseException:
+                    Path(tmp_path).unlink(missing_ok=True)
+                    raise
                 FeedFetchState.objects.update_or_create(
                     state_key=state_key,
                     defaults={
-                        "etag": etag,
-                        "last_modified": last_modified,
+                        "etag": resp.headers.get("ETag", ""),
+                        "last_modified": resp.headers.get("Last-Modified", ""),
                         "last_success_at": timezone.now(),
                     },
                 )
-                return body
+                return tmp_path
         except HTTPError as e:
             if e.code == 304:
                 log.info("enrichment.fetch.not_modified url=%s", url)
@@ -383,29 +392,6 @@ def _is_malicious_advisory(advisory: dict) -> bool:
     return False
 
 
-def _purl_from_osv_affected(affected: dict, osv_eco: str) -> str:
-    """Build a purl from an OSV `affected[].package` dict. Returns "" if
-    we can't construct one (e.g. ecosystem we don't map).
-    """
-    pkg = affected.get("package") or {}
-    if pkg.get("purl"):
-        return pkg["purl"]
-    name = pkg.get("name") or ""
-    if not name:
-        return ""
-    # Reverse-map OSV ecosystem → purl prefix.
-    reverse = {v: k for k, v in PURL_TO_OSV.items()}
-    purl_eco = reverse.get(osv_eco)
-    if not purl_eco:
-        return ""
-    # We don't know the affected version here — most malicious-publish
-    # advisories carry it inside `ranges[].events` (introduced/fixed),
-    # but for IoC matching we want a purl per affected version. Walk
-    # ranges below in the fetcher; this helper just builds the
-    # name-only purl for callers that already know the version.
-    return f"pkg:{purl_eco}/{name}"
-
-
 def _affected_versions(affected: dict) -> list[str]:
     """Pull explicit versions from an OSV `affected[]` block.
 
@@ -451,189 +437,76 @@ def fetch_osv_supply_chain() -> int:
     upserted = 0
     for osv_eco in osv_ecosystems:
         url = OSV_ZIP_URL.format(eco=osv_eco)
-        body = _http_get_conditional(url, state_key=f"osv:{osv_eco}")
-        if body is None:
+        zip_path = _http_download_conditional(
+            url, state_key=f"osv:{osv_eco}", suffix=".zip"
+        )
+        if zip_path is None:
             continue
         try:
-            zf = zipfile.ZipFile(io.BytesIO(body))
+            with zipfile.ZipFile(zip_path) as zf, transaction.atomic():
+                for name in zf.namelist():
+                    if not name.endswith(".json"):
+                        continue
+                    try:
+                        advisory = json.loads(zf.read(name))
+                    except (json.JSONDecodeError, OSError):
+                        continue
+                    if not _is_malicious_advisory(advisory):
+                        continue
+                    advisory_id = advisory.get("id") or ""
+                    if not advisory_id:
+                        continue
+                    severity = _osv_severity(advisory)
+                    title = (advisory.get("summary") or advisory_id)[:512]
+                    summary = advisory.get("details") or ""
+                    refs = advisory.get("references") or []
+                    advisory_url = ""
+                    for ref in refs:
+                        if ref.get("type") in ("ADVISORY", "WEB") and ref.get("url"):
+                            advisory_url = ref["url"][:512]
+                            break
+                    published_at = _parse_iso_dt(advisory.get("published"))
+                    reverse = {v: k for k, v in PURL_TO_OSV.items()}
+                    purl_eco = reverse.get(osv_eco)
+
+                    for affected in advisory.get("affected") or []:
+                        pkg = affected.get("package") or {}
+                        name_ = pkg.get("name") or ""
+                        explicit_purl = normalize_purl(pkg.get("purl") or "")
+                        versions = _affected_versions(affected)
+                        if explicit_purl and "@" in explicit_purl:
+                            purls = [explicit_purl]
+                        elif purl_eco and name_ and versions:
+                            purls = [f"pkg:{purl_eco}/{name_}@{v}" for v in versions]
+                        elif purl_eco and name_:
+                            # No explicit version → store name-only purl as
+                            # a sentinel; matcher uses prefix match for these.
+                            purls = [f"pkg:{purl_eco}/{name_}"]
+                        else:
+                            continue
+
+                        for purl in purls:
+                            purl = normalize_purl(purl)
+                            SupplyChainIoc.objects.update_or_create(
+                                feed_source="osv",
+                                advisory_id=advisory_id,
+                                purl=purl,
+                                defaults={
+                                    "severity": severity,
+                                    "title": title,
+                                    "summary": summary,
+                                    "advisory_url": advisory_url,
+                                    "published_at": published_at,
+                                    "raw": advisory,
+                                },
+                            )
+                            touched_purls.add(purl)
+                            upserted += 1
         except zipfile.BadZipFile:
             log.warning("enrichment.osv.bad_zip eco=%s", osv_eco)
-            continue
-
-        with transaction.atomic():
-            for name in zf.namelist():
-                if not name.endswith(".json"):
-                    continue
-                try:
-                    advisory = json.loads(zf.read(name))
-                except (json.JSONDecodeError, OSError):
-                    continue
-                if not _is_malicious_advisory(advisory):
-                    continue
-                advisory_id = advisory.get("id") or ""
-                if not advisory_id:
-                    continue
-                severity = _osv_severity(advisory)
-                title = (advisory.get("summary") or advisory_id)[:512]
-                summary = advisory.get("details") or ""
-                refs = advisory.get("references") or []
-                advisory_url = ""
-                for ref in refs:
-                    if ref.get("type") in ("ADVISORY", "WEB") and ref.get("url"):
-                        advisory_url = ref["url"][:512]
-                        break
-                published_at = _parse_iso_dt(advisory.get("published"))
-                reverse = {v: k for k, v in PURL_TO_OSV.items()}
-                purl_eco = reverse.get(osv_eco)
-
-                for affected in advisory.get("affected") or []:
-                    pkg = affected.get("package") or {}
-                    name_ = pkg.get("name") or ""
-                    explicit_purl = normalize_purl(pkg.get("purl") or "")
-                    versions = _affected_versions(affected)
-                    if explicit_purl and "@" in explicit_purl:
-                        purls = [explicit_purl]
-                    elif purl_eco and name_ and versions:
-                        purls = [f"pkg:{purl_eco}/{name_}@{v}" for v in versions]
-                    elif purl_eco and name_:
-                        # No explicit version → store name-only purl as
-                        # a sentinel; matcher uses prefix match for these.
-                        purls = [f"pkg:{purl_eco}/{name_}"]
-                    else:
-                        continue
-
-                    for purl in purls:
-                        purl = normalize_purl(purl)
-                        SupplyChainIoc.objects.update_or_create(
-                            feed_source="osv",
-                            advisory_id=advisory_id,
-                            purl=purl,
-                            defaults={
-                                "severity": severity,
-                                "title": title,
-                                "summary": summary,
-                                "advisory_url": advisory_url,
-                                "published_at": published_at,
-                                "raw": advisory,
-                            },
-                        )
-                        touched_purls.add(purl)
-                        upserted += 1
+        finally:
+            Path(zip_path).unlink(missing_ok=True)
 
     if touched_purls:
         match_iocs_to_components(touched_purls=touched_purls)
     return upserted
-
-
-def fetch_aikido_iocs() -> int:
-    """Pull the Aikido Intel JSON feed (env-configurable URL),
-    upsert `SupplyChainIoc` rows, and run the matcher.
-
-    Feed shape is intentionally lenient — we accept either a list of
-    entries at the top level or a wrapper `{"entries": [...]}` /
-    `{"data": [...]}` / `{"malware": [...]}`. Each entry should carry
-    `purl` (preferred) or `package` + `version` + `ecosystem`.
-    """
-    from core.services.supply_chain_matcher import match_iocs_to_components
-
-    url = os.environ.get("AIKIDO_INTEL_URL", AIKIDO_INTEL_URL_DEFAULT)
-    if not url:
-        log.info("enrichment.aikido.skip reason=no_url")
-        return 0
-
-    body = _http_get(url)
-    if body is None:
-        return 0
-    try:
-        doc = json.loads(body.decode("utf-8", errors="replace"))
-    except json.JSONDecodeError:
-        log.warning("enrichment.aikido.invalid_json url=%s", url)
-        return 0
-
-    if isinstance(doc, list):
-        entries = doc
-    elif isinstance(doc, dict):
-        entries = (
-            doc.get("entries")
-            or doc.get("data")
-            or doc.get("malware")
-            or []
-        )
-    else:
-        entries = []
-
-    if not entries:
-        log.info("enrichment.aikido.no_entries")
-        return 0
-
-    touched_purls: set[str] = set()
-    upserted = 0
-    with transaction.atomic():
-        for entry in entries:
-            advisory_id = (
-                entry.get("id")
-                or entry.get("advisory_id")
-                or entry.get("aikido_id")
-                or ""
-            )
-            if not advisory_id:
-                continue
-            purl = normalize_purl(
-                entry.get("purl") or _aikido_reconstruct_purl(entry)
-            )
-            if not purl:
-                continue
-
-            severity = (entry.get("severity") or "").lower() or Severity.CRITICAL.value
-            if severity not in {s.value for s in Severity}:
-                severity = Severity.CRITICAL.value
-
-            SupplyChainIoc.objects.update_or_create(
-                feed_source="aikido",
-                advisory_id=advisory_id,
-                purl=purl,
-                defaults={
-                    "severity": severity,
-                    "title": (entry.get("title") or entry.get("summary") or advisory_id)[:512],
-                    "summary": entry.get("summary") or entry.get("description") or "",
-                    "advisory_url": (entry.get("url") or entry.get("advisory_url") or "")[:512],
-                    "published_at": _parse_iso_dt(
-                        entry.get("published_at") or entry.get("published")
-                    ),
-                    "raw": entry,
-                },
-            )
-            touched_purls.add(purl)
-            upserted += 1
-
-    if touched_purls:
-        match_iocs_to_components(touched_purls=touched_purls)
-    return upserted
-
-
-_AIKIDO_ECO_TO_PURL = {
-    "npm": "npm",
-    "pypi": "pypi",
-    "rubygems": "gem",
-    "gem": "gem",
-    "go": "golang",
-    "golang": "golang",
-    "cargo": "cargo",
-    "maven": "maven",
-    "nuget": "nuget",
-}
-
-
-def _aikido_reconstruct_purl(entry: dict) -> str:
-    """Build a purl from Aikido entry fields when an explicit purl
-    isn't supplied. Returns "" if we don't have enough.
-    """
-    eco_raw = (entry.get("ecosystem") or entry.get("package_ecosystem") or "").lower()
-    eco = _AIKIDO_ECO_TO_PURL.get(eco_raw)
-    name = entry.get("package_name") or entry.get("package") or entry.get("name") or ""
-    version = entry.get("package_version") or entry.get("version") or ""
-    if not eco or not name:
-        return ""
-    if version:
-        return f"pkg:{eco}/{name}@{version}"
-    return f"pkg:{eco}/{name}"

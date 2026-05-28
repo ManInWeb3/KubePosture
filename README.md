@@ -6,9 +6,9 @@ urgency, and exposes a per-`(workload, image)` view of what to fix
 first.
 
 Also ingests Trivy `SbomReport` CRDs into a per-image component inventory
-(`/components/`), pulls supply-chain IoC feeds (Aikido Intel + OSV.dev),
-and matches them against deployed components — malicious-publish events
-surface as IMMEDIATE-priority findings alongside CVEs.
+(`/components/`), pulls the OSV.dev supply-chain IoC feed, and matches it
+against deployed components — malicious-publish events surface as
+IMMEDIATE-priority findings alongside CVEs.
 
 Authoritative design lives in
 [`Architecture/dev_docs/`](Architecture/dev_docs/) and the executable
@@ -235,17 +235,16 @@ python manage.py enrich_from_file --source epss /path/to/epss_scores.csv
 
 ---
 
-## Supply-chain detection (Aikido + OSV)
+## Supply-chain detection (OSV)
 
 Layered on top of Trivy SBOM ingest. Each cluster import now POSTs
 `SbomReport` CRDs alongside the existing scan kinds, which populate the
-`SbomComponent` table — one row per `(image, purl)`. Two feeds pull
-malicious-publish IoCs and a matcher joins them against currently-
+`SbomComponent` table — one row per `(image, purl)`. The OSV.dev feed
+pulls malicious-publish IoCs and a matcher joins them against currently-
 deployed components.
 
 ```bash
-# Pull IoC feeds (writes SupplyChainIoc rows, runs the matcher inline).
-python manage.py enrich_fetch --source aikido            # ~15 min cadence in prod
+# Pull the IoC feed (writes SupplyChainIoc rows, runs the matcher inline).
 python manage.py enrich_fetch --source osv-supply-chain  # ~hourly in prod
 
 # Run the matcher manually (e.g. after seeding IoCs by hand for testing).
@@ -263,17 +262,10 @@ OSV uses per-ecosystem bulk-zip snapshots
 conditional GET. The fetcher only downloads ecosystems we actually
 deploy — read from `SbomComponent.ecosystem` distinct. Filtered to
 malicious-publish entries (`MAL-*` IDs or
-`database_specific.malicious=true`).
-
-Aikido's old free feed (`intel.aikido.dev/api/?format=json`) was
-retired in favour of an OAuth-gated endpoint
-(`app.aikido.dev/api/public/v1/research/malware/packages`). The
-default `AIKIDO_INTEL_URL` is therefore empty — the cron skips
-cleanly until an operator points it at a feed they can read (private
-mirror, internal proxy, or an org-specific endpoint with a shape
-compatible with [`fetch_aikido_iocs`](core/services/enrichment.py#L521)).
-OSV.dev remains the primary public supply-chain feed and works out
-of the box.
+`database_specific.malicious=true`). Each zip is streamed to a temp
+file and decompressed one advisory at a time, so peak memory stays
+flat even for the multi-hundred-MB npm snapshot. It works out of the
+box with no configuration.
 
 Matches become normal `Finding` rows with
 `source=supply_chain_ioc`, `category=supply_chain`,
@@ -309,8 +301,7 @@ re-run on the same triggers (or just on demand).
 | `process_ingest_queue` | every 1–3 min (continuous) | Drains `IngestQueue`; reaps inline as marks finish draining |
 | `enrich_fetch --source kev` | daily | CISA KEV catalog refresh |
 | `enrich_fetch --source epss` | daily | first.org EPSS publishes daily |
-| `enrich_fetch --source aikido` | every 15 min | Aikido Intel malicious-publish feed; calls the matcher inline |
-| `enrich_fetch --source osv-supply-chain` | hourly | OSV.dev per-ecosystem bulk-zip snapshots; conditional GET keeps off-cycle ticks cheap |
+| `enrich_fetch --source osv-supply-chain` | hourly | OSV.dev per-ecosystem bulk-zip snapshots; conditional GET keeps off-cycle ticks cheap; streams each zip to disk so memory stays flat; calls the matcher inline |
 | `match_supply_chain` | on-demand | Re-run matcher without re-fetching feeds (after seeding test IoCs, or after a matching-logic change) |
 | `reap_safety_net` | hourly | Catches stuck `state=draining` ImportMarks the inline reaper missed |
 | `snapshot_capture` | daily (after enrichment + reaper) | End-of-day heartbeat at global / cluster / namespace / workload scopes; feeds trend charts |
@@ -376,7 +367,6 @@ Each scenario:
 | Sweep stuck draining marks | `python manage.py reap_safety_net` |
 | Fetch latest EPSS / KEV | `python manage.py enrich_fetch --source {epss,kev}` |
 | Load EPSS / KEV from file (offline) | `python manage.py enrich_from_file --source {epss,kev} <path>` |
-| Pull supply-chain IoC feed (Aikido) | `python manage.py enrich_fetch --source aikido` |
 | Pull supply-chain IoC feed (OSV bulk zip) | `python manage.py enrich_fetch --source osv-supply-chain` |
 | Re-run the supply-chain matcher | `python manage.py match_supply_chain [--purl <purl>]` |
 | Search the SBOM inventory for a purl | `python manage.py search_sbom --purl <purl> \| --prefix <pfx> \| --purls-file <path>` |

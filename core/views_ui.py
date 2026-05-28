@@ -28,6 +28,7 @@ from datetime import timedelta
 from core.api.auth import generate_token
 from core.constants import PriorityBand, Source, WorkloadKind
 from core.models import Cluster, Finding, IngestToken, Namespace, UserPreference
+from core.services.cluster_removal import remove_cluster
 from core.services.components import (
     component_detail,
     list_components,
@@ -670,6 +671,39 @@ class ClusterReimportView(LoginRequiredMixin, View):
             "cluster": cluster,
             "is_admin": True,
         })
+
+
+class ClusterDeleteView(LoginRequiredMixin, View):
+    """`POST /clusters/<pk>/delete/` — completely remove a cluster.
+
+    Destructive and irreversible: drops the cluster and every row tied
+    to it (namespaces, workloads, findings, history, snapshots, import
+    marks, queued scan payloads). Admin only, and gated on the admin
+    re-typing the cluster name so a stray click can't wipe a cluster.
+    Delegates the deletion + cascade handling to
+    `core.services.cluster_removal.remove_cluster`.
+    """
+
+    def post(self, request, pk):
+        if not _is_admin(request.user):
+            return HttpResponseForbidden("admin only")
+        cluster = get_object_or_404(Cluster, pk=pk)
+
+        typed = (request.POST.get("confirm_name") or "").strip()
+        if typed != cluster.name:
+            messages.error(
+                request,
+                "Cluster not deleted — the name you typed did not match.",
+            )
+            return redirect("cluster-detail", pk=cluster.pk)
+
+        result = remove_cluster(cluster)
+        messages.success(
+            request,
+            f"Removed cluster '{result.cluster_name}' and {result.total} "
+            "related rows.",
+        )
+        return redirect("cluster-list")
 
 
 class NamespaceToggleView(LoginRequiredMixin, View):

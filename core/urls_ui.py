@@ -12,6 +12,7 @@ from __future__ import annotations
 from django.urls import path
 
 from core.views_ui import (
+    ClusterDeleteView,
     ClusterDetailView,
     ClusterListView,
     ClusterReimportView,
@@ -62,6 +63,11 @@ urlpatterns = [
         "clusters/<int:pk>/re-import/",
         ClusterReimportView.as_view(),
         name="cluster-reimport",
+    ),
+    path(
+        "clusters/<int:pk>/delete/",
+        ClusterDeleteView.as_view(),
+        name="cluster-delete",
     ),
     path(
         "clusters/<int:cluster_pk>/namespaces/<int:ns_pk>/toggle/",

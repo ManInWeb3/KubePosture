@@ -7,7 +7,6 @@ from __future__ import annotations
 from django.db import transaction
 from django.utils import timezone
 
-from core.constants import ImportMarkState
 from core.models import (
     Cluster,
     Image,

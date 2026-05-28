@@ -57,7 +57,7 @@ KubePosture rule: **KEV match short-circuits to `Immediate`** regardless of all 
 A second, even-higher-precedence short-circuit applies to **supply-chain
 IoC matches** (`Category.SUPPLY_CHAIN`, produced by the matcher in
 `core/services/supply_chain_matcher.py` when a deployed `SbomComponent.purl`
-matches a `SupplyChainIoc.purl` from Aikido Intel or OSV.dev). Any match
+matches a `SupplyChainIoc.purl` from the OSV.dev feed). Any match
 unconditionally resolves to `Immediate` with reason `("supply-chain",)`
 — see [urgency-decision-tree.md §Supply-chain short-circuit](urgency-decision-tree.md#supply-chain-short-circuit).
 This is stricter than SSVC too: SSVC has no decision point for
@@ -196,7 +196,7 @@ Each `Finding.effective_priority` is computed by `core/urgency.py: score()` and 
 3. **DB**: `core_finding.effective_priority` column.
 
 Reason tuples to expect:
-- `("supply-chain",)` → supply-chain IoC match (Aikido / OSV malicious-publish feed), short-circuited to `immediate`. Outside SSVC's frame; see §3.1.
+- `("supply-chain",)` → supply-chain IoC match (OSV malicious-publish feed), short-circuited to `immediate`. Outside SSVC's frame; see §3.1.
 - `("KEV",)` → KEV match, short-circuited to `immediate`.
 - `("severity","EPSS>=0.9","exposed","prod")` → top-of-tree branch.
 - `("critical","exposed","prod")`, `("high","exposed","prod")` → severity-driven prod branches.

@@ -172,6 +172,41 @@
         {% endif %}
       </div>
     </div>
+
+    {% if is_admin %}
+    <!-- Danger zone: complete cluster removal (admin only) -->
+    <div class="card mb-3 border-danger">
+      <div class="card-header">
+        <h3 class="card-title text-danger">Danger zone</h3>
+      </div>
+      <div class="card-body">
+        {% help "Delete cluster" %}
+          <p>Permanently deletes this cluster and <strong>everything tied to it</strong> —
+          all namespaces, workloads, findings, finding history, snapshots, import marks,
+          and queued scan payloads for <code>{{ cluster.name }}</code>.</p>
+          <p>Shared data is kept: container images, EPSS/KEV enrichment, the SBOM inventory,
+          and ingest tokens are owned globally, not by one cluster, so they survive.</p>
+          <p class="mb-0">If the cluster is still being scanned, the next import will simply
+          re-create it. Use this for clusters you have decommissioned.</p>
+        {% endhelp %}
+
+        <p class="text-secondary">
+          Permanently delete this cluster and all of its namespaces, workloads, findings,
+          history, and snapshots. This cannot be undone.
+        </p>
+        <form method="post" action="{% url 'cluster-delete' cluster.pk %}"
+              onsubmit="return confirm('Delete cluster {{ cluster.name }} and ALL of its data? This cannot be undone.');">
+          {% csrf_token %}
+          <label class="form-label">Type <code>{{ cluster.name }}</code> to confirm</label>
+          <div class="d-flex gap-2" style="max-width: 30rem;">
+            <input type="text" name="confirm_name" class="form-control font-monospace"
+                   autocomplete="off" placeholder="{{ cluster.name }}" required>
+            <button type="submit" class="btn btn-danger flex-shrink-0">Delete cluster</button>
+          </div>
+        </form>
+      </div>
+    </div>
+    {% endif %}
   </div>
 
   <!-- Right sidebar: cluster rollup -->

@@ -8,7 +8,7 @@ The matcher does **not** write to `Finding` directly. It builds finding
 dicts and calls `core.services.dedup.upsert_findings`, which:
 
 - computes `hash_code` via `compute_hash` (workload-scoped),
-- folds in EPSS/KEV enrichment (no-op for MAL-/GHSA-/AIKIDO- IDs),
+- folds in EPSS/KEV enrichment (no-op for MAL-/GHSA- IDs),
 - runs `apply_score` to set `effective_priority`,
 - handles the lifecycle (create / bump last_seen).
 

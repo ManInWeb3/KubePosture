@@ -16,12 +16,10 @@ from core.constants import (
 )
 from core.models import (
     Cluster,
-    Image,
     ImportMark,
     IngestQueue,
     ScanInconsistency,
     Snapshot,
-    Workload,
     WorkloadImageObservation,
     WorkloadSignal,
 )

@@ -10,16 +10,13 @@ annotation and a `flagged_only` filter once `SupplyChainIoc` exists.
 """
 from __future__ import annotations
 
-from collections import defaultdict
 from typing import Iterable
 
 from django.db.models import Count, Q
 
 from core.models import (
     Cluster,
-    Image,
     SbomComponent,
-    Workload,
     WorkloadImageObservation,
 )
 from core.purl import normalize_purl

@@ -6,8 +6,7 @@ Usage:
   manage.py match_supply_chain --purl pkg:npm/x@1 --purl pkg:npm/y@2
 
 Normally the matcher runs automatically inside the feed fetchers
-(`enrich_fetch --source aikido` / `--source osv-supply-chain`). This
-command is for:
+(`enrich_fetch --source osv-supply-chain`). This command is for:
 
   - manual testing after seeding IoCs by hand
   - re-running the match if matching logic changed

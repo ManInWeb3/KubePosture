@@ -13,8 +13,6 @@ has been resolved.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import Any
 
 from core.constants import Category, Severity, Source, TRIVY_SEVERITY_MAP
 from core.purl import normalize_purl, purl_ecosystem

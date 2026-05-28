@@ -74,6 +74,11 @@ K8S_TIMEOUT: tuple[int, int] = (10, 60)
 HTTP_TIMEOUT: int = int(os.environ.get("KUBEPOSTURE_HTTP_TIMEOUT", "60"))
 HTTP_MAX_ATTEMPTS: int = 3
 HTTP_RETRY_BASE_DELAY: float = 2.5
+# The pending poll is an idempotent GET, so a transient RST is safe to
+# retry. Keep it snappier than the POST path — the per-minute trigger
+# tick should still feel "fail fast" (worst case ~1.5s of backoff).
+GET_MAX_ATTEMPTS: int = 3
+GET_RETRY_BASE_DELAY: float = 0.5
 
 
 def _post(base_url: str, token: str, path: str, body: dict) -> tuple[bool, int, str]:
@@ -112,22 +117,38 @@ def _post(base_url: str, token: str, path: str, body: dict) -> tuple[bool, int, 
 
 def _get(base_url: str, token: str, path: str) -> tuple[bool, int, str]:
     """GET helper for the pending-poll endpoint. Lighter than _post —
-    no retries, no body. Trigger ticks should fail fast.
+    no body, shorter backoff. Retries connection-level errors and 5xx
+    (an idempotent GET is safe to replay) but fails fast on 4xx.
     """
     url = f"{base_url.rstrip('/')}{path}"
     headers = {"Authorization": f"Bearer {token}"}
     req = Request(url, headers=headers, method="GET")
-    try:
-        with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-            return True, resp.status, resp.read().decode(errors="replace")
-    except HTTPError as e:
+    last_status = 0
+    last_detail = ""
+    for attempt in range(1, GET_MAX_ATTEMPTS + 1):
         try:
-            detail = e.read().decode(errors="replace")[:300]
-        except Exception:
-            detail = ""
-        return False, e.code, detail
-    except (OSError, http.client.HTTPException) as e:
-        return False, 0, str(e)
+            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+                return True, resp.status, resp.read().decode(errors="replace")
+        except HTTPError as e:
+            last_status = e.code
+            try:
+                last_detail = e.read().decode(errors="replace")[:300]
+            except Exception:
+                last_detail = ""
+            if 400 <= e.code < 500:
+                return False, e.code, last_detail
+        # OSError covers URLError, socket.timeout, ConnectionResetError,
+        # and http.client.RemoteDisconnected — the RST an LB or worker
+        # sends when it drops the connection mid-request. On the no-retry
+        # poll this surfaced as "pending poll FAILED (0): [Errno 104]
+        # Connection reset by peer" and failed the whole trigger tick.
+        except (OSError, http.client.HTTPException) as e:
+            last_status = 0
+            last_detail = str(e)
+
+        if attempt < GET_MAX_ATTEMPTS:
+            time.sleep(GET_RETRY_BASE_DELAY * (2 ** (attempt - 1)))
+    return False, last_status, last_detail
 
 
 def check_pending(*, base_url: str, token: str, cluster: str) -> dict | None:

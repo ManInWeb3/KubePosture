@@ -21,7 +21,6 @@ reaps.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
 
 from django.db import connection, transaction
 from django.utils import timezone

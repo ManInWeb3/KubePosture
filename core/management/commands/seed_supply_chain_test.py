@@ -418,7 +418,7 @@ class Command(BaseCommand):
         finding_filter = Finding.objects.filter(source="supply_chain_ioc").filter(
             # TEST-* synthetic ids OR any advisory_id from KNOWN_HISTORICAL_IOCS.
             # Keep the queries explicit so we don't accidentally delete findings
-            # that came from a real OSV/Aikido feed using the same advisory id.
+            # that came from a real OSV feed using the same advisory id.
             vuln_id__startswith="TEST-",
         )
         n_find = finding_filter.count()

@@ -1,12 +1,12 @@
 # Supply-Chain IoC Detection
 
-How KubePosture detects deployed packages flagged as malicious by
-upstream feeds (Aikido Intel + OSV.dev), and what guarantees the
-matcher and short-circuit priority rule provide.
+How KubePosture detects deployed packages flagged as malicious by the
+OSV.dev supply-chain feed, and what guarantees the matcher and
+short-circuit priority rule provide.
 
 This document covers design and data flow. For the operational runbook
 (commands, cadence, env vars) see the
-[README "Supply-chain detection" section](../README.md#supply-chain-detection-aikido--osv).
+[README "Supply-chain detection" section](../README.md#supply-chain-detection-osv).
 
 ---
 
@@ -34,17 +34,12 @@ deliberately ignores are documented at
 ## 2. Data flow
 
 ```
-                                    feed fetchers
+                                    feed fetcher
    ┌──────────────────┐         ┌────────────────────┐
-   │  Aikido Intel    │ HTTP    │ fetch_aikido_iocs  │ ────┐
-   │  intel.aikido.dev│────────►│   (cond. GET)      │     │
-   └──────────────────┘         └────────────────────┘     │
-                                                           │  upsert
-   ┌──────────────────┐         ┌────────────────────┐     ▼
    │  OSV.dev bulk    │ HTTP    │ fetch_osv_supply_  │   ┌──────────────────┐
-   │  per-ecosystem   │────────►│   chain (cond. GET)│──►│ SupplyChainIoc   │
-   └──────────────────┘         └────────────────────┘   │  (purl, feed,    │
-                                            │            │   advisory_id…) │
+   │  per-ecosystem   │────────►│   chain (cond. GET,│──►│ SupplyChainIoc   │
+   │  all.zip         │  stream │   streamed to disk)│   │  (purl, feed,    │
+   └──────────────────┘  to tmp └────────────────────┘   │   advisory_id…) │
                                             │            └────────┬────────┘
                                             │                     │
                                             │                     │
@@ -70,8 +65,8 @@ Three tables anchor the lane:
 | Table | Owner | Identity | Lifetime |
 |---|---|---|---|
 | `SbomComponent` | Trivy SbomReport ingest | `(image, purl)` unique | Pruned with image — `prune_stale_sbom_components` deletes rows whose image has no `WorkloadImageObservation.currently_deployed=True` AND `Image.last_seen_at` is older than the cutoff (default 90 days). |
-| `SupplyChainIoc` | feed fetchers | `(feed_source, advisory_id, purl)` unique | Append-only; no per-row TTL. Feed re-fetch updates severity/title/url/summary in place. |
-| `FeedFetchState` | feed fetchers | `state_key` (`"aikido"`, `"osv:<ecosystem>"`) | One row per upstream URL — stores ETag + Last-Modified so conditional GET can short-circuit unchanged feeds. |
+| `SupplyChainIoc` | feed fetcher | `(feed_source, advisory_id, purl)` unique | Append-only; no per-row TTL. Feed re-fetch updates severity/title/url/summary in place. |
+| `FeedFetchState` | feed fetcher | `state_key` (`"osv:<ecosystem>"`) | One row per upstream URL — stores ETag + Last-Modified so conditional GET can short-circuit unchanged feeds. |
 
 `Finding` rows for matches use the standard dedup hash machinery
 (see [core/services/dedup.py:23-55](../core/services/dedup.py#L23-L55))
@@ -82,37 +77,13 @@ purl)` does not duplicate across runs.
 
 ## 3. Feeds
 
-Both fetchers live in [core/services/enrichment.py](../core/services/enrichment.py)
-and follow the universal **zero-input no-op rule**: an empty / unreadable
+The fetcher lives in [core/services/enrichment.py](../core/services/enrichment.py)
+and follows the universal **zero-input no-op rule**: an empty / unreadable
 response leaves existing rows intact instead of clearing them.
 
-### Aikido Intel
-
-- **URL.** `AIKIDO_INTEL_URL` env var. **Default is empty** — the old
-  free feed at `intel.aikido.dev/api/?format=json` was retired in
-  favour of an OAuth-gated endpoint at
-  `app.aikido.dev/api/public/v1/research/malware/packages` (Bearer
-  token, paginated 10–20/page). KubePosture does not ship credentials
-  for the new endpoint, so the Aikido lane is **opt-in**: set
-  `AIKIDO_INTEL_URL` to a mirror / proxy / internal endpoint you can
-  read. With an empty URL the fetcher logs `aikido.skip reason=no_url`
-  and returns 0 — the cron is a no-op rather than a 404 loop.
-- **Format.** The fetcher accepts a top-level JSON list OR a wrapper
-  object with `entries` / `data` / `malware` (see
-  [`fetch_aikido_iocs`](../core/services/enrichment.py#L521)). Each
-  entry should carry `purl` (preferred) or
-  `package` + `version` + `ecosystem` (reconstructed). Fields read:
-  `id` / `advisory_id` / `aikido_id`, `severity`, `description`,
-  `url`, `date`.
-- **Cadence.** ~every 15 min when configured.
-- **Conditional GET.** Yes — `If-None-Match` / `If-Modified-Since`
-  from `FeedFetchState[aikido]`.
-
-> **Note.** Aikido coverage is therefore not part of the default OSS
-> stack. OSV.dev (next section) is the canonical public feed and
-> works without any configuration. Operators on Aikido's paid tier
-> can wire their own endpoint; orgs running multiple feeds may layer
-> a private aggregator behind `AIKIDO_INTEL_URL`.
+`feed_source` is a free-text label so additional feeds can be added
+later without a schema change, but OSV.dev is the only feed shipped
+today — it is a public, no-auth source that works out of the box.
 
 ### OSV.dev supply-chain
 
@@ -126,10 +97,19 @@ response leaves existing rows intact instead of clearing them.
 - **Filter.** Only entries with `MAL-*` advisory IDs OR
   `database_specific.malicious=true` — vulnerability CVEs come from
   Trivy / EPSS / KEV in a separate path.
-- **Cadence.** ~hourly. Conditional GET keeps off-cycle ticks cheap.
+- **Memory.** Each ecosystem zip is **streamed to a temp file** by
+  [`_http_download_conditional`](../core/services/enrichment.py) and
+  `zipfile` decompresses one advisory at a time off disk. The payload
+  is never held in RAM as one object — the npm `all.zip` is hundreds
+  of MB, and an earlier `resp.read()` + `io.BytesIO` copy spiked ~2×
+  that and got the cron OOMKilled. Peak memory is now flat regardless
+  of zip size.
+- **Cadence.** ~hourly. Conditional GET keeps off-cycle ticks cheap;
+  in practice only npm re-downloads most ticks (its ETag changes
+  almost hourly), the rest return 304.
 
-Both fetchers invoke the matcher inline once they finish upserting,
-passing the set of purls they touched via `touched_purls=` — so a
+The fetcher invokes the matcher inline once it finishes upserting,
+passing the set of purls it touched via `touched_purls=` — so a
 typical fetch only joins the matcher against the few purls that
 actually changed, not the whole IoC table.
 
@@ -158,9 +138,11 @@ The matcher is intentionally:
   workloads produces N findings (one per workload). Sidecar pattern
   (one workload, two images, both with the same bad purl) likewise
   produces two findings (different `image_id`).
-- **Multi-feed-aware.** Aikido and OSV reporting the same compromise
-  produces *two* findings with distinct `advisory_id`s — by design,
-  so the operator sees both pieces of evidence.
+- **Multi-feed-aware.** Two feeds (or two OSV advisory IDs) reporting
+  the same compromise produce *two* findings with distinct
+  `advisory_id`s — by design, so the operator sees both pieces of
+  evidence. (OSV is the only shipped feed today, but the join keys on
+  `(feed_source, advisory_id)` so this holds if another is added.)
 - **Re-runnable.** Repeated matches are deduplicated by `compute_hash`
   → no growth on no-op re-runs. Severity / title / URL / summary
   updates propagate into the existing finding's `details` JSONB on
@@ -174,7 +156,7 @@ Each match produces a `Finding` dict that goes through the standard
 ```
 source              = Source.SUPPLY_CHAIN_IOC   # = "supply_chain_ioc"
 category            = Category.SUPPLY_CHAIN     # = "supply_chain"
-vuln_id             = ioc.advisory_id           # GHSA-xxxx, MAL-xxxx, AIKIDO-xxxx
+vuln_id             = ioc.advisory_id           # GHSA-xxxx, MAL-xxxx
 pkg_name            = sbom_component.name
 installed_version   = sbom_component.version
 severity            = ioc.severity or CRITICAL
@@ -273,4 +255,4 @@ For automated coverage, see:
 - [urgency-decision-tree.md § Supply-chain short-circuit](urgency-decision-tree.md#supply-chain-short-circuit) — why IMMEDIATE, what it ignores.
 - [pruning.md](pruning.md) — retention rules for `SbomComponent` and `SupplyChainIoc`.
 - [ssvc-mapping.md](ssvc-mapping.md) — how the supply-chain lane diverges from the SSVC-derived scoring used for everything else.
-- [README § Supply-chain detection](../README.md#supply-chain-detection-aikido--osv) — commands and cadence.
+- [README § Supply-chain detection](../README.md#supply-chain-detection-osv) — commands and cadence.

@@ -57,8 +57,8 @@ def normalize_purl(purl: str) -> str:
 
     Some scanners URL-encode the `@` version separator as `%40` — that's
     a producer bug (the purl spec doesn't allow `%XX` for the `@`
-    separator), but it slips into real-world data. Our IoC feeds (OSV,
-    Aikido) use literal `@`, so mismatched encoding silently breaks
+    separator), but it slips into real-world data. Our IoC feed (OSV)
+    uses literal `@`, so mismatched encoding silently breaks
     purl-equality matching.
 
     This function does a targeted fix: only the `@` separator is

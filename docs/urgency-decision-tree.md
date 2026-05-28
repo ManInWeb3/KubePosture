@@ -207,7 +207,7 @@ by `core/services/supply_chain_matcher.py` when a `SbomComponent.purl`
 matches a `SupplyChainIoc.purl`) **unconditionally resolve to
 `IMMEDIATE`**. The check is the first branch in `score()`, before KEV.
 
-**Rationale.** A match means a feed (Aikido Intel or OSV.dev) has
+**Rationale.** A match means a feed (OSV.dev) has
 explicitly flagged this exact `(name, version)` as malicious — a
 maintainer-account takeover, attacker-published version, or
 intentionally backdoored release. There is no benign middle ground.
@@ -223,7 +223,7 @@ trumps everything else in the tree.
 | Feed-supplied severity | Most feeds publish "critical"; some omit it. The matcher defaults to `Severity.CRITICAL.value` when absent. The band stays IMMEDIATE regardless. |
 | CVSS / EPSS | Malicious-publish events typically have no CVSS or EPSS score; `_enrichment_for` only fires on `CVE-*` IDs anyway. |
 | Namespace exposure / cluster environment | A flagged purl in a sealed dev cluster still ranks IMMEDIATE — the deployed artifact contains attacker code regardless of network reachability. |
-| Multi-feed confirmation | Aikido + OSV reporting the same compromise produces two findings (different `vuln_id`), both IMMEDIATE. No "confidence boost" sub-band. |
+| Multi-feed confirmation | Two advisory IDs reporting the same compromise produce two findings (different `vuln_id`), both IMMEDIATE. No "confidence boost" sub-band. |
 
 **Reason chip.** The `PriorityResult.reasons` tuple is `("supply-chain",)`
 so the UI displays "Immediate · supply-chain" — distinct from "Immediate

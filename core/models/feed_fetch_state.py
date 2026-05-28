@@ -1,7 +1,7 @@
 """FeedFetchState — per-feed conditional-GET state (Last-Modified / ETag).
 
-Used by `core.services.enrichment._http_get_conditional` to skip
-re-downloading large feed files (OSV per-ecosystem zips ~100MB)
+Used by `core.services.enrichment._http_download_conditional` to skip
+re-downloading large feed files (OSV per-ecosystem zips, hundreds of MB)
 when the upstream hasn't changed since the last successful fetch.
 
 Keyed on an opaque `state_key` so callers compose their own (e.g.
