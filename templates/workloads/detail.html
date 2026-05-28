@@ -95,9 +95,18 @@
 
 <!-- Trend (per-workload snapshot history) -->
 <div class="card mb-3">
-  <div class="card-header d-flex align-items-center">
-    <h3 class="card-title">CVE Trend</h3>
-    <span class="ms-2 text-muted small">Snapshot history per cluster — image-set events marked.</span>
+  <div class="card-header d-flex align-items-center flex-wrap gap-2">
+    <h3 class="card-title mb-0">CVE Trend</h3>
+    <span class="ms-2 text-muted small">Snapshot history — image-set events marked.</span>
+    {% if scoped_workloads|length > 1 %}
+    <div class="ms-3">
+      <select class="form-select form-select-sm" id="detail-trend-workload" aria-label="Cluster / namespace">
+        {% for w in scoped_workloads %}
+          <option value="{{ w.pk }}">{{ w.cluster.name }} · {{ w.namespace.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    {% endif %}
     <div class="ms-auto btn-group btn-group-sm" role="group" aria-label="Interval" id="detail-trend-interval">
       <button type="button" class="btn btn-outline-secondary active" data-interval="1d">1 day</button>
       <button type="button" class="btn btn-outline-secondary" data-interval="1w">1 week</button>
@@ -105,14 +114,12 @@
     </div>
   </div>
   <div class="card-body">
-    {% for w in scoped_workloads %}
-      {% if scoped_workloads|length > 1 %}
-        <div class="text-muted small mb-1">Cluster: <code>{{ w.cluster.name }}</code></div>
-      {% endif %}
-      <div id="workload-trend-{{ w.pk }}" data-workload-id="{{ w.pk }}" class="mb-3"></div>
-    {% empty %}
+    {% if scoped_workloads %}
+      <div id="workload-trend"
+           data-workload-id="{{ scoped_workloads.0.pk }}"></div>
+    {% else %}
       <p class="text-muted mb-0">No workload in scope.</p>
-    {% endfor %}
+    {% endif %}
   </div>
 </div>
 
@@ -215,20 +222,23 @@
 {% block extra_js %}
 <script>
   (function () {
-    var els = document.querySelectorAll('[id^="workload-trend-"]');
+    var el = document.getElementById("workload-trend");
+    if (!el) return;
     var intervalGroup = document.getElementById("detail-trend-interval");
-    var state = { interval: "1d" };
+    var workloadSel = document.getElementById("detail-trend-workload");
+    var state = {
+      interval: "1d",
+      workloadId: el.dataset.workloadId,
+    };
 
-    function renderAll() {
-      els.forEach(function (el) {
-        renderSnapshotChart({
-          elId: el.id,
-          scope: "workload",
-          stack: "priority",
-          params: { workload_id: el.dataset.workloadId },
-          interval: state.interval,
-          height: 260,
-        });
+    function renderChart() {
+      renderSnapshotChart({
+        elId: "workload-trend",
+        scope: "workload",
+        stack: "priority",
+        params: { workload_id: state.workloadId },
+        interval: state.interval,
+        height: 280,
       });
     }
 
@@ -239,11 +249,18 @@
         intervalGroup.querySelectorAll("button").forEach(function (b) { b.classList.remove("active"); });
         btn.classList.add("active");
         state.interval = btn.dataset.interval;
-        renderAll();
+        renderChart();
       });
     }
 
-    renderAll();
+    if (workloadSel) {
+      workloadSel.addEventListener("change", function () {
+        state.workloadId = workloadSel.value;
+        renderChart();
+      });
+    }
+
+    renderChart();
   })();
 </script>
 {% endblock %}
