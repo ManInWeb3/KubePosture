@@ -13,8 +13,7 @@ has been resolved.
 """
 from __future__ import annotations
 
-
-from core.constants import Category, Severity, Source, TRIVY_SEVERITY_MAP
+from core.constants import TRIVY_SEVERITY_MAP, Category, Severity, Source
 from core.purl import normalize_purl, purl_ecosystem
 from core.signals import signal_for_trivy_avd
 
@@ -126,29 +125,9 @@ def parse_vulnerability_report(obj: dict) -> dict:
     report = obj.get("report") or {}
     os_family, os_version, eosl = _os_block(report)
 
-    findings: list[dict] = []
-    for v in report.get("vulnerabilities") or []:
-        findings.append({
-            "source": Source.TRIVY.value,
-            "category": Category.VULNERABILITY.value,
-            "vuln_id": v.get("vulnerabilityID") or "",
-            "pkg_name": v.get("resource") or "",
-            "installed_version": v.get("installedVersion") or "",
-            "fixed_version": v.get("fixedVersion") or "",
-            "title": v.get("title") or v.get("vulnerabilityID") or "",
-            "severity": _severity_for(v.get("severity") or ""),
-            "cvss_score": _cvss_score(v),
-            "cvss_vector": _cvss_vector(v),
-            "details": {
-                "description": v.get("description") or "",
-                "primary_link": v.get("primaryLink") or "",
-                "links": v.get("links") or [],
-                "publishedDate": v.get("publishedDate"),
-                "lastModifiedDate": v.get("lastModifiedDate"),
-                "score": v.get("score"),
-                "target": v.get("target"),
-            },
-        })
+    findings: list[dict] = [
+        _vuln_to_finding_dict(v) for v in (report.get("vulnerabilities") or [])
+    ]
 
     return {
         "kind": "trivy.VulnerabilityReport",
@@ -165,11 +144,73 @@ def parse_vulnerability_report(obj: dict) -> dict:
     }
 
 
+def _vuln_to_finding_dict(v: dict) -> dict:
+    """Map one Trivy vulnerability entry to the canonical finding dict.
+
+    Accepts either the Operator CRD shape (camelCase keys: vulnerabilityID,
+    resource, installedVersion, fixedVersion, primaryLink) or the raw Trivy
+    CLI shape (PascalCase keys: VulnerabilityID, PkgName, InstalledVersion,
+    FixedVersion, PrimaryURL). Whichever side is present wins.
+    """
+    vuln_id = v.get("vulnerabilityID") or v.get("VulnerabilityID") or ""
+    pkg_name = v.get("resource") or v.get("PkgName") or ""
+    installed = v.get("installedVersion") or v.get("InstalledVersion") or ""
+    fixed = v.get("fixedVersion") or v.get("FixedVersion") or ""
+    title = v.get("title") or v.get("Title") or vuln_id
+    severity = v.get("severity") or v.get("Severity") or ""
+    description = v.get("description") or v.get("Description") or ""
+    primary_link = v.get("primaryLink") or v.get("PrimaryURL") or ""
+    links = v.get("links") or v.get("References") or []
+    published = v.get("publishedDate") or v.get("PublishedDate")
+    last_mod = v.get("lastModifiedDate") or v.get("LastModifiedDate")
+    return {
+        "source": Source.TRIVY.value,
+        "category": Category.VULNERABILITY.value,
+        "vuln_id": vuln_id,
+        "pkg_name": pkg_name,
+        "installed_version": installed,
+        "fixed_version": fixed,
+        "title": title,
+        "severity": _severity_for(severity),
+        "cvss_score": _cvss_score(v),
+        "cvss_vector": _cvss_vector(v),
+        "details": {
+            "description": description,
+            "primary_link": primary_link,
+            "links": links,
+            "publishedDate": published,
+            "lastModifiedDate": last_mod,
+            "score": v.get("score"),
+            "target": v.get("target") or v.get("Target"),
+        },
+    }
+
+
+def parse_trivy_cli_vulnerabilities(obj: dict) -> dict:
+    """Parse a raw `trivy image --format json` document.
+
+    The CLI shape is `{ArtifactName, Results: [{Target, Vulnerabilities: [...]}, ...]}`
+    rather than the Operator CRD's `{report: {vulnerabilities: [...]}}`. Returns the
+    same canonical finding-dict shape that `parse_vulnerability_report` produces,
+    plus the artifact name for display (no workload/namespace identity — those
+    come from the workload the caller binds findings to).
+    """
+    findings: list[dict] = []
+    for result in obj.get("Results") or []:
+        for v in result.get("Vulnerabilities") or []:
+            findings.append(_vuln_to_finding_dict(v))
+    return {
+        "kind": "trivy.CliVulnerability",
+        "artifact_name": obj.get("ArtifactName") or "",
+        "findings": findings,
+    }
+
+
 def _cvss_score(v: dict) -> float | None:
     cvss = v.get("score")
     if isinstance(cvss, (int, float)):
         return float(cvss)
-    cvss_block = v.get("cvss") or {}
+    cvss_block = v.get("cvss") or v.get("CVSS") or {}
     for vendor in ("nvd", "redhat"):
         sub = cvss_block.get(vendor) or {}
         for key in ("V3Score", "V2Score"):
@@ -180,7 +221,7 @@ def _cvss_score(v: dict) -> float | None:
 
 
 def _cvss_vector(v: dict) -> str:
-    cvss_block = v.get("cvss") or {}
+    cvss_block = v.get("cvss") or v.get("CVSS") or {}
     for vendor in ("nvd", "redhat"):
         sub = cvss_block.get(vendor) or {}
         for key in ("V3Vector", "V2Vector"):

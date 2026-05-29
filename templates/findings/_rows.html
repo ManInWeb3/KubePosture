@@ -21,7 +21,17 @@
       <span class="text-muted small">cluster-scoped</span>
     {% endif %}
   </td>
-  <td><code class="small">{{ f.vuln_id|default:"—" }}</code></td>
+  <td>
+    <code class="small">{{ f.vuln_id|default:"—" }}</code>
+    {% if f.image %}
+      <a href="{% url 'images-detail' digest=f.image.digest %}"
+         onclick="event.stopPropagation()"
+         class="text-muted ms-1"
+         title="Image: {{ f.image.ref|default:f.image.digest|truncatechars:60 }}">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: text-bottom;"><path d="M3 7l9 -4l9 4l-9 4l-9 -4"/><path d="M3 12l9 4l9 -4"/><path d="M3 17l9 4l9 -4"/></svg>
+      </a>
+    {% endif %}
+  </td>
   <td><span class="text-muted small" style="white-space: normal; word-break: break-word;">{{ f.title }}</span></td>
   <td>{% priority_badge f.effective_priority %}</td>
   <td>{% severity_badge f.severity %}</td>

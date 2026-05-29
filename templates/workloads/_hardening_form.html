@@ -1,0 +1,66 @@
+<div class="card mb-3">
+  <details {% if is_preview %}open{% endif %}>
+    <summary class="card-header" style="cursor: pointer; list-style: revert;">
+      <h3 class="card-title d-inline">Evaluate hardened image</h3>
+      <span class="ms-2 text-muted small">
+        Upload a Trivy CLI scan of a candidate image to see how its findings
+        would be prioritised in this workload — no deployment needed.
+      </span>
+      {% if preview %}
+        <span class="badge bg-purple-lt text-purple ms-2">PREVIEW: {{ preview.image_ref }}</span>
+      {% endif %}
+    </summary>
+    <div class="card-body">
+      {% if not preview_eligible %}
+        <p class="text-muted mb-0">
+          Pick one cluster and one namespace above to evaluate a candidate
+          image. Preview is scored against a single workload's context (env,
+          exposure, signals).
+        </p>
+      {% else %}
+        <p class="text-muted small mb-3">
+          Evaluating against
+          <code>{{ preview_workload.cluster.name }}/{{ preview_workload.namespace.name }}/{{ preview_workload.kind }}/{{ preview_workload.name }}</code>.
+        </p>
+        <form method="post"
+              enctype="multipart/form-data"
+              action="{% url 'workloads-detail' kind=kind name=name %}">
+          {% csrf_token %}
+          <input type="hidden" name="workload_id" value="{{ preview_workload.pk }}">
+          <input type="hidden" name="action" value="preview">
+
+          <div class="row g-3">
+            <div class="col-md-6">
+              <label class="form-label">Trivy JSON file</label>
+              <input type="file" name="scan" accept=".json,application/json" class="form-control">
+              <small class="form-hint">
+                Output of <code>trivy image --format json &lt;image&gt;</code>. 10 MB max.
+              </small>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">…or paste the JSON</label>
+              <textarea name="scan_text" rows="3" class="form-control font-monospace small"
+                        placeholder='{"ArtifactName": "...", "Results": [ ... ]}'></textarea>
+            </div>
+          </div>
+
+          <div class="mt-3">
+            <button type="submit" class="btn btn-primary">Evaluate</button>
+          </div>
+        </form>
+
+        {% if preview %}
+        <form method="post"
+              action="{% url 'workloads-detail' kind=kind name=name %}"
+              class="mt-2 d-inline">
+          {% csrf_token %}
+          <input type="hidden" name="workload_id" value="{{ preview_workload.pk }}">
+          <input type="hidden" name="action" value="clear">
+          <input type="hidden" name="candidate_id" value="{{ preview.candidate_id }}">
+          <button type="submit" class="btn btn-outline-secondary btn-sm">Clear preview</button>
+        </form>
+        {% endif %}
+      {% endif %}
+    </div>
+  </details>
+</div>

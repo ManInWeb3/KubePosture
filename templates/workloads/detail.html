@@ -123,6 +123,8 @@
   </div>
 </div>
 
+{% include "workloads/_hardening_form.html" %}
+
 <!-- Images (master) — click a row to swap the findings panel below -->
 <div class="card mb-3">
   <div class="card-header">
@@ -171,9 +173,21 @@
           <td>
             <code class="small">{{ row.container_name }}</code>
             {% if row.init_container %}<span class="badge bg-blue-lt text-blue ms-1" title="initContainer">init</span>{% endif %}
+            {% if row.is_candidate %}<span class="badge bg-purple-lt text-purple ms-1" title="Hardening preview — not deployed">PREVIEW</span>{% endif %}
           </td>
-          <td><span class="text-muted small">{{ row.image.ref|default:row.image.repository }}</span></td>
-          <td><span class="font-monospace small">{{ row.image.digest|truncatechars:23 }}</span></td>
+          <td>
+            {% if row.is_candidate %}
+              <span class="text-muted small">{{ row.image.ref }}</span>
+            {% else %}
+              <a href="{% url 'images-detail' digest=row.image.digest %}"
+                 onclick="event.stopPropagation()"
+                 class="text-reset"
+                 title="Open image detail">
+                <span class="text-muted small">{{ row.image.ref|default:row.image.repository }}</span>
+              </a>
+            {% endif %}
+          </td>
+          <td>{% if row.is_candidate %}<span class="text-muted small">—</span>{% else %}<span class="font-monospace small">{{ row.image.digest|truncatechars:23 }}</span>{% endif %}</td>
           <td>{{ row.first_seen_at|date:"Y-m-d H:i" }}</td>
           <td>{{ row.last_seen_at|date:"Y-m-d H:i" }}</td>
           {% if row.currently_deployed %}

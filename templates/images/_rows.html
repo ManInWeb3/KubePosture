@@ -1,0 +1,38 @@
+{% load findings_tags %}
+{% for row in rows %}
+<tr>
+  <td>
+    <a href="{% url 'images-detail' digest=row.digest %}">
+      <strong>{{ row.image.ref|default:row.image.repository|default:row.image.digest }}</strong>
+    </a>
+  </td>
+  <td><span class="font-monospace small text-muted">{{ row.digest|truncatechars:23 }}</span></td>
+  <td class="text-end">{{ row.workload_count }}</td>
+  <td class="text-end">{% count_badge row.n_immediate "immediate" %}</td>
+  <td class="text-end">{% count_badge row.n_out_of_band "out_of_band" %}</td>
+  <td class="text-end">{% count_badge row.n_scheduled "scheduled" %}</td>
+  <td class="text-end">{% count_badge row.n_defer "defer" %}</td>
+  <td class="text-end">
+    {% if row.impact %}
+      <span class="badge bg-secondary-lt text-secondary" title="workloads × Σ(weight·CVEs)">{{ row.impact }}</span>
+    {% else %}
+      <span class="text-muted">0</span>
+    {% endif %}
+  </td>
+  <td class="text-end">
+    {% if row.impact_per_cve %}
+      <span class="text-muted small" title="Impact ÷ total CVEs — high values flag quick wins">{{ row.impact_per_cve|floatformat:0 }}</span>
+    {% else %}
+      <span class="text-muted">—</span>
+    {% endif %}
+  </td>
+  <td class="text-muted small">{{ row.last_seen_at|date:"Y-m-d H:i" }}</td>
+</tr>
+{% empty %}
+<tr>
+  <td colspan="10" class="text-center text-muted p-3">
+    No images match these filters.
+  </td>
+</tr>
+{% endfor %}
+{% include "widgets/_pagination.html" with hx_target="image-rows" noun="images" colspan=10 %}

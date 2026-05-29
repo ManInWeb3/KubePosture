@@ -20,6 +20,8 @@ from core.views_ui import (
     ComponentsListView,
     FindingDetailPanelView,
     FindingsListView,
+    ImageDetailView,
+    ImagesListView,
     NamespaceResetAutoView,
     NamespaceToggleView,
     ProfileView,
@@ -43,6 +45,13 @@ urlpatterns = [
         "workloads/<str:kind>/<str:name>/",
         WorkloadDetailView.as_view(),
         name="workloads-detail",
+    ),
+
+    path("images/", ImagesListView.as_view(), name="images-list"),
+    path(
+        "images/<str:digest>/",
+        ImageDetailView.as_view(),
+        name="images-detail",
     ),
 
     path("findings/", FindingsListView.as_view(), name="findings-list"),

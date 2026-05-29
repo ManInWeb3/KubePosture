@@ -156,6 +156,12 @@
               </a>
             </li>
             <li class="nav-item">
+              <a class="nav-link{% if nav == 'images' %} active{% endif %}" href="{% url 'images-list' %}" title="Images — container images ranked by blast-radius impact">
+                <span class="nav-link-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l9 -4l9 4l-9 4l-9 -4"/><path d="M3 12l9 4l9 -4"/><path d="M3 17l9 4l9 -4"/></svg></span>
+                <span class="nav-link-title">Images</span>
+              </a>
+            </li>
+            <li class="nav-item">
               <a class="nav-link{% if nav == 'findings' %} active{% endif %}" href="{% url 'findings-list' %}" title="Findings — fleet-wide triage: priority, exposure, KEV, EPSS">
                 <span class="nav-link-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 4v5c0 5-3.5 9-8 10-4.5-1-8-5-8-10V7l8-4z"/><path d="M12 8v4"/><path d="M12 16v.01"/></svg></span>
                 <span class="nav-link-title">Findings</span>

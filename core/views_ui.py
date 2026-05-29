@@ -7,33 +7,38 @@ slice.
 """
 from __future__ import annotations
 
+import json
+from datetime import timedelta
+from types import SimpleNamespace
+
+from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin
+from django.contrib.auth.models import Group, User
+from django.core.paginator import Paginator
 from django.db import transaction
 from django.db.models import Count, Q
 from django.http import Http404, HttpResponse, HttpResponseForbidden
-from django.shortcuts import render
+from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
 from django.views import View
 from django.views.generic import RedirectView
 
-from django.contrib import messages
-from django.shortcuts import get_object_or_404, redirect
-
-from django.contrib.auth.models import Group, User
-from django.core.paginator import Paginator
-
-from datetime import timedelta
-
 from core.api.auth import generate_token
 from core.constants import PriorityBand, Source, WorkloadKind
-from core.models import Cluster, Finding, IngestToken, Namespace, UserPreference
+from core.models import Cluster, Finding, IngestToken, Namespace, UserPreference, Workload
+from core.services import hardening_preview
 from core.services.cluster_removal import remove_cluster
 from core.services.components import (
     component_detail,
     list_components,
     list_ecosystems,
     summary_counts,
+)
+from core.services.images import (
+    get_image_detail,
+    is_valid_digest,
+    list_images,
 )
 from core.services.inventory import (
     findings_for_workload_image,
@@ -151,6 +156,42 @@ class WorkloadsListView(LoginRequiredMixin, View):
 # ── Workload detail ──────────────────────────────────────────────
 
 
+_HARDENING_PREVIEW_MAX_BYTES = 10 * 1024 * 1024
+
+
+def _candidate_image_row(workload, preview) -> dict:
+    """Synthetic image row built from a stashed `PreviewResult`.
+
+    Shape matches `list_workload_images()` rows so the existing template can
+    render it without branching, except for the `is_candidate` flag which
+    drives the "PREVIEW" badge.
+    """
+    img = SimpleNamespace(
+        digest=preview.digest,
+        ref=preview.image_ref,
+        repository=preview.image_ref,
+        registry="",
+    )
+    return {
+        "observation": None,
+        "image": img,
+        "workload": workload,
+        "cluster": workload.cluster,
+        "namespace": workload.namespace,
+        "container_name": "(candidate)",
+        "init_container": False,
+        "currently_deployed": True,
+        "first_seen_at": None,
+        "last_seen_at": None,
+        "n_immediate": preview.counts.get(PriorityBand.IMMEDIATE.value, 0),
+        "n_out_of_band": preview.counts.get(PriorityBand.OUT_OF_BAND.value, 0),
+        "n_scheduled": preview.counts.get(PriorityBand.SCHEDULED.value, 0),
+        "n_defer": preview.counts.get(PriorityBand.DEFER.value, 0),
+        "n_total": preview.total,
+        "is_candidate": True,
+    }
+
+
 class WorkloadDetailView(LoginRequiredMixin, View):
     """`/workloads/<kind>/<name>/` — multi-cluster aggregate; cluster
     selector narrows via `?cluster=<name>`.
@@ -190,9 +231,20 @@ class WorkloadDetailView(LoginRequiredMixin, View):
         include_history = request.GET.get("include_history") == "1"
         image_rows = list_workload_images(scoped, include_history=include_history)
 
+        # Hardening preview: load + inject a synthetic image row only when the
+        # URL has narrowed to a single (cluster, namespace) — the preview is
+        # always scored against one workload, not an aggregate.
+        selected_digest = request.GET.get("image") or None
+        preview = None
+        preview_eligible = len(scoped) == 1
+        if preview_eligible and hardening_preview.is_candidate_digest(selected_digest):
+            cid = hardening_preview.candidate_id_from_digest(selected_digest)
+            preview = hardening_preview.load(request, scoped[0].pk, cid)
+        if preview is not None:
+            image_rows = [_candidate_image_row(scoped[0], preview)] + image_rows
+
         # Active-row pick: ?image=<digest> if it matches a row in scope,
         # else first row in the urgency-sorted list.
-        selected_digest = request.GET.get("image") or None
         active_row = None
         if selected_digest:
             active_row = next(
@@ -202,15 +254,23 @@ class WorkloadDetailView(LoginRequiredMixin, View):
         if active_row is None and image_rows:
             active_row = image_rows[0]
 
-        findings = (
-            findings_for_workload_image(active_row["workload"], active_row["image"])
-            if active_row else []
+        is_candidate_active = bool(
+            active_row and active_row.get("is_candidate")
         )
+        if is_candidate_active and preview is not None:
+            findings = preview.findings
+        elif active_row:
+            findings = findings_for_workload_image(
+                active_row["workload"], active_row["image"],
+            )
+        else:
+            findings = []
 
         if _is_htmx(request) and request.headers.get("HX-Target") == "findings-panel":
             return render(request, "workloads/_findings_panel.html", {
                 "active_row": active_row,
                 "findings": findings,
+                "is_preview": is_candidate_active,
             })
 
         signal_chips = []
@@ -243,6 +303,12 @@ class WorkloadDetailView(LoginRequiredMixin, View):
             seen.values(), key=lambda r: r["cluster"].name,
         )
 
+        # Bind the hardening form to the resolved workload's pk so POST does
+        # not have to re-resolve via (cluster, namespace) — those query
+        # params can be None on the unfiltered aggregate view even when
+        # only one workload exists fleet-wide.
+        preview_workload = scoped[0] if preview_eligible else None
+
         return render(request, self.template_name, {
             "nav": "workloads",
             "kind": kind,
@@ -260,6 +326,172 @@ class WorkloadDetailView(LoginRequiredMixin, View):
             "include_history": include_history,
             "cluster_imports": cluster_imports,
             "is_admin": _is_admin(request.user),
+            "preview": preview,
+            "is_preview": is_candidate_active,
+            "preview_eligible": preview_eligible,
+            "preview_workload": preview_workload,
+        })
+
+    def post(self, request, kind, name):
+        """Hardening-preview upload + clear actions.
+
+        The form binds to the workload pk directly (single hidden input) —
+        validated here against (kind, name) from the URL so a forged pk
+        can't target a different workload.
+        """
+        if kind not in WorkloadKind.values:
+            raise Http404("unknown workload kind")
+        workload_id = request.POST.get("workload_id") or ""
+        if not workload_id.isdigit():
+            raise Http404("missing or invalid workload id")
+        workload = (
+            Workload.objects
+            .select_related("cluster", "namespace")
+            .prefetch_related("signals")
+            .filter(pk=int(workload_id), kind=kind, name=name)
+            .first()
+        )
+        if workload is None:
+            raise Http404("workload not found")
+
+        base_url = reverse("workloads-detail", kwargs={"kind": kind, "name": name})
+        base_qs = f"?cluster={workload.cluster.name}&namespace={workload.namespace.name}"
+
+        action = request.POST.get("action") or "preview"
+        if action == "clear":
+            cid = request.POST.get("candidate_id") or ""
+            if cid:
+                hardening_preview.clear(request, workload.pk, cid)
+            return redirect(base_url + base_qs)
+
+        upload = request.FILES.get("scan")
+        pasted = (request.POST.get("scan_text") or "").strip()
+        if upload is None and not pasted:
+            messages.error(request, "Attach a Trivy JSON file or paste its contents.")
+            return redirect(base_url + base_qs)
+
+        if upload is not None and upload.size > _HARDENING_PREVIEW_MAX_BYTES:
+            messages.error(request, "Scan file too large (10 MB max).")
+            return redirect(base_url + base_qs)
+
+        try:
+            raw = upload.read() if upload is not None else pasted.encode("utf-8")
+            cli_json = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            messages.error(request, f"Could not parse JSON: {exc}")
+            return redirect(base_url + base_qs)
+
+        if not hardening_preview.is_trivy_cli_json(cli_json):
+            messages.error(
+                request,
+                "Not a Trivy CLI scan JSON — expected a top-level `Results` array. "
+                "Produce one with `trivy image --format json <image>`.",
+            )
+            return redirect(base_url + base_qs)
+
+        result = hardening_preview.preview_trivy_cli_scan(workload, cli_json)
+        hardening_preview.stash(request, workload.pk, result)
+        return redirect(f"{base_url}{base_qs}&image={result.digest}")
+
+
+# ── Images (image-centric triage) ────────────────────────────────
+
+
+class ImagesListView(LoginRequiredMixin, View):
+    """`/images/` — one row per container image, ranked by blast-radius
+    impact (workloads × Σ weight·CVEs). Click a row to see workloads
+    running it, what other CVEs exist on it, and the SBOM count.
+    """
+
+    template_name = "images/list.html"
+
+    def get(self, request):
+        params = request.GET
+        filters = {
+            "cluster":              params.get("cluster", ""),
+            "namespace":            params.get("namespace", ""),
+            "registry":             params.get("registry", ""),
+            "repository":           params.get("repository", ""),
+            "include_undeployed":   "1" if params.get("include_undeployed") == "1" else "",
+            "sort":                 params.get("sort", ""),
+            "dir":                  params.get("dir") or "desc",
+        }
+
+        rows = list_images(
+            cluster=filters["cluster"] or None,
+            namespace=filters["namespace"] or None,
+            registry_contains=filters["registry"] or None,
+            repository_contains=filters["repository"] or None,
+            currently_deployed_only=not filters["include_undeployed"],
+            sort=filters["sort"] or None,
+            sort_dir=filters["dir"],
+        )
+
+        page = Paginator(rows, 50).get_page(params.get("page") or 1)
+
+        if _is_htmx(request) and request.headers.get("HX-Target") == "image-rows":
+            return render(request, "images/_rows.html", {
+                "page_obj": page,
+                "rows": page.object_list,
+                "filters": filters,
+                "request_qs": _qs_without_page(request.GET),
+            })
+
+        clusters = Cluster.objects.order_by("name")
+        ns_qs = Namespace.objects.filter(workloads__deployed=True)
+        if filters["cluster"]:
+            ns_qs = ns_qs.filter(cluster__name=filters["cluster"])
+        namespace_names = list(
+            ns_qs.values_list("name", flat=True).distinct().order_by("name")
+        )
+
+        return render(request, self.template_name, {
+            "nav": "images",
+            "page_obj": page,
+            "rows": page.object_list,
+            "filters": filters,
+            "clusters": clusters,
+            "namespace_names": namespace_names,
+            "request_qs": _qs_without_page(request.GET),
+        })
+
+
+class ImageDetailView(LoginRequiredMixin, View):
+    """`/images/<digest>/` — image header + workloads using it +
+    findings on it + SBOM count. Findings are paginated 50/page (popular
+    base images can carry 200+ CVEs). HTMX swaps #finding-rows on
+    pagination so the rest of the detail page stays put.
+    """
+
+    template_name = "images/detail.html"
+
+    def get(self, request, digest):
+        if not is_valid_digest(digest):
+            raise Http404("invalid image digest")
+        detail = get_image_detail(digest)
+        if detail is None:
+            raise Http404("image not found")
+
+        page = Paginator(detail["findings_qs"], 50).get_page(
+            request.GET.get("page") or 1,
+        )
+
+        if _is_htmx(request) and request.headers.get("HX-Target") == "finding-rows":
+            return render(request, "findings/_rows.html", {
+                "page_obj": page,
+                "findings": page.object_list,
+                "filters": {},
+                "request_qs": _qs_without_page(request.GET),
+            })
+
+        return render(request, self.template_name, {
+            "nav": "images",
+            "image": detail["image"],
+            "workload_rows": detail["workload_rows"],
+            "page_obj": page,
+            "findings": page.object_list,
+            "sbom_count": detail["sbom_count"],
+            "request_qs": _qs_without_page(request.GET),
         })
 
 

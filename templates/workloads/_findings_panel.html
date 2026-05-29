@@ -6,8 +6,11 @@
       <span class="ms-2 text-muted small">
         <strong>{{ active_row.image.ref|default:active_row.image.repository }}</strong>
         on {{ active_row.cluster.name }}/{{ active_row.namespace.name }}
-        — {{ findings|length }} active
+        — {{ findings|length }}{% if is_preview %} predicted{% else %} active{% endif %}
       </span>
+      {% if is_preview %}
+        <span class="badge bg-purple-lt text-purple ms-2" title="Hardening preview — findings are scored against this workload's context but not persisted">PREVIEW</span>
+      {% endif %}
     {% else %}
       <span class="ms-2 text-muted small">No image selected.</span>
     {% endif %}
@@ -27,12 +30,12 @@
       </thead>
       <tbody>
         {% for f in findings %}
-        <tr class="cursor-pointer"
+        <tr{% if f.pk %} class="cursor-pointer"
             hx-get="{% url 'findings-detail-panel' f.pk %}"
             hx-target="#finding-detail-offcanvas"
             hx-swap="innerHTML"
             data-bs-toggle="offcanvas"
-            data-bs-target="#finding-detail-offcanvas">
+            data-bs-target="#finding-detail-offcanvas"{% endif %}>
           <td><code class="small">{{ f.vuln_id|default:"—" }}</code></td>
           <td><span class="text-muted small" style="white-space: normal; word-break: break-word;">{{ f.title }}</span></td>
           <td style="word-break: break-word;">{{ f.pkg_name|default:"—" }}</td>

@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% load help_tags %}
+{% load findings_tags %}
+
+{% block title %}Images — KubePosture{% endblock %}
+{% block breadcrumbs %}
+<ol class="breadcrumb" aria-label="breadcrumbs">
+  <li class="breadcrumb-item active" aria-current="page">Images</li>
+</ol>
+{% endblock %}
+
+{% block content %}
+{% help "Images" %}
+  <p><strong>Container images observed across the fleet</strong>, ranked
+  by blast-radius <em>Impact</em>. One row per Image (content-addressed by
+  digest, deduplicated across clusters).</p>
+  <p><strong>Impact</strong> = workloads currently using this image ×
+  Σ (weight × CVE count per band), with weights
+  <code>immediate=1000</code>, <code>out-of-band=100</code>,
+  <code>scheduled=10</code>, <code>defer=1</code>. Powers of 10 mean a
+  single Immediate CVE on a widely-deployed image always outranks any
+  pile of lower-band findings.</p>
+  <p><strong>Quick wins:</strong> sort by <em>Impact / CVE</em> to find
+  high-leverage images — many workloads, few CVEs. One patch unblocks
+  many findings.</p>
+  <p><strong>How to use:</strong> click a row to see which workloads run
+  the image, what other CVEs exist on it, and the SBOM package count —
+  the answer to <em>"if I patch this image, what do I unblock?"</em>.
+  Toggle <em>Include undeployed</em> to also list images observed only
+  in past inventory cycles.</p>
+{% endhelp %}
+
+<form id="images-filters" method="get" class="card mb-3"
+      hx-get="{% url 'images-list' %}"
+      hx-target="#image-rows"
+      hx-headers='{"HX-Target": "image-rows"}'
+      hx-push-url="true"
+      hx-trigger="change, submit, keyup changed delay:400ms from:input[type=text]">
+  <div class="card-body">
+    <div class="row g-2 align-items-center flex-nowrap overflow-auto">
+      <div class="col-auto">
+        <select name="cluster" class="form-select form-select-sm">
+          <option value="">All clusters</option>
+          {% for c in clusters %}
+            <option value="{{ c.name }}"{% if filters.cluster == c.name %} selected{% endif %}>{{ c.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-auto">
+        <select name="namespace" class="form-select form-select-sm">
+          <option value="">Any namespace</option>
+          {% for n in namespace_names %}
+            <option value="{{ n }}"{% if filters.namespace == n %} selected{% endif %}>{{ n }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-auto">
+        <input type="text" name="registry" class="form-control form-control-sm"
+               placeholder="registry contains…" value="{{ filters.registry }}" style="min-width: 12rem;">
+      </div>
+      <div class="col-auto">
+        <input type="text" name="repository" class="form-control form-control-sm"
+               placeholder="repository contains…" value="{{ filters.repository }}" style="min-width: 12rem;">
+      </div>
+      <div class="col-auto">
+        <label class="form-check form-switch m-0" title="Include images observed only in past inventory cycles.">
+          <input type="checkbox" name="include_undeployed" value="1" class="form-check-input"
+                 {% if filters.include_undeployed %}checked{% endif %}>
+          <span class="form-check-label">Include undeployed</span>
+        </label>
+      </div>
+      <div class="col-auto ms-auto">
+        <a href="{% url 'images-list' %}" class="btn btn-sm btn-outline-secondary">Clear</a>
+      </div>
+    </div>
+
+    <input type="hidden" name="sort" value="{{ filters.sort }}">
+    <input type="hidden" name="dir" value="{{ filters.dir }}">
+  </div>
+</form>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table">
+      <thead>
+        <tr>
+          {% include "workloads/_sort_header.html" with col="repository" label="Image" align="" %}
+          <th>Digest</th>
+          {% include "workloads/_sort_header.html" with col="workload_count" label="Workloads" align="text-end" %}
+          {% include "workloads/_sort_header.html" with col="n_immediate" label="# Immediate" align="text-end" %}
+          {% include "workloads/_sort_header.html" with col="n_out_of_band" label="# Out-of-Band" align="text-end" %}
+          {% include "workloads/_sort_header.html" with col="n_scheduled" label="# Scheduled" align="text-end" %}
+          {% include "workloads/_sort_header.html" with col="n_defer" label="# Defer" align="text-end" %}
+          {% include "workloads/_sort_header.html" with col="impact" label="Impact" align="text-end" %}
+          {% include "workloads/_sort_header.html" with col="impact_per_cve" label="Impact / CVE" align="text-end" %}
+          {% include "workloads/_sort_header.html" with col="last_seen_at" label="Last seen" align="" %}
+        </tr>
+      </thead>
+      <tbody id="image-rows">
+        {% include "images/_rows.html" %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+  (function() {
+    var form = document.getElementById('images-filters');
+    if (!form) return;
+    var sortIn = form.querySelector('[name="sort"]');
+    var dirIn  = form.querySelector('[name="dir"]');
+    document.querySelectorAll('th.sortable').forEach(function(th) {
+      th.addEventListener('click', function() {
+        var col = th.dataset.sortCol;
+        if (sortIn.value === col) {
+          dirIn.value = (dirIn.value === 'asc') ? 'desc' : 'asc';
+        } else {
+          sortIn.value = col;
+          dirIn.value = 'desc';
+        }
+        htmx.trigger(form, 'submit');
+      });
+    });
+  })();
+</script>
+{% endblock %}
