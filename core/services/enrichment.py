@@ -20,7 +20,7 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from django.db import transaction
+from django.db import OperationalError, connection, transaction
 from django.utils import timezone
 
 from core.constants import Severity
@@ -189,6 +189,90 @@ def fetch_kev() -> int:
         Path(tmp_path).unlink(missing_ok=True)
 
 
+# ── Finding-cache bulk refresh (deadlock-resistant) ───────────────
+
+# PostgreSQL deadlock SQLSTATE. We retry transient deadlocks with backoff
+# rather than aborting the whole refresh — the ingest queue worker also
+# updates Finding rows, and the two writers can collide on shared CVEs.
+_PG_DEADLOCK = "40P01"
+_DEADLOCK_MAX_ATTEMPTS = 5
+_DEADLOCK_BACKOFF_BASE = 0.5
+
+
+def _exec_with_deadlock_retry(sql: str) -> None:
+    """Run `sql` in autocommit mode with a deadlock-detect retry loop.
+
+    Running outside an outer `transaction.atomic()` is the point: the
+    statement's row locks release immediately on completion instead of
+    being held for the whole enrichment cycle (250k+ rows worth, which
+    consistently deadlocked with the ingest queue worker — see
+    Finding.objects.filter(vuln_id=cve).update(...) loop this replaces).
+    """
+    delay = _DEADLOCK_BACKOFF_BASE
+    for attempt in range(1, _DEADLOCK_MAX_ATTEMPTS + 1):
+        try:
+            with connection.cursor() as cur:
+                cur.execute(sql)
+            return
+        except OperationalError as exc:
+            pgcode = getattr(getattr(exc, "__cause__", None), "sqlstate", None)
+            if pgcode != _PG_DEADLOCK or attempt == _DEADLOCK_MAX_ATTEMPTS:
+                raise
+            log.warning("enrichment.deadlock_retry attempt=%d", attempt)
+            time.sleep(delay)
+            delay *= 2
+
+
+def _refresh_finding_epss_cache() -> None:
+    """Propagate the (refreshed) EpssScore table into the Finding cache.
+
+    Two bulk UPDATEs replace the prior per-CVE Python loop:
+      1) push current EpssScore values into matching Finding rows;
+      2) clear cache for Findings whose CVE is no longer in EpssScore.
+
+    `IS DISTINCT FROM` skips rows that already match so we don't acquire
+    write locks on unchanged tuples. Each statement runs in autocommit
+    with deadlock retry.
+    """
+    _exec_with_deadlock_retry("""
+        UPDATE core_finding f
+        SET epss_score = e.score, epss_percentile = e.percentile
+        FROM core_epssscore e
+        WHERE f.vuln_id = e.vuln_id
+          AND (f.epss_score IS DISTINCT FROM e.score
+               OR f.epss_percentile IS DISTINCT FROM e.percentile)
+    """)
+    _exec_with_deadlock_retry("""
+        UPDATE core_finding f
+        SET epss_score = NULL, epss_percentile = NULL
+        WHERE f.vuln_id LIKE 'CVE-%'
+          AND f.epss_score IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM core_epssscore e WHERE e.vuln_id = f.vuln_id
+          )
+    """)
+
+
+def _refresh_finding_kev_cache() -> None:
+    """Propagate the (refreshed) KevEntry table into the Finding cache."""
+    _exec_with_deadlock_retry("""
+        UPDATE core_finding f
+        SET kev_listed = TRUE
+        WHERE f.kev_listed = FALSE
+          AND EXISTS (
+              SELECT 1 FROM core_keventry k WHERE k.vuln_id = f.vuln_id
+          )
+    """)
+    _exec_with_deadlock_retry("""
+        UPDATE core_finding f
+        SET kev_listed = FALSE
+        WHERE f.kev_listed = TRUE
+          AND NOT EXISTS (
+              SELECT 1 FROM core_keventry k WHERE k.vuln_id = f.vuln_id
+          )
+    """)
+
+
 # ── EPSS ----------------------------------------------------------
 
 def load_epss_from_file(path: str) -> int:
@@ -221,11 +305,9 @@ def load_epss_from_file(path: str) -> int:
         return 0
 
     seen_ids = [cve for cve, _, _ in cleaned]
-    n = 0
+    # EpssScore refresh: small, fast atomic block. Holding locks here only
+    # blocks readers of EpssScore (rare), not Finding.
     with transaction.atomic():
-        # Bulk UPSERT — the dump is ~250k rows; per-row update_or_create
-        # is unworkable (~5 min). bulk_create + update_conflicts gets it
-        # under 5s.
         rows = [
             EpssScore(vuln_id=cve, score=score, percentile=pct)
             for cve, score, pct in cleaned
@@ -237,23 +319,18 @@ def load_epss_from_file(path: str) -> int:
             unique_fields=["vuln_id"],
             batch_size=5000,
         )
-        n = len(rows)
-        # Removal phase: drop rows for CVEs no longer in the dump.
         EpssScore.objects.exclude(vuln_id__in=seen_ids).delete()
+    n = len(cleaned)
 
-        # Refresh the Finding-side cache for vuln_ids we touched. We
-        # only update findings whose vuln_id appears in the dump; a
-        # vuln_id that dropped out gets its cache cleared too.
-        for cve, score, pct in cleaned:
-            Finding.objects.filter(vuln_id=cve).update(
-                epss_score=score,
-                epss_percentile=pct,
-            )
-        Finding.objects.exclude(vuln_id__in=seen_ids).filter(
-            epss_score__isnull=False
-        ).update(epss_score=None, epss_percentile=None)
+    # Finding-cache refresh in autocommit + deadlock retry. The prior
+    # per-CVE UPDATE loop inside one atomic block held thousands of row
+    # locks and deadlocked with the ingest queue worker; bulk SQL via JOIN
+    # finishes in one statement and releases locks immediately on commit.
+    _refresh_finding_epss_cache()
 
-    affected = list(Finding.objects.filter(vuln_id__in=seen_ids))
+    affected = list(
+        Finding.objects.filter(vuln_id__in=seen_ids).only("id")
+    )
     recompute_batch(affected)
     return n
 
@@ -277,7 +354,6 @@ def load_kev_from_file(path: str) -> int:
         return 0
 
     seen_ids = [v["cveID"] for v in vulns if v.get("cveID")]
-    n = 0
     with transaction.atomic():
         rows = [
             KevEntry(
@@ -296,17 +372,13 @@ def load_kev_from_file(path: str) -> int:
             unique_fields=["vuln_id"],
             batch_size=2000,
         )
-        n = len(rows)
         KevEntry.objects.exclude(vuln_id__in=seen_ids).delete()
+    n = len(rows)
 
-        # Update Finding caches.
-        Finding.objects.filter(vuln_id__in=list(seen_ids)).update(kev_listed=True)
-        Finding.objects.exclude(vuln_id__in=list(seen_ids)).filter(kev_listed=True).update(
-            kev_listed=False
-        )
+    _refresh_finding_kev_cache()
 
     affected = list(
-        Finding.objects.filter(vuln_id__in=list(seen_ids))
+        Finding.objects.filter(vuln_id__in=seen_ids).only("id")
     )
     recompute_batch(affected)
     return n

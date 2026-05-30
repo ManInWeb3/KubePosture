@@ -74,35 +74,20 @@ def capture_namespace_snapshot(namespace: Namespace) -> Snapshot:
 @transaction.atomic
 def capture_cluster_heartbeat(cluster: Cluster) -> int:
     """Write a heartbeat snapshot covering one cluster: cluster row +
-    one row per active namespace in the cluster + one row per deployed
-    workload in the cluster.
+    one row per active namespace in the cluster.
 
     Used at the end of an import session (last drainable mark for the
     cluster) to refresh trend datapoints with the post-reap state.
-    Skips the global row — that's the daily heartbeat's job.
+    Workload-scope rows are NOT written here — those are owned by the
+    inventory reap's event path (`first_seen`/`replaced`/...) and by
+    the daily heartbeat (`none` continuity rows). Skips the global row
+    — that's the daily heartbeat's job.
     """
     written = 0
     capture_cluster_snapshot(cluster)
     written += 1
     for ns in Namespace.objects.filter(cluster=cluster, active=True):
         capture_namespace_snapshot(ns)
-        written += 1
-    for wl in Workload.objects.filter(
-        cluster=cluster, deployed=True,
-    ).select_related("namespace"):
-        wf = restrict_to_currently_deployed_images(
-            default_finding_qs(cluster=cluster).filter(workload=wl)
-        )
-        Snapshot.objects.create(
-            scope_kind=SnapshotScope.WORKLOAD.value,
-            cluster=cluster,
-            namespace=wl.namespace,
-            workload=wl,
-            severity_counts=_severity_counts(wf),
-            priority_counts=_priority_counts(wf),
-            total_active=wf.count(),
-            change_kind=ImageSetChangeKind.NONE.value,
-        )
         written += 1
     return written
 

@@ -334,6 +334,7 @@ def list_workload_images(workloads, *, include_history: bool = False):
                 "n_scheduled": c[PriorityBand.SCHEDULED.value],
                 "n_defer": c[PriorityBand.DEFER.value],
                 "n_total": sum(c.values()),
+                "is_candidate": False,
             }
         )
     rows.sort(

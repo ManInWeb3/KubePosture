@@ -231,13 +231,13 @@ class WorkloadDetailView(LoginRequiredMixin, View):
         include_history = request.GET.get("include_history") == "1"
         image_rows = list_workload_images(scoped, include_history=include_history)
 
-        # Hardening preview: load + inject a synthetic image row only when the
-        # URL has narrowed to a single (cluster, namespace) — the preview is
-        # always scored against one workload, not an aggregate.
+        # Hardening preview: candidate row only renders when the URL has
+        # narrowed to a single (cluster, namespace) — the preview is scored
+        # against one workload, not an aggregate, so showing it under a
+        # multi-cluster header would be misleading.
         selected_digest = request.GET.get("image") or None
         preview = None
-        preview_eligible = len(scoped) == 1
-        if preview_eligible and hardening_preview.is_candidate_digest(selected_digest):
+        if len(scoped) == 1 and hardening_preview.is_candidate_digest(selected_digest):
             cid = hardening_preview.candidate_id_from_digest(selected_digest)
             preview = hardening_preview.load(request, scoped[0].pk, cid)
         if preview is not None:
@@ -303,11 +303,20 @@ class WorkloadDetailView(LoginRequiredMixin, View):
             seen.values(), key=lambda r: r["cluster"].name,
         )
 
-        # Bind the hardening form to the resolved workload's pk so POST does
-        # not have to re-resolve via (cluster, namespace) — those query
-        # params can be None on the unfiltered aggregate view even when
-        # only one workload exists fleet-wide.
-        preview_workload = scoped[0] if preview_eligible else None
+        # Hardening form renders whenever there's at least one workload in
+        # scope. With a single workload it binds via a hidden input; with
+        # multiple (multi-cluster / multi-namespace aggregate) it adds a
+        # picker so the user can pick which workload's context to score
+        # against without leaving the form.
+        preview_target_choices = [
+            {
+                "pk": w.pk,
+                "label": f"{w.cluster.name} / {w.namespace.name}",
+            }
+            for w in sorted(
+                scoped, key=lambda w: (w.cluster.name, w.namespace.name)
+            )
+        ]
 
         return render(request, self.template_name, {
             "nav": "workloads",
@@ -328,8 +337,7 @@ class WorkloadDetailView(LoginRequiredMixin, View):
             "is_admin": _is_admin(request.user),
             "preview": preview,
             "is_preview": is_candidate_active,
-            "preview_eligible": preview_eligible,
-            "preview_workload": preview_workload,
+            "preview_target_choices": preview_target_choices,
         })
 
     def post(self, request, kind, name):

@@ -98,6 +98,7 @@ def image_api(db, cluster_a, workload_api):
     img = Image.objects.create(digest="sha256:" + "a" * 64, ref="x:api-v1")
     obs = WorkloadImageObservation.objects.create(
         workload=workload_api, image=img, container_name="app",
+        currently_deployed=True,
     )
     WorkloadImageObservation.objects.filter(pk=obs.pk).update(
         last_seen_at=cluster_a.last_complete_inventory_at + timedelta(seconds=1),
@@ -110,6 +111,7 @@ def image_frontend(db, cluster_a, workload_frontend):
     img = Image.objects.create(digest="sha256:" + "c" * 64, ref="x:frontend-v3")
     obs = WorkloadImageObservation.objects.create(
         workload=workload_frontend, image=img, container_name="app",
+        currently_deployed=True,
     )
     WorkloadImageObservation.objects.filter(pk=obs.pk).update(
         last_seen_at=cluster_a.last_complete_inventory_at + timedelta(seconds=1),

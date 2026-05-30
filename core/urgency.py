@@ -166,13 +166,22 @@ def score(finding: Finding) -> PriorityResult:
             ("high", "exposed", "prod"),
         )
 
-    # Sensitive-namespace bump for medium/high findings.
-    if severity in (Severity.HIGH.value, Severity.MEDIUM.value) \
-            and namespace is not None and namespace.contains_sensitive_data:
-        return PriorityResult(
-            PriorityBand.SCHEDULED.value,
-            ("severity", "sensitive-ns"),
-        )
+    # Sensitive-namespace bump. HIGH is bumped unconditionally; MEDIUM
+    # only when there's no fix available — a fixable medium in a
+    # sensitive namespace is on the normal patch track, an unfixed one
+    # warrants extra eyes. Critical+sensitive-ns is handled higher up
+    # as OOB.
+    if namespace is not None and namespace.contains_sensitive_data:
+        if severity == Severity.HIGH.value:
+            return PriorityResult(
+                PriorityBand.SCHEDULED.value,
+                ("severity", "sensitive-ns"),
+            )
+        if severity == Severity.MEDIUM.value and not finding.fixed_version:
+            return PriorityResult(
+                PriorityBand.SCHEDULED.value,
+                ("severity", "sensitive-ns", "no-fix"),
+            )
 
     if severity in (Severity.CRITICAL.value, Severity.HIGH.value) \
             and (is_exposed or has_escalation):

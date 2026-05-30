@@ -11,23 +11,34 @@
       {% endif %}
     </summary>
     <div class="card-body">
-      {% if not preview_eligible %}
-        <p class="text-muted mb-0">
-          Pick one cluster and one namespace above to evaluate a candidate
-          image. Preview is scored against a single workload's context (env,
-          exposure, signals).
-        </p>
+      {% if not preview_target_choices %}
+        <p class="text-muted mb-0">No workload in scope.</p>
       {% else %}
-        <p class="text-muted small mb-3">
-          Evaluating against
-          <code>{{ preview_workload.cluster.name }}/{{ preview_workload.namespace.name }}/{{ preview_workload.kind }}/{{ preview_workload.name }}</code>.
-        </p>
         <form method="post"
               enctype="multipart/form-data"
               action="{% url 'workloads-detail' kind=kind name=name %}">
           {% csrf_token %}
-          <input type="hidden" name="workload_id" value="{{ preview_workload.pk }}">
           <input type="hidden" name="action" value="preview">
+
+          {% if preview_target_choices|length == 1 %}
+            <input type="hidden" name="workload_id" value="{{ preview_target_choices.0.pk }}">
+            <p class="text-muted small mb-3">
+              Evaluating against <code>{{ preview_target_choices.0.label }}</code>.
+            </p>
+          {% else %}
+            <div class="mb-3">
+              <label class="form-label">Target (cluster / namespace)</label>
+              <select name="workload_id" class="form-select" required>
+                {% for choice in preview_target_choices %}
+                  <option value="{{ choice.pk }}">{{ choice.label }}</option>
+                {% endfor %}
+              </select>
+              <small class="form-hint">
+                The preview is scored against one workload's context (env,
+                exposure, signals) — pick which deployment to evaluate.
+              </small>
+            </div>
+          {% endif %}
 
           <div class="row g-3">
             <div class="col-md-6">
@@ -54,7 +65,7 @@
               action="{% url 'workloads-detail' kind=kind name=name %}"
               class="mt-2 d-inline">
           {% csrf_token %}
-          <input type="hidden" name="workload_id" value="{{ preview_workload.pk }}">
+          <input type="hidden" name="workload_id" value="{{ preview_target_choices.0.pk }}">
           <input type="hidden" name="action" value="clear">
           <input type="hidden" name="candidate_id" value="{{ preview.candidate_id }}">
           <button type="submit" class="btn btn-outline-secondary btn-sm">Clear preview</button>

@@ -314,12 +314,14 @@ def test_image_currently_running_anchored_on_cluster_last_complete_inventory():
 
     obs_current = WorkloadImageObservation.objects.create(
         workload=wl, image=img_current, container_name="app",
+        currently_deployed=True,
     )
     WorkloadImageObservation.objects.filter(pk=obs_current.pk).update(
         last_seen_at=t_complete + timedelta(seconds=1),
     )
     obs_stale = WorkloadImageObservation.objects.create(
         workload=wl, image=img_stale, container_name="sidecar",
+        currently_deployed=False,
     )
     WorkloadImageObservation.objects.filter(pk=obs_stale.pk).update(
         last_seen_at=t0,
@@ -331,10 +333,14 @@ def test_image_currently_running_anchored_on_cluster_last_complete_inventory():
     assert img_current.digest in running
     assert img_stale.digest not in running
 
-    # No complete cycle ever ran → cluster.last_complete_inventory_at is NULL
-    # → nothing can be claimed deployed (correct: we have no proof).
+    # No complete cycle ever ran → cluster.last_complete_inventory_at is NULL.
+    # Simulate the reaper having never run: no observation can be marked
+    # currently_deployed → nothing claimed deployed (we have no proof).
     cluster.last_complete_inventory_at = None
     cluster.save()
+    WorkloadImageObservation.objects.filter(workload__cluster=cluster).update(
+        currently_deployed=False,
+    )
     assert Image.objects.currently_running(cluster=cluster).count() == 0
 
 
