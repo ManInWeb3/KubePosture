@@ -236,3 +236,55 @@ def test_cluster_filter_narrows_clusters_in_scope(
     assert f'id="reimport-{s["cluster_b"].pk}"' not in body
     assert f'id="reimport-{s["cluster_c"].pk}"' not in body
     assert body.count("queue a fresh import") == 1
+
+
+# ── deployed=False stale-row filtering ────────────────────────────
+
+
+def test_stale_workload_namespace_hidden_from_selector(
+    client, admin_user, shared_image,
+):
+    """A `deployed=False` Workload row for the same (kind, name) in a
+    different namespace must not leak into the namespace selector or
+    the Evaluate-form picker — its presence used to send the Evaluate
+    redirect to a `(cluster, namespace)` with no observations, which
+    showed only the candidate PREVIEW row.
+    """
+    client.force_login(admin_user)
+    c = _cluster("cluster-a")
+    ns_live = _ns(c, "payments")
+    ns_stale = _ns(c, "legacy")
+
+    w_live = _workload(c, ns_live, "Deployment", "api")
+    _observe(w_live, shared_image)
+
+    w_stale = Workload.objects.create(
+        cluster=c, namespace=ns_stale, kind="Deployment", name="api",
+        deployed=False, last_inventory_at=None,
+    )
+
+    resp = _get_detail(client)
+    assert resp.status_code == 200
+    ctx = resp.context
+
+    assert ctx["namespaces_with_workload"] == ["payments"]
+    picker_pks = {row["pk"] for row in ctx["preview_target_choices"]}
+    assert picker_pks == {w_live.pk}
+    assert w_stale.pk not in picker_pks
+
+
+def test_all_stale_workloads_404(client, admin_user):
+    """If every Workload row for (kind, name) is `deployed=False`,
+    the detail view 404s — matching the convention used by other views.
+    """
+    client.force_login(admin_user)
+    c = _cluster("cluster-a")
+    ns = _ns(c, "payments")
+    Workload.objects.create(
+        cluster=c, namespace=ns, kind="Deployment", name="ghost",
+        deployed=False, last_inventory_at=None,
+    )
+
+    url = reverse("workloads-detail", kwargs={"kind": "Deployment", "name": "ghost"})
+    resp = client.get(url)
+    assert resp.status_code == 404

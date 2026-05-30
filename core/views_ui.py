@@ -204,7 +204,9 @@ class WorkloadDetailView(LoginRequiredMixin, View):
             raise Http404("unknown workload kind")
         cluster_name = request.GET.get("cluster") or None
         namespace_name = request.GET.get("namespace") or None
-        all_workloads = list(workloads_for_kind_name(kind, name))
+        all_workloads = [
+            w for w in workloads_for_kind_name(kind, name) if w.deployed
+        ]
         if not all_workloads:
             raise Http404("workload not found")
 
@@ -356,7 +358,7 @@ class WorkloadDetailView(LoginRequiredMixin, View):
             Workload.objects
             .select_related("cluster", "namespace")
             .prefetch_related("signals")
-            .filter(pk=int(workload_id), kind=kind, name=name)
+            .filter(pk=int(workload_id), kind=kind, name=name, deployed=True)
             .first()
         )
         if workload is None:
