@@ -436,3 +436,97 @@ def test_is_internal_ingress_configured_class_via_legacy_annotation():
         assert inv._is_internal_ingress(
             _ingress_with_class("pomerium", via_annotation=True)
         ) is True
+
+
+# ── replicas=0 → effectively not deployed ─────────────────────────
+
+
+@pytest.mark.django_db
+def test_persist_marks_scaled_to_zero_workload_not_deployed():
+    """A Deployment scaled to replicas=0 is in inventory but runs no
+    pods → persisted deployed=False. replicas>=1 and replicas=None
+    (standalone Pod / DaemonSet) stay deployed."""
+    from django.utils import timezone
+    from core.models import Cluster as ClusterM, Workload
+
+    cluster = ClusterM.objects.create(name="scale-persist")
+    dep0 = _deployment("scaled-down", "ns")
+    dep0["spec"]["replicas"] = 0
+    dep2 = _deployment("scaled-up", "ns")
+    dep2["spec"]["replicas"] = 2
+
+    st = inv.parse_envelope(
+        _envelope(_ns("ns"), dep0, dep2, _pod("naked", "ns")), cluster,
+    )
+    inv.persist(st, mark_started_at=timezone.now())
+
+    assert Workload.objects.get(cluster=cluster, name="scaled-down").deployed is False
+    assert Workload.objects.get(cluster=cluster, name="scaled-up").deployed is True
+    # Standalone Pod has replicas=None → deployed.
+    assert Workload.objects.get(cluster=cluster, name="naked").deployed is True
+
+
+@pytest.mark.django_db
+def test_scaled_to_zero_exposed_workload_does_not_mark_namespace_exposed():
+    """A replicas=0 workload behind a LoadBalancer has no endpoints, so
+    it must not flip namespace.internet_exposed."""
+    from django.utils import timezone
+    from core.models import Cluster as ClusterM, Namespace, Workload
+
+    cluster = ClusterM.objects.create(name="scale-expose")
+    dep0 = _deployment("front", "ns")
+    dep0["spec"]["replicas"] = 0
+    lb_svc = {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {"name": "front-lb", "namespace": "ns", "annotations": {}},
+        "spec": {"type": "LoadBalancer", "selector": {"app": "front"}},
+    }
+
+    st = inv.parse_envelope(_envelope(_ns("ns"), dep0, lb_svc), cluster)
+    inv.persist(st, mark_started_at=timezone.now())
+
+    wl = Workload.objects.get(cluster=cluster, name="front")
+    assert wl.deployed is False
+    # The LB selector still matches its labels (exposed-by-config)…
+    assert wl.publicly_exposed is True
+    # …but with zero pods the namespace is not internet-exposed.
+    assert Namespace.objects.get(cluster=cluster, name="ns").internet_exposed is False
+
+
+@pytest.mark.django_db
+def test_reap_inventory_diff_scaled_to_zero_not_deployed():
+    """The reap is the final authority: a scaled-to-zero workload IS in
+    the snapshot (last_inventory_at bumped) but must still end
+    deployed=False. NULL-replica workloads (DaemonSet) stay deployed."""
+    from datetime import timedelta
+    from django.utils import timezone
+    from core.models import Cluster as ClusterM, Namespace, Workload
+
+    cluster = ClusterM.objects.create(name="reap-scale")
+    ns = Namespace.objects.create(cluster=cluster, name="ns")
+    mark = timezone.now()
+    seen_at = mark + timedelta(seconds=1)
+
+    w_zero = Workload.objects.create(
+        cluster=cluster, namespace=ns, kind="Deployment", name="z",
+        replicas=0, deployed=True,
+    )
+    w_one = Workload.objects.create(
+        cluster=cluster, namespace=ns, kind="Deployment", name="o",
+        replicas=1, deployed=True,
+    )
+    w_ds = Workload.objects.create(
+        cluster=cluster, namespace=ns, kind="DaemonSet", name="d",
+        replicas=None, deployed=True,
+    )
+    Workload.objects.filter(cluster=cluster).update(last_inventory_at=seen_at)
+
+    counters = inv.reap_inventory_diff(cluster, mark)
+
+    assert Workload.objects.get(pk=w_zero.pk).deployed is False
+    assert Workload.objects.get(pk=w_one.pk).deployed is True
+    assert Workload.objects.get(pk=w_ds.pk).deployed is True
+    assert counters["workloads_scaled_to_zero"] == 1
+    assert counters["workloads_deployed_true"] == 2
+    assert counters["workloads_deployed_false"] == 1

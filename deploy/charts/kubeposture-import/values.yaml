@@ -31,7 +31,7 @@ initialRun: true
 schedule: "0 */6 * * *"
 
 # -- Maximum run time for the import job
-activeDeadlineSeconds: 900
+activeDeadlineSeconds: 1800
 
 # -- Per-request HTTP timeout (seconds) for POSTs to the KubePosture API.
 # Bump this if your import job sees intermittent connection-reset failures
@@ -60,7 +60,7 @@ trigger:
   # Tighter deadline than the main job: idle ticks complete in seconds.
   # When a real import fires it inherits the main `activeDeadlineSeconds`
   # because the on-demand job runs the same code path.
-  activeDeadlineSeconds: 900
+  activeDeadlineSeconds: 1800
 
 # -- Image containing the import script + kubernetes Python client
 image:
@@ -73,10 +73,10 @@ imagePullSecrets: []
 # -- Resources for the import job
 resources:
   requests:
-    cpu: 100m
+    cpu: 1
     memory: 128Mi
   limits:
-    cpu: 500m
+    cpu: 2
     memory: 512Mi
 
 # -- Naming

@@ -7,6 +7,7 @@ import logging
 from datetime import timedelta
 
 from django.db import transaction
+from django.db.models import Q
 
 from core.constants import (
     ImageSetChangeKind,
@@ -97,13 +98,21 @@ def _reap_inventory(mark: ImportMark) -> dict:
     counters.update(diff)
 
     # Mirror Workload.deployed onto WorkloadImageObservation rows:
-    # bumped this cycle → currently_deployed=True; the rest → False.
-    # Source of truth for the workload-detail Images table.
+    # bumped this cycle AND owning workload deployed → currently_deployed=True;
+    # the rest → False. The workload-deployed clause keeps a scaled-to-zero
+    # workload's declared image (still bumped this cycle) from showing as
+    # running. reap_inventory_diff above already set Workload.deployed, so
+    # the join here reads the finalized value. Source of truth for the
+    # workload-detail Images table.
     obs_qs = WorkloadImageObservation.objects.filter(workload__cluster=cluster)
-    obs_deployed = obs_qs.filter(last_seen_at__gte=mark.started_at).update(
+    obs_deployed = obs_qs.filter(
+        last_seen_at__gte=mark.started_at, workload__deployed=True,
+    ).update(
         currently_deployed=True,
     )
-    obs_undeployed = obs_qs.exclude(last_seen_at__gte=mark.started_at).update(
+    obs_undeployed = obs_qs.exclude(
+        Q(last_seen_at__gte=mark.started_at) & Q(workload__deployed=True)
+    ).update(
         currently_deployed=False,
     )
     counters["obs_deployed"] = obs_deployed

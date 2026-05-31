@@ -736,7 +736,13 @@ def persist(st: _InventoryStaging, mark_started_at) -> dict:
             "service_account": w.service_account or "default",
             "replicas": w.replicas,
             "labels": labels,
-            "deployed": True,
+            # A workload scaled to zero (Deployment/StatefulSet with
+            # replicas==0) is in inventory but runs no pods — not
+            # deployed. replicas is None for DaemonSets/Pods/CronJobs/
+            # Jobs (no replica count) and None != 0, so those stay
+            # deployed. The reap re-applies the same rule as the final
+            # authority (reap_inventory_diff).
+            "deployed": w.replicas != 0,
             "last_inventory_at": mark_started_at,
         }
         # Honour manual override.
@@ -917,10 +923,13 @@ def persist(st: _InventoryStaging, mark_started_at) -> dict:
     for ns_name, ns in st.namespaces.items():
         if ns.exposure_is_manual:
             continue
+        # Scaled-to-zero workloads (deployed=False) have no endpoints
+        # behind their LB/Ingress, so they don't make the namespace
+        # internet-exposed.
         rollup = any(
             wl.publicly_exposed
             for key, wl in persisted_workloads.items()
-            if key[0] == ns_name
+            if key[0] == ns_name and wl.deployed
         )
         if ns.internet_exposed != rollup:
             ns.internet_exposed = rollup
@@ -959,12 +968,22 @@ def reap_inventory_diff(cluster: Cluster, mark_started_at) -> dict:
     Returns a counter dict for logging.
     """
     qs = Workload.objects.filter(cluster=cluster)
-    deployed_true = qs.filter(last_inventory_at__gte=mark_started_at).count()
-    deployed_false = qs.exclude(last_inventory_at__gte=mark_started_at).count()
-    qs.filter(last_inventory_at__gte=mark_started_at).update(deployed=True)
+    seen = qs.filter(last_inventory_at__gte=mark_started_at)
+    # Deployed iff seen this cycle AND not scaled to zero. A Deployment/
+    # StatefulSet with replicas==0 is in inventory but runs no pods, so
+    # it's not deployed. replicas is NULL for DaemonSets/Pods/CronJobs/
+    # Jobs (NULL is not matched by =0), so those stay deployed when seen.
+    running = seen.exclude(replicas=0)
+    scaled_to_zero = seen.filter(replicas=0).count()
+    deployed_true = running.count()
+    total = qs.count()
+
+    running.update(deployed=True)
+    seen.filter(replicas=0).update(deployed=False)
     qs.exclude(last_inventory_at__gte=mark_started_at).update(deployed=False)
 
     return {
         "workloads_deployed_true": deployed_true,
-        "workloads_deployed_false": deployed_false,
+        "workloads_deployed_false": total - deployed_true,
+        "workloads_scaled_to_zero": scaled_to_zero,
     }

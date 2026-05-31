@@ -515,12 +515,23 @@ def fetch_osv_supply_chain() -> int:
         if zip_path is None:
             continue
         try:
-            with zipfile.ZipFile(zip_path) as zf, transaction.atomic():
+            # No outer transaction.atomic(): npm's MAL feed yields hundreds
+            # of thousands of upserts, and holding all those row locks in
+            # one transaction OOM-killed the pod (Python + PG state) and
+            # tripped the 15-min activeDeadlineSeconds. Autocommitting each
+            # update_or_create is safe — it's idempotent on the unique key.
+            with zipfile.ZipFile(zip_path) as zf:
                 for name in zf.namelist():
                     if not name.endswith(".json"):
                         continue
+                    # Cheap bytes-level prefilter — ~99% of npm entries are
+                    # GHSA-* vulns we don't ingest here. Avoids json.loads
+                    # of every advisory in the 200MB zip.
+                    raw_bytes = zf.read(name)
+                    if b"MAL-" not in raw_bytes and b'"malicious"' not in raw_bytes:
+                        continue
                     try:
-                        advisory = json.loads(zf.read(name))
+                        advisory = json.loads(raw_bytes)
                     except (json.JSONDecodeError, OSError):
                         continue
                     if not _is_malicious_advisory(advisory):

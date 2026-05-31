@@ -405,3 +405,47 @@ def test_reap_all_drainable_ignores_already_reaped_marks():
     assert fired == 0
     already.refresh_from_db()
     assert already.state == ImportMarkState.REAPED.value
+
+
+@pytest.mark.django_db
+def test_inventory_reap_scaled_to_zero_image_not_currently_deployed():
+    """End-to-end inventory reap: a Deployment scaled to replicas=0 has
+    its image observation bumped this cycle, but because the workload
+    ends deployed=False the observation must NOT be marked
+    currently_deployed (else its image would show as running in
+    /images). Covers the reaper's workload__deployed join."""
+    c = _cluster()
+    ns = Namespace.objects.create(cluster=c, name="ns")
+    mark = _mark(c, kind="inventory", import_id="imp-scale")
+
+    w = Workload.objects.create(
+        cluster=c, namespace=ns, kind="Deployment", name="scaled-down",
+        replicas=0, deployed=True,
+    )
+    # Seen this cycle (inventory bumped last_inventory_at to the mark).
+    _bump(w, last_inventory_at=mark.started_at + timedelta(seconds=1))
+
+    img = Image.objects.create(digest="sha256:" + "c" * 64, ref="x:1")
+    obs = WorkloadImageObservation.objects.create(
+        workload=w, image=img, container_name="app", currently_deployed=True,
+    )
+    _bump(obs, last_seen_at=mark.started_at + timedelta(seconds=1))
+
+    # Complete-snapshot payload so the reap runs the deployed diff + mirror.
+    IngestQueue.objects.create(
+        cluster_name=c.name, kind="inventory", import_id=mark.import_id,
+        raw_json={}, status=IngestQueueStatus.DONE.value,
+        complete_snapshot=True,
+    )
+
+    result = maybe_reap(mark)
+    assert result is not None
+    assert result.get("complete_snapshot") is True
+
+    w.refresh_from_db()
+    obs.refresh_from_db()
+    assert w.deployed is False
+    assert obs.currently_deployed is False
+    assert img.digest not in set(
+        Image.objects.currently_running(cluster=c).values_list("digest", flat=True)
+    )
