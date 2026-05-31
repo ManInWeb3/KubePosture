@@ -41,15 +41,33 @@ def match_iocs_to_components(
     Returns:
         Count of Findings created + updated.
     """
-    ioc_qs = SupplyChainIoc.objects.all()
+    # Pre-intersect with the deployed SBOM. The matcher only emits Findings
+    # for purls a deployed component carries, so loading IoCs for purls with
+    # no matching component is pure waste — and npm's MAL-* feed contributes
+    # 100k+ rows per cycle. Combined with the deferred `raw` field below,
+    # this keeps the enrichment pod under its 2Gi limit.
+    deployed_purls = set(
+        SbomComponent.objects.values_list("purl", flat=True).distinct()
+    )
+    if not deployed_purls:
+        return 0
+
     if touched_purls is not None:
-        purls = [normalize_purl(p) for p in touched_purls if p]
-        if not purls:
-            return 0
-        ioc_qs = ioc_qs.filter(purl__in=purls)
+        touched = {normalize_purl(p) for p in touched_purls if p}
+        relevant_purls = deployed_purls & touched
+    else:
+        relevant_purls = deployed_purls
+    if not relevant_purls:
+        return 0
+
+    # `raw` is the full advisory JSON and is never read by the matcher.
+    # Loading it dominates row memory for npm scans.
+    ioc_qs = (
+        SupplyChainIoc.objects.filter(purl__in=relevant_purls).defer("raw")
+    )
 
     iocs_by_purl: dict[str, list[SupplyChainIoc]] = {}
-    for ioc in ioc_qs:
+    for ioc in ioc_qs.iterator(chunk_size=2000):
         iocs_by_purl.setdefault(ioc.purl, []).append(ioc)
     if not iocs_by_purl:
         return 0
