@@ -136,6 +136,41 @@ def test_preview_uses_workload_exposure_to_promote_priority():
 
 
 @pytest.mark.django_db
+def test_preview_serializes_detail_fields_and_stable_idx():
+    """The preview detail offcanvas renders description / references / CVSS
+    straight from the serialized dict, and looks the finding up by `idx` —
+    which must survive the urgency re-sort (position != idx)."""
+    c = _cluster()
+    ns = _ns(c)
+    w = _workload(c, ns)
+    KevEntry.objects.create(vuln_id="CVE-2024-KEV1")  # forces an IMMEDIATE to the top
+
+    vuln = _v("CVE-2024-DESC", severity="HIGH")
+    vuln["Description"] = "A nasty bug."
+    vuln["PrimaryURL"] = "https://example.com/cve"
+    vuln["References"] = ["https://example.com/ref"]
+
+    result = hardening_preview.preview_trivy_cli_scan(w, _cli_json(
+        vuln,                                       # idx 0, sorts below the KEV row
+        _v("CVE-2024-KEV1", severity="LOW"),        # idx 1, sorts to top via KEV
+    ))
+
+    # The KEV row sorted to position 0, so position != idx.
+    assert result.findings[0]["vuln_id"] == "CVE-2024-KEV1"
+    assert result.findings[0]["idx"] == 1
+
+    found = hardening_preview.find_finding(result, 0)
+    assert found is not None
+    assert found["vuln_id"] == "CVE-2024-DESC"
+    assert found["description"] == "A nasty bug."
+    assert found["primary_link"] == "https://example.com/cve"
+    assert found["links"] == ["https://example.com/ref"]
+    assert found["cvss_score"] == 7.5
+
+    assert hardening_preview.find_finding(result, 99) is None
+
+
+@pytest.mark.django_db
 def test_preview_findings_are_priority_sorted_not_cli_order():
     """Trivy CLI emits in package order — IMMEDIATE rows can land anywhere.
     The findings panel uses a scrollable table; if we preserve CLI order, the

@@ -30,7 +30,12 @@
       </thead>
       <tbody>
         {% for f in findings %}
-        <tr{% if f.pk %} class="cursor-pointer"
+        <tr{% if is_preview and preview %} class="cursor-pointer"
+            hx-get="{% url 'preview-finding-detail-panel' active_row.workload.pk preview.candidate_id f.idx %}"
+            hx-target="#finding-detail-offcanvas"
+            hx-swap="innerHTML"
+            data-bs-toggle="offcanvas"
+            data-bs-target="#finding-detail-offcanvas"{% elif f.pk %} class="cursor-pointer"
             hx-get="{% url 'findings-detail-panel' f.pk %}"
             hx-target="#finding-detail-offcanvas"
             hx-swap="innerHTML"

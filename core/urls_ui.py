@@ -24,6 +24,7 @@ from core.views_ui import (
     ImagesListView,
     NamespaceResetAutoView,
     NamespaceToggleView,
+    PreviewFindingDetailPanelView,
     ProfileView,
     RootRedirectView,
     TokenCreateView,
@@ -59,6 +60,11 @@ urlpatterns = [
         "findings/<int:pk>/panel/",
         FindingDetailPanelView.as_view(),
         name="findings-detail-panel",
+    ),
+    path(
+        "findings/preview/<int:workload_id>/<str:candidate_id>/<int:idx>/panel/",
+        PreviewFindingDetailPanelView.as_view(),
+        name="preview-finding-detail-panel",
     ),
     path("components/", ComponentsListView.as_view(), name="components-list"),
     path(

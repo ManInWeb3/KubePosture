@@ -106,7 +106,7 @@ def preview_trivy_cli_scan(workload: Workload, cli_json: dict) -> PreviewResult:
 
     rendered: list[dict] = []
     bands = Counter()
-    for fd in finding_dicts:
+    for idx, fd in enumerate(finding_dicts):
         vuln_id = fd["vuln_id"]
         epss_score, epss_percentile = epss_map.get(vuln_id, (None, None))
         kev = vuln_id in kev_set
@@ -135,7 +135,7 @@ def preview_trivy_cli_scan(workload: Workload, cli_json: dict) -> PreviewResult:
         )
         apply_score(f)
         bands[f.effective_priority] += 1
-        rendered.append(_serialize_finding(f))
+        rendered.append(_serialize_finding(f, idx))
 
     counts = {b.value: int(bands.get(b.value, 0)) for b in PriorityBand}
 
@@ -156,15 +156,19 @@ def preview_trivy_cli_scan(workload: Workload, cli_json: dict) -> PreviewResult:
     )
 
 
-def _serialize_finding(f: Finding) -> dict:
+def _serialize_finding(f: Finding, idx: int) -> dict:
     """Subset of Finding attributes the workload findings panel renders.
 
     Templates access via dot-notation, which falls through to dict keys, so
-    no model instance is needed downstream. `pk=None` lets the row template's
-    detail-link guard skip the HTMX offcanvas link.
+    no model instance is needed downstream. `pk=None` keeps the preview row
+    out of the DB-backed `findings-detail-panel` route; `idx` is the stable
+    key the session-backed preview detail panel looks the finding up by (it
+    survives the urgency re-sort applied to the rendered list).
     """
+    details = f.details if isinstance(f.details, dict) else {}
     return {
         "pk": None,
+        "idx": idx,
         "vuln_id": f.vuln_id,
         "title": f.title,
         "pkg_name": f.pkg_name,
@@ -173,8 +177,27 @@ def _serialize_finding(f: Finding) -> dict:
         "severity": f.severity,
         "effective_priority": f.effective_priority,
         "epss_score": f.epss_score,
+        "epss_percentile": f.epss_percentile,
         "kev_listed": f.kev_listed,
+        "cvss_score": f.cvss_score,
+        "cvss_vector": f.cvss_vector,
+        "category": f.category,
+        "source": f.source,
+        "description": details.get("description") or "",
+        "remediation": details.get("remediation") or "",
+        "primary_link": details.get("primary_link") or "",
+        "links": details.get("links") or [],
+        "published_date": details.get("publishedDate") or "",
+        "last_modified_date": details.get("lastModifiedDate") or "",
     }
+
+
+def find_finding(result: PreviewResult, idx: int) -> dict | None:
+    """Return the rendered preview finding whose stable `idx` matches.
+
+    The rendered list is urgency-sorted, so position ≠ `idx`; match by value.
+    """
+    return next((r for r in result.findings if r.get("idx") == idx), None)
 
 
 # ── Session stash ────────────────────────────────────────────────

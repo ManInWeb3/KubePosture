@@ -39,6 +39,7 @@ def list_components(
     name_contains: str | None = None,
     ecosystem: str | None = None,
     cluster: Cluster | None = None,
+    image_digest: str | None = None,
     include_inactive: bool = False,
     sort: str | None = None,
     sort_dir: str = "asc",
@@ -49,10 +50,17 @@ def list_components(
     workload_count, cluster_count. Cluster filter scopes both which
     components are considered AND the count joins, so the counts
     reflect the displayed scope.
+
+    `image_digest` scopes to the SBOM of a single image (the "X components"
+    link from the image detail page). When set, deployment-state scoping is
+    bypassed so the row count matches the image's recorded SBOM regardless
+    of whether the image is currently deployed.
     """
     qs = SbomComponent.objects.all()
 
-    if not include_inactive:
+    if image_digest:
+        qs = qs.filter(image__digest=image_digest)
+    elif not include_inactive:
         qs = qs.active(cluster=cluster)
     elif cluster is not None:
         qs = qs.filter(

@@ -160,6 +160,29 @@ def test_list_components_filters_by_name_substring_and_ecosystem():
 
 
 @pytest.mark.django_db
+def test_list_components_image_digest_scopes_to_one_image_incl_undeployed():
+    """The `X components` link from an image detail page passes the image
+    digest. It must scope to that image's SBOM only — and surface it even
+    when the image isn't currently deployed (the SBOM count on the detail
+    page counts all components regardless of deployment).
+    """
+    c = _cluster("c1")
+    ns = _ns(c)
+    w = _workload(c, ns, "api")
+
+    img_target = _image("sha256:" + "a" * 64)
+    img_other = _image("sha256:" + "b" * 64)
+    # Target image is NOT deployed; other image is.
+    _observation(w, img_other, deployed=True)
+
+    _component(img_target, "pkg:npm/in-target@1.0")
+    _component(img_other, "pkg:npm/in-other@1.0")
+
+    purls = {r["purl"] for r in list_components(image_digest=img_target.digest)}
+    assert purls == {"pkg:npm/in-target@1.0"}
+
+
+@pytest.mark.django_db
 def test_search_matches_name_at_version_and_full_purl():
     """Regression: the search bar must match against name + purl + version,
     not name only — otherwise pasting a purl returns zero results.

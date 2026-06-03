@@ -91,6 +91,30 @@ def test_name_filter_narrows(client, viewer, deployed_obs, component, image):
     assert "express" not in body
 
 
+def test_image_filter_scopes_to_image_and_shows_chip(client, viewer, deployed_obs, component, image):
+    # A component on a different image must not appear when scoped.
+    other = Image.objects.create(digest="sha256:" + "b" * 64, ref="registry/other:v1")
+    SbomComponent.objects.create(
+        image=other, purl="pkg:npm/express@4.18.0",
+        name="express", version="4.18.0", ecosystem="npm",
+    )
+    client.force_login(viewer)
+    resp = client.get(reverse("components-list") + "?image=" + urllib.parse.quote(image.digest))
+    body = resp.content.decode()
+    assert "lodash" in body
+    assert "express" not in body
+    # Scope chip surfaces the image ref.
+    assert "registry/api:v1" in body
+
+
+def test_image_filter_unknown_digest_falls_back_to_all(client, viewer, deployed_obs, component):
+    client.force_login(viewer)
+    resp = client.get(reverse("components-list") + "?image=sha256:" + "f" * 64)
+    assert resp.status_code == 200
+    # Unknown digest is dropped; the list is not scoped to nothing.
+    assert "lodash" in resp.content.decode()
+
+
 def test_htmx_partial_returns_rows_only(client, viewer, deployed_obs, component):
     client.force_login(viewer)
     resp = client.get(

@@ -26,7 +26,7 @@ from django.views.generic import RedirectView
 
 from core.api.auth import generate_token
 from core.constants import PriorityBand, Source, WorkloadKind
-from core.models import Cluster, Finding, IngestToken, Namespace, UserPreference, Workload
+from core.models import Cluster, Finding, Image, IngestToken, Namespace, UserPreference, Workload
 from core.services import hardening_preview
 from core.services.cluster_removal import remove_cluster
 from core.services.components import (
@@ -273,6 +273,7 @@ class WorkloadDetailView(LoginRequiredMixin, View):
                 "active_row": active_row,
                 "findings": findings,
                 "is_preview": is_candidate_active,
+                "preview": preview,
             })
 
         signal_chips = []
@@ -688,6 +689,30 @@ class FindingDetailPanelView(LoginRequiredMixin, View):
         })
 
 
+class PreviewFindingDetailPanelView(LoginRequiredMixin, View):
+    """`/workloads/.../preview/<candidate_id>/finding/<idx>/panel/`.
+
+    HTMX offcanvas fragment for a hardening-preview finding. The preview is
+    never persisted, so there's no DB row to hit — details come from the
+    per-user session stash keyed by (workload, candidate). `idx` identifies
+    the finding within the stash (stable across the urgency re-sort).
+    """
+
+    template_name = "findings/_preview_detail_panel.html"
+
+    def get(self, request, workload_id, candidate_id, idx):
+        result = hardening_preview.load(request, workload_id, candidate_id)
+        if result is None:
+            raise Http404("preview expired or not found")
+        f = hardening_preview.find_finding(result, idx)
+        if f is None:
+            raise Http404("preview finding not found")
+        return render(request, self.template_name, {
+            "f": f,
+            "image_ref": result.image_ref,
+        })
+
+
 # ── Components (SBOM browser) ─────────────────────────────────────
 
 
@@ -708,6 +733,7 @@ class ComponentsListView(LoginRequiredMixin, View):
             "name":      params.get("name", ""),
             "ecosystem": params.get("ecosystem", ""),
             "cluster":   params.get("cluster", ""),
+            "image":     params.get("image", ""),
             "sort":      params.get("sort", ""),
             "dir":       params.get("dir") or "asc",
             "include_inactive": "1" if params.get("include_inactive") == "1" else "",
@@ -719,10 +745,17 @@ class ComponentsListView(LoginRequiredMixin, View):
             if cluster is None:
                 filters["cluster"] = ""
 
+        image = None
+        if filters["image"]:
+            image = Image.objects.filter(digest=filters["image"]).first()
+            if image is None:
+                filters["image"] = ""
+
         rows = list_components(
             name_contains=filters["name"] or None,
             ecosystem=filters["ecosystem"] or None,
             cluster=cluster,
+            image_digest=filters["image"] or None,
             include_inactive=bool(filters["include_inactive"]),
             sort=filters["sort"] or None,
             sort_dir=filters["dir"],
@@ -743,6 +776,7 @@ class ComponentsListView(LoginRequiredMixin, View):
             "page_obj": page,
             "components": page.object_list,
             "filters": filters,
+            "image": image,
             "ecosystems": list_ecosystems(cluster=cluster),
             "clusters": list(Cluster.objects.order_by("name").values_list("name", flat=True)),
             "summary": summary_counts(cluster=cluster),

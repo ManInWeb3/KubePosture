@@ -33,6 +33,15 @@
       hx-push-url="true"
       hx-trigger="change, submit, keyup changed delay:400ms from:input[type=text]">
   <div class="card-body">
+    {% if image %}
+    <div class="mb-2">
+      <span class="badge bg-azure-lt">
+        Image: {{ image.ref|default:image.digest }}
+        <a href="{% url 'components-list' %}" class="text-reset ms-1" title="Clear image filter">×</a>
+      </span>
+      <span class="text-muted small ms-1">Showing only this image's SBOM components.</span>
+    </div>
+    {% endif %}
     <div class="row g-2 align-items-center flex-nowrap overflow-auto">
       <div class="col-auto">
         <input type="text" name="name" class="form-control form-control-sm"
@@ -67,6 +76,7 @@
     </div>
     <input type="hidden" name="sort" value="{{ filters.sort }}">
     <input type="hidden" name="dir" value="{{ filters.dir }}">
+    <input type="hidden" name="image" value="{{ filters.image }}">
   </div>
 </form>
 

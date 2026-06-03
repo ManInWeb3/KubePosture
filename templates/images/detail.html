@@ -128,7 +128,7 @@
     </div>
     <div class="ms-auto">
       {% if sbom_count %}
-        <a href="{% url 'components-list' %}?name={{ image.digest|urlencode }}" class="btn btn-outline-secondary">
+        <a href="{% url 'components-list' %}?image={{ image.digest|urlencode }}" class="btn btn-outline-secondary">
           {{ sbom_count }} component{{ sbom_count|pluralize }} →
         </a>
       {% else %}
