@@ -198,6 +198,14 @@ _PG_DEADLOCK = "40P01"
 _DEADLOCK_MAX_ATTEMPTS = 5
 _DEADLOCK_BACKOFF_BASE = 0.5
 
+# Findings affected by a feed refresh are recomputed in bounded chunks —
+# `vuln_id__in=seen_ids` (the whole EPSS/KEV catalog, 250k+ CVEs) can match
+# far more Finding rows than the feed has CVEs, since one CVE can hit many
+# Findings org-wide. Materializing them all at once scales memory with
+# total finding count rather than feed size — the actual cause of the
+# enrich-epss OOMs, independent of how large the upstream feed itself is.
+_RECOMPUTE_CHUNK_SIZE = 5000
+
 
 def _exec_with_deadlock_retry(sql: str) -> None:
     """Run `sql` in autocommit mode with a deadlock-detect retry loop.
@@ -221,6 +229,28 @@ def _exec_with_deadlock_retry(sql: str) -> None:
             log.warning("enrichment.deadlock_retry attempt=%d", attempt)
             time.sleep(delay)
             delay *= 2
+
+
+def _recompute_affected_findings(vuln_ids: list[str]) -> int:
+    """Recompute priority for every Finding matching `vuln_ids`, in bounded
+    chunks of `_RECOMPUTE_CHUNK_SIZE` ids at a time instead of one
+    `list(...)` over the whole match set. Returns the count updated.
+    """
+    total = 0
+    chunk: list[int] = []
+    ids = (
+        Finding.objects.filter(vuln_id__in=vuln_ids)
+        .values_list("id", flat=True)
+        .iterator(chunk_size=_RECOMPUTE_CHUNK_SIZE)
+    )
+    for fid in ids:
+        chunk.append(fid)
+        if len(chunk) >= _RECOMPUTE_CHUNK_SIZE:
+            total += recompute_batch(Finding.objects.filter(pk__in=chunk).only("id"))
+            chunk = []
+    if chunk:
+        total += recompute_batch(Finding.objects.filter(pk__in=chunk).only("id"))
+    return total
 
 
 def _refresh_finding_epss_cache() -> None:
@@ -328,10 +358,7 @@ def load_epss_from_file(path: str) -> int:
     # finishes in one statement and releases locks immediately on commit.
     _refresh_finding_epss_cache()
 
-    affected = list(
-        Finding.objects.filter(vuln_id__in=seen_ids).only("id")
-    )
-    recompute_batch(affected)
+    _recompute_affected_findings(seen_ids)
     return n
 
 
@@ -377,10 +404,7 @@ def load_kev_from_file(path: str) -> int:
 
     _refresh_finding_kev_cache()
 
-    affected = list(
-        Finding.objects.filter(vuln_id__in=seen_ids).only("id")
-    )
-    recompute_batch(affected)
+    _recompute_affected_findings(seen_ids)
     return n
 
 

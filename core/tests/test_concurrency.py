@@ -15,10 +15,11 @@ overlap.
 from __future__ import annotations
 
 import threading
+import time
 from datetime import timedelta
 
 import pytest
-from django.db import connection
+from django.db import connection, transaction
 from django.utils import timezone
 
 from core.constants import (
@@ -30,7 +31,7 @@ from core.constants import (
 )
 from core.models import Cluster, Finding, ImportMark, IngestQueue
 from core.services.dedup import compute_hash, upsert_findings
-from core.services.queue import claim_batch
+from core.services.queue import MAX_RECLAIM_ATTEMPTS, STALE_PROCESSING_SECONDS, claim_batch
 
 
 @pytest.fixture
@@ -81,6 +82,77 @@ def test_claim_batch_no_double_claim_under_real_concurrency(cluster):
         "the same item was claimed by more than one concurrent worker"
     )
     assert set(all_claimed) == item_ids, "every item must end up claimed exactly once"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_abandon_exhausted_sweep_does_not_block_on_a_locked_exhausted_row(cluster):
+    """claim_batch's abandon-exhausted sweep runs first, unconditionally, on
+    every single call — including every parallel worker's every drain_once
+    iteration. Regression test for the bug where that sweep was a plain
+    UPDATE with no SKIP LOCKED: a row that's exhausted its reclaim attempts
+    but happens to be locked by another in-flight transaction would block
+    the *entire calling worker* until that lock released, even though the
+    lock has nothing to do with whatever batch this worker is trying to
+    claim. In production this froze 3 of 4 parallel pods solid — near-zero
+    CPU, no progress — behind whichever single pod was slowly working
+    through one item.
+
+    This reproduces it directly: one thread holds a real row lock on an
+    exhausted item; concurrently, claim_batch must (a) return promptly
+    instead of waiting on that lock, (b) still claim an unrelated pending
+    item in the same call, and (c) leave the locked exhausted row alone
+    for a later pass rather than erroring or skipping the whole sweep.
+    """
+    ImportMark.objects.create(
+        cluster=cluster, kind="inventory", import_id="imp-lock",
+        state=ImportMarkState.DRAINING.value, started_at=timezone.now(),
+    )
+    stale_cutoff = timezone.now() - timedelta(seconds=STALE_PROCESSING_SECONDS + 60)
+    exhausted = IngestQueue.objects.create(
+        cluster_name=cluster.name, kind="inventory", import_id="imp-lock",
+        raw_json={}, status=IngestQueueStatus.PROCESSING.value,
+        claimed_at=stale_cutoff, attempts=MAX_RECLAIM_ATTEMPTS,
+    )
+    claimable = IngestQueue.objects.create(
+        cluster_name=cluster.name, kind="inventory", import_id="imp-lock",
+        raw_json={}, status=IngestQueueStatus.PENDING.value,
+    )
+
+    lock_acquired = threading.Event()
+    release_lock = threading.Event()
+
+    def hold_lock():
+        with transaction.atomic():
+            IngestQueue.objects.select_for_update().get(pk=exhausted.pk)
+            lock_acquired.set()
+            release_lock.wait(timeout=5)
+        connection.close()
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    assert lock_acquired.wait(timeout=5), "lock holder never acquired its lock"
+
+    try:
+        started = time.monotonic()
+        claimed = claim_batch(limit=10)
+        elapsed = time.monotonic() - started
+    finally:
+        release_lock.set()
+        holder.join(timeout=5)
+        connection.close()
+
+    assert elapsed < 2.0, (
+        f"claim_batch took {elapsed:.2f}s — it blocked waiting on the "
+        "locked exhausted row instead of skipping it"
+    )
+    assert claimed == [claimable.id], (
+        "the unrelated pending item must still be claimed even while the "
+        "exhausted row is locked elsewhere"
+    )
+    exhausted.refresh_from_db()
+    assert exhausted.status == IngestQueueStatus.PROCESSING.value, (
+        "the locked exhausted row must be left alone this pass, not abandoned"
+    )
 
 
 @pytest.mark.django_db(transaction=True)

@@ -283,7 +283,13 @@ def _process_sbom(item: IngestQueue, parser_func) -> dict:
 
     components = parsed.get("components") or []
     created, updated = 0, 0
-    for c in components:
+    # Sorted by purl so concurrent workers upserting overlapping images'
+    # components acquire row locks in the same relative order — the
+    # SbomComponent unique key is (image, purl), and update_or_create's
+    # internal select_for_update() deadlocks when two transactions lock
+    # the same two rows in reverse order (see core.services.worker's
+    # deadlock retry, which recovers whatever this doesn't prevent).
+    for c in sorted(components, key=lambda comp: comp["purl"]):
         _, was_created = SbomComponent.objects.update_or_create(
             image=image,
             purl=_fit(SbomComponent, "purl", c["purl"]),

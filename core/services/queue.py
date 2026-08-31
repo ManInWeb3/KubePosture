@@ -135,14 +135,33 @@ RETURNING q.id;
 # so they need to be actively flushed to `failed` here — otherwise they'd
 # sit in `processing` forever, still counted by drain_check as blocking
 # their tuple's reap.
+#
+# SKIP LOCKED here for the same reason as _CLAIM_SQL: this runs first, on
+# every single claim_batch() call from every parallel worker. A plain
+# UPDATE with no lock-skipping blocks the caller on ANY matching row
+# another worker currently holds a lock on — even one utterly unrelated
+# to whatever batch this worker is about to claim — serializing what
+# should be N independent workers behind whichever one is slowest. If a
+# genuinely-abandoned row is skipped this round because something else
+# transiently holds it, the next claim_batch() call (workers run every
+# few minutes; drain_until_empty loops much faster within a run) picks
+# it up once that lock clears — the abandon check doesn't need to be
+# exhaustive on every single pass to remain correct.
 _ABANDON_EXHAUSTED_SQL = """
-UPDATE core_ingestqueue
+WITH exhausted AS (
+    SELECT id
+      FROM core_ingestqueue
+     WHERE status = 'processing'
+       AND claimed_at < %s
+       AND attempts >= %s
+     FOR UPDATE SKIP LOCKED
+)
+UPDATE core_ingestqueue q
    SET status = 'failed', processed_at = %s,
        error_message = 'abandoned: stuck in processing past reclaim attempt limit'
- WHERE status = 'processing'
-   AND claimed_at < %s
-   AND attempts >= %s
-RETURNING id;
+  FROM exhausted
+ WHERE q.id = exhausted.id
+RETURNING q.id;
 """
 
 
@@ -162,7 +181,7 @@ def claim_batch(
     now = timezone.now()
     cutoff = now - timedelta(seconds=stale_after_seconds)
     with connection.cursor() as cur:
-        cur.execute(_ABANDON_EXHAUSTED_SQL, [now, cutoff, max_attempts])
+        cur.execute(_ABANDON_EXHAUSTED_SQL, [cutoff, max_attempts, now])
         abandoned = cur.rowcount
         if abandoned:
             log.warning("queue.abandoned_exhausted", extra={"count": abandoned})

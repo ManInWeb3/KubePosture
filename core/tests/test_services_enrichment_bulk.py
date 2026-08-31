@@ -11,6 +11,7 @@ import io
 import json
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -222,3 +223,81 @@ def test_kev_bulk_refresh_clears_flag_when_cve_drops_from_kev():
         Path(path).unlink(missing_ok=True)
 
     assert Finding.objects.get(vuln_id="CVE-2024-AAA").kev_listed is False
+
+
+# ── chunked priority recompute ────────────────────────────────────
+#
+# Regression coverage for the enrich-epss OOMs: `_recompute_affected_
+# findings` used to be `list(Finding.objects.filter(vuln_id__in=seen_ids))`
+# — one unbounded materialization scaling with total org-wide finding
+# count (every Finding matching any EPSS-scored CVE), not with the feed's
+# own size. Both load_epss_from_file and load_kev_from_file call the same
+# shared, now-chunked helper.
+
+
+@pytest.mark.django_db
+def test_recompute_affected_findings_covers_every_match_across_chunks(monkeypatch):
+    """More matches than one chunk — every one must still be recomputed,
+    split across multiple bounded recompute_batch calls instead of one
+    call over the whole match set."""
+    monkeypatch.setattr(enrichment, "_RECOMPUTE_CHUNK_SIZE", 2)
+
+    c = _cluster()
+    ns = _ns(c)
+    w = _workload(c, ns)
+    matching = [_finding(w, "CVE-2024-CHUNK", hash_code=f"h{i}") for i in range(5)]
+    unrelated = _finding(w, "CVE-2024-OTHER", hash_code="h-other")
+
+    seen_pks: list[set[int]] = []
+    real_recompute_batch = enrichment.recompute_batch
+
+    def _spy(findings):
+        findings = list(findings)
+        seen_pks.append({f.pk for f in findings})
+        return real_recompute_batch(findings)
+
+    with patch.object(enrichment, "recompute_batch", side_effect=_spy):
+        enrichment._recompute_affected_findings(["CVE-2024-CHUNK"])
+
+    assert len(seen_pks) == 3, "5 matches at chunk size 2 must be 3 calls (2, 2, 1)"
+    assert all(len(chunk) <= 2 for chunk in seen_pks), "no call may exceed the chunk size"
+    covered = set().union(*seen_pks)
+    assert covered == {f.pk for f in matching}, "every matching Finding must be covered once"
+    assert unrelated.pk not in covered, "a Finding for an unrelated CVE must never be touched"
+
+
+@pytest.mark.django_db
+def test_recompute_affected_findings_handles_no_matches(monkeypatch):
+    """No Finding matches the given CVEs — must return cleanly without
+    calling recompute_batch at all (empty chunk must not be built)."""
+    monkeypatch.setattr(enrichment, "_RECOMPUTE_CHUNK_SIZE", 2)
+
+    with patch.object(enrichment, "recompute_batch") as mock_recompute:
+        total = enrichment._recompute_affected_findings(["CVE-2024-NO-MATCH"])
+
+    mock_recompute.assert_not_called()
+    assert total == 0
+
+
+@pytest.mark.django_db
+def test_epss_bulk_refresh_recomputes_priority_for_affected_findings():
+    """End-to-end: load_epss_from_file's priority recompute call still
+    reaches the Finding it just refreshed the EPSS cache on (i.e. the
+    chunking refactor didn't silently drop the recompute step)."""
+    c = _cluster()
+    ns = _ns(c)
+    w = _workload(c, ns)
+    _finding(w, "CVE-2024-AAA", hash_code="ha")
+
+    with patch.object(
+        enrichment, "recompute_batch", wraps=enrichment.recompute_batch,
+    ) as mock_recompute:
+        path = _write_csv([("CVE-2024-AAA", 0.91, 0.99)])
+        try:
+            enrichment.load_epss_from_file(path)
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    mock_recompute.assert_called_once()
+    recomputed_pks = {f.pk for f in mock_recompute.call_args.args[0]}
+    assert recomputed_pks == {Finding.objects.get(vuln_id="CVE-2024-AAA").pk}

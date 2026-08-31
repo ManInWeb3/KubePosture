@@ -15,6 +15,7 @@ Public entry points:
 from __future__ import annotations
 
 import logging
+import time
 
 from django.db import transaction
 from django.utils import timezone
@@ -25,36 +26,67 @@ from core.services import ingest, queue, reaper
 
 log = logging.getLogger("core.worker")
 
+# Same SQLSTATE + retry shape as core.services.enrichment's
+# _exec_with_deadlock_retry. Concurrent workers (parallelism > 1) upserting
+# SbomComponent rows for overlapping images can lock in different orders;
+# a deadlock loser's transaction is aborted and must be retried from
+# scratch, not just the failing statement — so the retry wraps the whole
+# per-item atomic block.
+_DEADLOCK_SQLSTATE = "40P01"
+_ITEM_DEADLOCK_MAX_ATTEMPTS = 3
+_ITEM_DEADLOCK_BACKOFF_BASE = 0.2
+
+
+def _is_deadlock(exc: BaseException) -> bool:
+    pgcode = getattr(exc, "sqlstate", None) or getattr(
+        getattr(exc, "__cause__", None), "sqlstate", None
+    )
+    return pgcode == _DEADLOCK_SQLSTATE
+
 
 def _process_one(item_id: int) -> tuple[bool, str]:
     item = IngestQueue.objects.filter(id=item_id).first()
     if item is None:
         return False, "missing"
-    try:
-        with transaction.atomic():
-            summary = ingest.process_item(item)
-        item.refresh_from_db()
-        item.status = IngestQueueStatus.DONE.value
-        item.processed_at = timezone.now()
-        item.save(update_fields=["status", "processed_at"])
-        log.info(
-            "worker.item.done",
-            extra={
-                "item_id": item.id,
-                "kind": item.kind,
-                "cluster": item.cluster_name,
-                "summary": summary,
-            },
-        )
-        return True, ""
-    except Exception as exc:  # pragma: no cover
-        log.exception("worker.item.failed id=%s", item_id)
-        IngestQueue.objects.filter(id=item_id).update(
-            status=IngestQueueStatus.FAILED.value,
-            processed_at=timezone.now(),
-            error_message=str(exc)[:2000],
-        )
-        return False, str(exc)
+
+    delay = _ITEM_DEADLOCK_BACKOFF_BASE
+    for attempt in range(1, _ITEM_DEADLOCK_MAX_ATTEMPTS + 1):
+        try:
+            with transaction.atomic():
+                summary = ingest.process_item(item)
+            item.refresh_from_db()
+            item.status = IngestQueueStatus.DONE.value
+            item.processed_at = timezone.now()
+            item.save(update_fields=["status", "processed_at"])
+            log.info(
+                "worker.item.done",
+                extra={
+                    "item_id": item.id,
+                    "kind": item.kind,
+                    "cluster": item.cluster_name,
+                    "summary": summary,
+                },
+            )
+            return True, ""
+        except Exception as exc:  # pragma: no cover
+            if _is_deadlock(exc) and attempt < _ITEM_DEADLOCK_MAX_ATTEMPTS:
+                log.warning(
+                    "worker.item.deadlock_retry",
+                    extra={"item_id": item_id, "attempt": attempt},
+                )
+                time.sleep(delay)
+                delay *= 2
+                continue
+            log.exception("worker.item.failed id=%s", item_id)
+            IngestQueue.objects.filter(id=item_id).update(
+                status=IngestQueueStatus.FAILED.value,
+                processed_at=timezone.now(),
+                error_message=str(exc)[:2000],
+            )
+            return False, str(exc)
+    # Unreachable — the loop always returns via the except branch on its
+    # final attempt — but keeps the function's return type honest.
+    return False, "deadlock_retries_exhausted"  # pragma: no cover
 
 
 def drain_once(*, limit: int = 100) -> dict:
