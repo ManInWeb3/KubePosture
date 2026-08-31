@@ -30,6 +30,12 @@ name: Release
 # longer exist, so going forward only the bare vX.Y.Z family is minted.
 # Historical helm-* tags are left in place, just no new ones are created.
 #
+# A GitHub Release is also created for that tag (gh release create), with
+# the image reference and helm install commands in the body — a bare
+# pushed tag with no Release object only gets GitHub's default "Source
+# code" archive page, which doesn't mention the image tag or chart
+# version at all.
+#
 # No external registry, no GitHub Environments, no OIDC: GHCR + GITHUB_TOKEN
 # is sufficient (packages: write covers both the container image and the
 # OCI Helm chart artifacts, since both land in GHCR's package registry).
@@ -210,3 +216,39 @@ jobs:
           fi
           git tag -a "${NEW_TAG}" -m "release: ${NEW_TAG}"
           git push "https://x-access-token:${GH_TOKEN}@github.com/${GH_REPO}.git" "${NEW_TAG}"
+
+      - name: Create GitHub Release
+        # Idempotent like the tag step above: if a Release already exists
+        # for this tag (manual override case, or a re-run), leave it alone
+        # rather than failing the job or clobbering any manual edits.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW_TAG: ${{ needs.plan.outputs.tag }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          REPO_LC: ${{ steps.meta.outputs.repo_lc }}
+        run: |
+          set -euo pipefail
+          if gh release view "${NEW_TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release ${NEW_TAG} already exists — not recreating."
+            exit 0
+          fi
+
+          cat > /tmp/release-notes.md <<EOF
+          ## Image
+
+          \`ghcr.io/${REPO_LC}:${VERSION}\`
+
+          Also tagged \`${{ steps.meta.outputs.major_minor }}\`, \`sha-${{ steps.meta.outputs.short_sha }}\`, and \`latest\`.
+
+          ## Helm charts
+
+          \`\`\`
+          helm install kubeposture oci://ghcr.io/${REPO_LC}/charts/kubeposture --version ${VERSION}
+          helm install kubeposture-import oci://ghcr.io/${REPO_LC}/charts/kubeposture-import --version ${VERSION}
+          \`\`\`
+          EOF
+
+          gh release create "${NEW_TAG}" \
+            --repo "${{ github.repository }}" \
+            --title "${NEW_TAG}" \
+            --notes-file /tmp/release-notes.md
