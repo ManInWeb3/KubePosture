@@ -115,14 +115,21 @@ worker:
   # them (the k8s "work queue" Job pattern — no `completions` is set, so
   # the Job just runs `parallelism` pods to completion against the shared
   # queue). Raised from 1 -> 4: cluster-wide capacity is not the
-  # constraint (namespace requests ~5 cores against ~315 free), and sustained
-  # queue throughput was regularly maxing out a single pod (every run
-  # hitting activeDeadlineSeconds). Watch DB connection/lock contention
-  # before raising further.
+  # constraint (namespace requests ~5 cores against ~315 free). Raising
+  # this alone didn't fix throughput because claim_batch's abandon-sweep
+  # was missing SKIP LOCKED (fixed in core/services/queue.py) — that one
+  # unprotected statement, run first on every drain_once iteration, could
+  # block an entire pod on a lock held by an unrelated in-flight worker.
   parallelism: 4
   activeDeadlineSeconds: 300
-  # Default mode loops drain_once batches until the queue is empty,
-  # then exits. --limit caps the number of items fetched per inner batch.
+  # Default mode: drain_once in a loop until the queue is empty (up to
+  # max_iterations=200 rounds of --limit items each) — intentional for
+  # this CronJob, not just the synchronous /testing/load_scenario/
+  # harness. Each item commits independently (see worker._process_one),
+  # so a pod hitting activeDeadlineSeconds or its memory limit mid-loop
+  # still keeps whatever it already finished; the next tick (3 min later,
+  # or another pod in this same Job) picks up where it left off via
+  # claim_batch's stale-processing reclaim.
   command:
     - python
     - manage.py

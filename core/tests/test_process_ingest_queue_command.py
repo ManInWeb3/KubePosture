@@ -29,7 +29,6 @@ from django.utils import timezone
 from core.constants import ImportMarkState, IngestQueueStatus
 from core.models import Cluster, ImportMark, IngestQueue
 
-
 # ── helpers ─────────────────────────────────────────────────────────
 
 
@@ -230,3 +229,88 @@ def test_command_marks_item_failed_when_process_item_raises(cluster):
     # After a failure the queue has no PENDING/PROCESSING rows, so the
     # drain_check passes and the reap fires anyway.
     assert mark.state == ImportMarkState.REAPED.value
+
+
+# ── deadlock retry ──────────────────────────────────────────────────
+
+
+class _FakeDeadlock(Exception):
+    """Stands in for psycopg's DeadlockDetected (SQLSTATE 40P01) without
+    needing a real Postgres deadlock — worker._is_deadlock only looks at
+    `.sqlstate` (or `.__cause__.sqlstate`), so a plain exception carrying
+    that attribute is enough to drive the retry path under test.
+    """
+    sqlstate = "40P01"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_command_retries_and_recovers_from_a_transient_deadlock(cluster):
+    """process_item raising a deadlock (SQLSTATE 40P01) is retried in
+    place by _process_one rather than failing the item on the first hit —
+    this is the concurrent-SbomComponent-upsert scenario the retry exists
+    for (see core.services.worker._is_deadlock)."""
+    mark, item = _seed(cluster, import_id="imp-deadlock-recover")
+
+    calls = {"n": 0}
+
+    def _flaky(_item):
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise _FakeDeadlock("deadlock detected")
+        return {"ok": True}
+
+    with (
+        patch("core.services.ingest.process_item", side_effect=_flaky),
+        patch("core.services.worker.time.sleep"),
+    ):
+        call_command("process_ingest_queue", stdout=io.StringIO(), stderr=io.StringIO())
+
+    item.refresh_from_db()
+    assert calls["n"] == 2, "must retry once after the first deadlock, not fail immediately"
+    assert item.status == IngestQueueStatus.DONE.value
+    assert not item.error_message
+
+
+@pytest.mark.django_db(transaction=True)
+def test_command_gives_up_after_max_deadlock_retries(cluster):
+    """A deadlock that never clears still ends the item FAILED once
+    retries are exhausted — the retry must not loop forever."""
+    mark, item = _seed(cluster, import_id="imp-deadlock-exhaust")
+
+    calls = {"n": 0}
+
+    def _always_deadlocked(_item):
+        calls["n"] += 1
+        raise _FakeDeadlock("deadlock detected")
+
+    with (
+        patch("core.services.ingest.process_item", side_effect=_always_deadlocked),
+        patch("core.services.worker.time.sleep"),
+    ):
+        call_command("process_ingest_queue", stdout=io.StringIO(), stderr=io.StringIO())
+
+    item.refresh_from_db()
+    assert calls["n"] == 3, "must stop after max attempts, not retry forever"
+    assert item.status == IngestQueueStatus.FAILED.value
+    assert "deadlock" in item.error_message.lower()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_command_does_not_retry_a_non_deadlock_failure(cluster):
+    """A plain exception (not a deadlock) must fail immediately on the
+    first attempt — the retry path is specific to SQLSTATE 40P01, not a
+    general retry-on-any-error."""
+    mark, item = _seed(cluster, import_id="imp-non-deadlock-fail")
+
+    calls = {"n": 0}
+
+    def _boom(_item):
+        calls["n"] += 1
+        raise RuntimeError("not a deadlock")
+
+    with patch("core.services.ingest.process_item", side_effect=_boom):
+        call_command("process_ingest_queue", stdout=io.StringIO(), stderr=io.StringIO())
+
+    item.refresh_from_db()
+    assert calls["n"] == 1, "a non-deadlock error must not be retried"
+    assert item.status == IngestQueueStatus.FAILED.value
