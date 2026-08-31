@@ -530,3 +530,115 @@ def test_reap_inventory_diff_scaled_to_zero_not_deployed():
     assert counters["workloads_scaled_to_zero"] == 1
     assert counters["workloads_deployed_true"] == 2
     assert counters["workloads_deployed_false"] == 1
+
+
+# ── Pod-level WorkloadAlias persistence (Deployment/CronJob chains) ──
+#
+# Regression coverage: persist() used to only record a WorkloadAlias row
+# when the ALIAS OBJECT'S IMMEDIATE owner was itself already a top-level
+# workload kind — so a Pod's immediate owner (a ReplicaSet, or an owned
+# Job) never got a persisted alias, despite AliasKind.POD existing
+# specifically for this. ingest.py's `_resolve_workload` does a single
+# DB lookup with no chain-walking of its own, so a Kyverno PolicyReport
+# result scoped to a Pod could never resolve to its Deployment/CronJob
+# for the two most common ownership topologies. persist() now resolves
+# the full chain (via the same `_resolve_alias` walker used for pending
+# pod observations) before writing each WorkloadAlias row.
+
+
+@pytest.mark.django_db
+def test_persist_creates_pod_alias_direct_to_deployment():
+    """Deployment -> ReplicaSet -> Pod: the Pod gets its OWN WorkloadAlias
+    row pointing directly at the Deployment, not just the ReplicaSet."""
+    from django.utils import timezone
+    from core.models import Cluster as ClusterM, WorkloadAlias
+
+    cluster = ClusterM.objects.create(name="pod-alias-dep")
+    rs_owner = {
+        "apiVersion": "apps/v1", "kind": "ReplicaSet",
+        "name": "api-7d9f5b6c8d", "controller": True,
+    }
+    payload = _envelope(
+        _ns("ns"),
+        _deployment("api", "ns"),
+        _replicaset("api-7d9f5b6c8d", "ns", "api"),
+        _pod("api-7d9f5b6c8d-x1", "ns", owner=rs_owner),
+    )
+    st = inv.parse_envelope(payload, cluster)
+    inv.persist(st, mark_started_at=timezone.now())
+
+    alias = WorkloadAlias.objects.get(
+        cluster=cluster, namespace__name="ns",
+        alias_kind="Pod", alias_name="api-7d9f5b6c8d-x1",
+    )
+    assert alias.target_workload.kind == WorkloadKind.DEPLOYMENT.value
+    assert alias.target_workload.name == "api"
+
+    # The ReplicaSet itself still gets its own alias row too (unchanged).
+    rs_alias = WorkloadAlias.objects.get(
+        cluster=cluster, namespace__name="ns",
+        alias_kind="ReplicaSet", alias_name="api-7d9f5b6c8d",
+    )
+    assert rs_alias.target_workload.name == "api"
+
+
+@pytest.mark.django_db
+def test_persist_creates_pod_alias_direct_to_cronjob():
+    """CronJob -> Job -> Pod: the Pod gets its own WorkloadAlias row
+    pointing directly at the CronJob, even though the owning Job is
+    never itself a persisted Workload."""
+    from django.utils import timezone
+    from core.models import Cluster as ClusterM, WorkloadAlias
+
+    cluster = ClusterM.objects.create(name="pod-alias-cj")
+    job_owner = {
+        "apiVersion": "batch/v1", "kind": "Job",
+        "name": "nightly-backup-1234", "controller": True,
+    }
+    payload = _envelope(
+        _ns("ns"),
+        _cronjob("nightly-backup", "ns"),
+        _job("nightly-backup-1234", "ns", owner_cronjob="nightly-backup"),
+        _pod("nightly-backup-1234-abcde", "ns", owner=job_owner),
+    )
+    st = inv.parse_envelope(payload, cluster)
+    inv.persist(st, mark_started_at=timezone.now())
+
+    alias = WorkloadAlias.objects.get(
+        cluster=cluster, namespace__name="ns",
+        alias_kind="Pod", alias_name="nightly-backup-1234-abcde",
+    )
+    assert alias.target_workload.kind == WorkloadKind.CRONJOB.value
+    assert alias.target_workload.name == "nightly-backup"
+
+
+@pytest.mark.django_db
+def test_resolve_workload_finds_deployment_via_persisted_pod_alias():
+    """End-to-end: ingest.py's `_resolve_workload` — the single-hop DB
+    lookup Trivy/Kyverno cross-cycle resolution actually uses — can now
+    resolve a Pod-scoped reference straight to its Deployment, using
+    nothing but the persisted WorkloadAlias table from a prior inventory
+    cycle (no in-memory staging involved, matching how a real Kyverno
+    ingest call looks up a workload days after the inventory cycle ran)."""
+    from django.utils import timezone
+    from core.models import Cluster as ClusterM
+    from core.services.ingest import _resolve_workload
+
+    cluster = ClusterM.objects.create(name="pod-alias-resolve")
+    rs_owner = {
+        "apiVersion": "apps/v1", "kind": "ReplicaSet",
+        "name": "api-7d9f5b6c8d", "controller": True,
+    }
+    payload = _envelope(
+        _ns("ns"),
+        _deployment("api", "ns"),
+        _replicaset("api-7d9f5b6c8d", "ns", "api"),
+        _pod("api-7d9f5b6c8d-x1", "ns", owner=rs_owner),
+    )
+    st = inv.parse_envelope(payload, cluster)
+    inv.persist(st, mark_started_at=timezone.now())
+
+    resolved = _resolve_workload(cluster, "ns", "Pod", "api-7d9f5b6c8d-x1")
+    assert resolved is not None
+    assert resolved.kind == WorkloadKind.DEPLOYMENT.value
+    assert resolved.name == "api"

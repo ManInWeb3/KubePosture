@@ -154,6 +154,42 @@ def test_maybe_reap_dispatches_to_inventory_path_for_inventory_kind():
     assert mark.state == ImportMarkState.REAPED.value
 
 
+@pytest.mark.django_db
+def test_reap_inventory_skips_diff_when_superseded_by_newer_cycle():
+    """A mark that finally drains (e.g. a stuck item was reclaimed) after
+    a NEWER import_id for the same cluster already reaped must not apply
+    its diff — that would use a stale cutoff and could resurrect
+    workloads/observations the newer cycle already correctly retired,
+    and would roll `last_complete_inventory_at` backward."""
+    c = _cluster()
+    newer_reap_time = timezone.now()
+    c.last_complete_inventory_at = newer_reap_time
+    c.save(update_fields=["last_complete_inventory_at"])
+
+    stale_mark = _mark(
+        c, kind="inventory", import_id="imp-stale",
+        started_at=newer_reap_time - timedelta(minutes=10),
+    )
+    IngestQueue.objects.create(
+        cluster_name=c.name, kind="inventory", import_id=stale_mark.import_id,
+        raw_json={}, status=IngestQueueStatus.DONE.value,
+        complete_snapshot=True,
+    )
+
+    result = maybe_reap(stale_mark)
+
+    assert result is not None
+    assert result.get("superseded") is True
+    stale_mark.refresh_from_db()
+    assert stale_mark.state == ImportMarkState.REAPED.value, (
+        "must still reap (not stay stuck), just without applying the diff"
+    )
+    c.refresh_from_db()
+    assert c.last_complete_inventory_at == newer_reap_time, (
+        "a stale reap must not roll the cluster's watermark backward"
+    )
+
+
 # ── _reap_scan zero-input no-op ────────────────────────────────────
 
 
@@ -316,6 +352,61 @@ def test_reap_scan_only_clears_signals_in_scope_for_its_kind():
     assert kyverno_signal.currently_active is True, (
         "Trivy reap must not flip a Kyverno-source signal"
     )
+
+
+@pytest.mark.django_db
+def test_config_audit_reap_does_not_clear_rbac_only_signals():
+    """A healthy ConfigAuditReport reap must not clear KSV-0041/KSV-0044 —
+    RBAC checks that only RbacAssessmentReport can ever report/bump.
+    Regression test: `_signal_ids_for_kind`'s old `startswith("ksv:KSV-005")`
+    heuristic for RBAC scope missed these two ids, so ConfigAuditReport's
+    (much broader, TRIVY-wide) set incorrectly swept them up — bypassing
+    RbacAssessmentReport's own zero-input outage protection as a side
+    effect of an unrelated, healthy scan."""
+    c = _cluster()
+    w = _workload(c)
+    started_at = timezone.now()
+
+    rbac_signal = WorkloadSignal.objects.create(
+        workload=w, signal_id="ksv:KSV-0041", currently_active=True,
+    )
+    _bump(rbac_signal, last_seen_at=started_at - timedelta(minutes=10))
+
+    mark = _mark(
+        c, kind="trivy.ConfigAuditReport", observed_count=5, started_at=started_at,
+    )
+    _reap_scan(mark)
+
+    rbac_signal.refresh_from_db()
+    assert rbac_signal.currently_active is True, (
+        "ConfigAuditReport reap must not own RBAC-only signals"
+    )
+
+
+@pytest.mark.django_db
+def test_rbac_report_reap_clears_its_own_stale_signals():
+    """RbacAssessmentReport's own healthy reap DOES correctly clear a
+    stale KSV-0041/KSV-0044 signal — confirms the fix didn't just widen
+    the exclusion without the RBAC kind still owning its full signal set."""
+    c = _cluster()
+    w = _workload(c)
+    started_at = timezone.now()
+
+    for signal_id in ("ksv:KSV-0041", "ksv:KSV-0044"):
+        sig = WorkloadSignal.objects.create(
+            workload=w, signal_id=signal_id, currently_active=True,
+        )
+        _bump(sig, last_seen_at=started_at - timedelta(minutes=10))
+
+    mark = _mark(
+        c, kind="trivy.RbacAssessmentReport", observed_count=5, started_at=started_at,
+    )
+    result = _reap_scan(mark)
+
+    assert result.get("signals_cleared") == 2
+    for signal_id in ("ksv:KSV-0041", "ksv:KSV-0044"):
+        sig = WorkloadSignal.objects.get(workload=w, signal_id=signal_id)
+        assert sig.currently_active is False
 
 
 # ── transition_mark_to_reaped idempotence ───────────────────────────

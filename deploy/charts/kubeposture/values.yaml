@@ -111,7 +111,15 @@ worker:
   enabled: true
   schedule: "*/3 * * * *"       # every 3 minutes
   concurrencyPolicy: Allow      # allow overlap during heavy imports
-  parallelism: 1                # pods per job (increase for burst processing)
+  # Pods per job. claim_batch's SKIP LOCKED partitions work safely across
+  # them (the k8s "work queue" Job pattern — no `completions` is set, so
+  # the Job just runs `parallelism` pods to completion against the shared
+  # queue). Raised from 1 -> 4: cluster-wide capacity is not the
+  # constraint (namespace requests ~5 cores against ~315 free), and sustained
+  # queue throughput was regularly maxing out a single pod (every run
+  # hitting activeDeadlineSeconds). Watch DB connection/lock contention
+  # before raising further.
+  parallelism: 4
   activeDeadlineSeconds: 300
   # Default mode loops drain_once batches until the queue is empty,
   # then exits. --limit caps the number of items fetched per inner batch.

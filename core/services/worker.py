@@ -58,6 +58,8 @@ def _process_one(item_id: int) -> tuple[bool, str]:
 
 
 def drain_once(*, limit: int = 100) -> dict:
+    # claim_batch reclaims stale `processing` rows (abandoned by a killed
+    # worker) as part of the same claim query — see core.services.queue.
     claimed = queue.claim_batch(limit=limit)
     ok = 0
     failed = 0

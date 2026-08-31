@@ -29,6 +29,7 @@ from core.models import (
     Finding,
     FindingAction,
     Image,
+    ScanInconsistency,
     Workload,
     WorkloadImageObservation,
 )
@@ -42,7 +43,10 @@ def base_finding_filter(*, include_stale: bool = False) -> Q:
 
     - Workload deployed (or NULL for cluster-scoped findings).
     - last_seen >= cluster.last_complete_inventory_at (NULL means
-      no complete cycle has landed yet — keep the row visible).
+      no complete cycle has landed yet — keep the row visible), UNLESS
+      there's an open ScanInconsistency recording a scan outage for
+      this exact (workload, image) — see the `unresolved_outage` note
+      below.
 
     `include_stale=True` drops the last_seen predicate, exposing rows
     whose last observation predates the most recent complete inventory.
@@ -51,9 +55,38 @@ def base_finding_filter(*, include_stale: bool = False) -> Q:
     """
     q = Q(workload__deployed=True) | Q(workload__isnull=True)
     if not include_stale:
+        # The inventory cycle advances `last_complete_inventory_at`
+        # independently of scan-kind health (see reaper._reap_inventory /
+        # _reap_scan) — a Finding's last_seen only stops advancing once
+        # its own scan kind stops reporting it. If that scan kind goes
+        # down for long enough (Trivy Operator itself broken, no CRD
+        # posted at all — not "reported zero problems"), inventory can
+        # keep cycling and eventually push last_complete_inventory_at past
+        # this Finding's frozen last_seen, silently hiding it from every
+        # default view — indistinguishable from "actually fixed".
+        #
+        # `_write_scan_inconsistencies_for_outage` already records exactly
+        # this scenario per (cluster, workload, image_digest) whenever a
+        # scan kind reports zero input for a non-empty scope. Reusing it
+        # here means a Finding stays visible for as long as its most
+        # recent coverage-gap row does (rows are pruned ~30 days after
+        # their last occurrence, or effectively "cleared" the moment a
+        # real report resumes and something else advances last_seen past
+        # the anchor again) — erring toward not hiding a real
+        # vulnerability during/shortly after an outage, rather than
+        # toward a tidy "everything's clean" view.
+        unresolved_outage = Exists(
+            ScanInconsistency.objects.filter(
+                cluster=OuterRef("cluster"),
+                workload=OuterRef("workload"),
+                image_digest=OuterRef("image__digest"),
+                seen_in_scans=False,
+            )
+        )
         q &= (
             Q(cluster__last_complete_inventory_at__isnull=True)
             | Q(last_seen__gte=F("cluster__last_complete_inventory_at"))
+            | unresolved_outage
         )
     return q
 

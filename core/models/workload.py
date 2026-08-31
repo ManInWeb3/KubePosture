@@ -68,7 +68,23 @@ class Workload(models.Model):
         ),
     )
 
-    first_seen_at = models.DateTimeField(auto_now_add=True)
+    first_seen_at = models.DateTimeField(
+        auto_now_add=True,
+        help_text=(
+            "Set once, at row creation. If a workload with this exact "
+            "identity (cluster, namespace, kind, name) is deleted and later "
+            "recreated, `unique_workload_identity` means the persist pass "
+            "reuses this same row rather than creating a new one — so "
+            "first_seen_at, WorkloadSignal history, and Snapshot history all "
+            "carry over across the gap. This is intentional: the same "
+            "workload identity can legitimately be redeployed (e.g. a "
+            "deliberate recreate for some operational reason), and doing so "
+            "should not reset what's already known about it. There is no "
+            "generation/incarnation tracking to distinguish 'the same "
+            "workload, redeployed' from 'a coincidentally same-named, "
+            "unrelated workload' — by design, not an oversight."
+        ),
+    )
     last_seen_at = models.DateTimeField(
         auto_now=True,
         help_text="Bumped on any touch (inventory or scan).",
