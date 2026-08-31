@@ -171,6 +171,57 @@ def check_pending(*, base_url: str, token: str, cluster: str) -> dict | None:
         return None
 
 
+def cleanup_failed_sibling_jobs(client_module, *, namespace: str, cronjob_name: str) -> None:
+    """Delete failed Jobs owned by `cronjob_name` after a successful run.
+
+    Transient failures (connection resets, etc.) that later resolve on
+    their own otherwise sit in the CronJob's Job history and keep
+    tripping failed-job alerts even though the underlying issue is gone.
+    Only Jobs still carrying a Failed status are removed — the Job
+    currently executing this script isn't Failed yet, so it's untouched.
+    """
+    batch = client_module.BatchV1Api()
+    try:
+        cronjob = batch.read_namespaced_cron_job(
+            cronjob_name, namespace, _request_timeout=K8S_TIMEOUT,
+        )
+    except Exception as e:
+        print(f"  cleanup: could not read CronJob {cronjob_name}: {e}", file=sys.stderr)
+        return
+    cronjob_uid = cronjob.metadata.uid
+
+    try:
+        jobs = batch.list_namespaced_job(namespace, _request_timeout=K8S_TIMEOUT).items
+    except Exception as e:
+        print(f"  cleanup: could not list Jobs in {namespace}: {e}", file=sys.stderr)
+        return
+
+    deleted = 0
+    for job in jobs:
+        owned_by_cronjob = any(
+            ref.kind == "CronJob" and ref.uid == cronjob_uid
+            for ref in (job.metadata.owner_references or [])
+        )
+        if not owned_by_cronjob:
+            continue
+        status = job.status
+        if not (status.failed or 0) or (status.succeeded or 0):
+            continue
+        try:
+            batch.delete_namespaced_job(
+                job.metadata.name, namespace,
+                propagation_policy="Background",
+                _request_timeout=K8S_TIMEOUT,
+            )
+            deleted += 1
+            print(f"  cleanup: deleted failed Job {job.metadata.name}")
+        except Exception as e:
+            print(f"  cleanup: failed to delete Job {job.metadata.name}: {e}", file=sys.stderr)
+
+    if not deleted:
+        print("  cleanup: no failed sibling Jobs to remove")
+
+
 def clear_pending(*, base_url: str, token: str, cluster: str, satisfied_at: str) -> bool:
     ok, status, detail = _post(
         base_url, token,
@@ -652,6 +703,23 @@ def main() -> int:
             base_url=base_url, token=token,
             cluster=args.cluster_name, satisfied_at=requested_at,
         )
+
+    if (
+        rc == 0
+        and not args.from_folder
+        and os.environ.get("KUBEPOSTURE_CLEANUP_FAILED_JOBS", "").lower() == "true"
+    ):
+        namespace = os.environ.get("KUBEPOSTURE_NAMESPACE", "")
+        cronjob_name = os.environ.get("KUBEPOSTURE_CRONJOB_NAME", "")
+        if namespace and cronjob_name:
+            cleanup_failed_sibling_jobs(
+                client_module, namespace=namespace, cronjob_name=cronjob_name,
+            )
+        else:
+            print(
+                "  cleanup: KUBEPOSTURE_NAMESPACE/KUBEPOSTURE_CRONJOB_NAME not set, skipping",
+                file=sys.stderr,
+            )
 
     return rc
 

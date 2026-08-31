@@ -33,6 +33,14 @@ schedule: "0 */6 * * *"
 # -- Maximum run time for the import job
 activeDeadlineSeconds: 1800
 
+# -- When an import run succeeds, delete previously failed Jobs owned by
+# the same CronJob (main or trigger, whichever just succeeded). Transient
+# failures (connection resets, etc.) that later resolve on their own would
+# otherwise sit in the Job history and keep tripping failed-job alerts.
+# failedJobsHistoryLimit still applies as a cap for the case where cleanup
+# itself can't run (flag disabled, or the delete fails).
+cleanupFailedJobsOnSuccess: true
+
 # -- Per-request HTTP timeout (seconds) for POSTs to the KubePosture API.
 # Bump this if your import job sees intermittent connection-reset failures
 # during long ingest cycles — the central server can occasionally take

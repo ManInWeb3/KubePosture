@@ -43,8 +43,15 @@ rules:
   - apiGroups: ["batch"]
     resources:
       - cronjobs
-      - jobs
     verbs: ["get", "list"]
+  # `delete` on jobs backs cleanupFailedJobsOnSuccess (values.yaml):
+  # once an import succeeds, the script deletes earlier failed sibling
+  # Jobs owned by the same CronJob so stale failures stop tripping
+  # alerts after the underlying issue has resolved itself.
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+    verbs: ["get", "list", "delete"]
   {{- if .Values.import.trivy }}
   # Trivy Operator CRDs — must match the kinds listed in
   # scripts/import-cluster.py; otherwise the script silently drops
