@@ -67,6 +67,14 @@ spec:
                 {{- else }}
                   value: {{ .Values.token.value | quote }}
                 {{- end }}
+                - name: KUBEPOSTURE_CLEANUP_FAILED_JOBS
+                  value: {{ .Values.cleanupFailedJobsOnSuccess | quote }}
+                - name: KUBEPOSTURE_CRONJOB_NAME
+                  value: {{ printf "%s-trigger" (include "kubeposture-import.fullname" .) | quote }}
+                - name: KUBEPOSTURE_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true
