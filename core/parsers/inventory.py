@@ -752,6 +752,10 @@ def persist(st: _InventoryStaging, mark_started_at) -> dict:
             defaults["publicly_exposed"] = publicly_exposed
 
         if existing:
+            # Reuses the row even if it had gone deployed=False for a
+            # while (e.g. deleted then redeployed later) — `first_seen_at`
+            # is deliberately absent from `defaults` above so it survives
+            # the gap. Intentional: see Workload.first_seen_at's help_text.
             for k, v in defaults.items():
                 setattr(existing, k, v)
             existing.save()
@@ -767,16 +771,26 @@ def persist(st: _InventoryStaging, mark_started_at) -> dict:
             persisted_workloads[key] = new
     st.workloads = persisted_workloads
 
-    # 5. WorkloadAlias ---------------------------------------------------
+    # 5. WorkloadAlias — persist a DIRECT (alias_kind, alias_name) -> final
+    # top-level-workload mapping, resolving the full ownership chain now
+    # (Pod->ReplicaSet->Deployment, Pod->Job->CronJob) via the same
+    # `_resolve_alias` walker used for pending pod observations below —
+    # rather than only ever recording the immediate owner. Recording only
+    # the immediate owner (e.g. Pod -> ReplicaSet) is useless for
+    # `ingest.py`'s `_resolve_workload`, which does a single DB lookup
+    # with no chain-walking of its own: a Pod-scoped Kyverno PolicyReport
+    # result would never resolve to its Deployment/CronJob for the two
+    # most common ownership topologies otherwise.
     seen_alias_keys: set[tuple[int, int, str, str]] = set()
-    for (ns_name, alias_kind, alias_name), (target_kind, target_name) in st.aliases.items():
+    for (ns_name, alias_kind, alias_name) in list(st.aliases.keys()):
         ns = st.namespaces.get(ns_name)
         if ns is None:
             continue
-        wk = CONTROLLER_KINDS_TO_WORKLOAD.get(target_kind)
-        if not wk:
+        resolved = _resolve_alias(st, ns_name, alias_kind, alias_name)
+        if resolved is None:
             continue
-        target = persisted_workloads.get((ns_name, wk, target_name))
+        wk, wname = resolved
+        target = persisted_workloads.get((ns_name, wk, wname))
         if target is None:
             continue
         WorkloadAlias.objects.update_or_create(

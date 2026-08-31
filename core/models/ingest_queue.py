@@ -37,6 +37,15 @@ class IngestQueue(models.Model):
     error_message = models.TextField(blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
+    claimed_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="Set when a worker flips this row to 'processing'. Lets "
+                   "reclaim_stale() detect items abandoned by a worker Job "
+                   "killed mid-item (e.g. activeDeadlineSeconds) — claim_batch "
+                   "only ever selects 'pending' rows, so without this a stuck "
+                   "'processing' row (and its ImportMark's reap) would block "
+                   "forever.",
+    )
     processed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
@@ -48,6 +57,10 @@ class IngestQueue(models.Model):
             models.Index(
                 fields=["status", "created_at"],
                 name="ingest_queue_status_created",
+            ),
+            models.Index(
+                fields=["status", "claimed_at"],
+                name="ingest_queue_status_claimed",
             ),
         ]
         ordering = ["created_at"]

@@ -1,8 +1,12 @@
 """Kyverno PolicyReport / ClusterPolicyReport parsers.
 
-Each report carries a list of policy results; failing results emit
-both a Finding (for the dashboard) AND a WorkloadSignal upsert
-(scored by urgency.py via the registry's HOST_ESCAPE / RBAC sets).
+Each report carries a list of policy results; this parser builds a
+`finding` dict per failing result, but `core.services.ingest._process_kyverno`
+currently only consumes `subject`/`namespace_for_subject`/`signal_id` from
+each result and discards `finding` — Kyverno fail-results emit a
+WorkloadSignal upsert only, not a Finding row, by deliberate v1 scope
+decision. The `finding` dict is still built (and returned) so a future
+change can wire it up without reworking this parser.
 
 `subjects[]` per result identifies the K8s resource the rule fired
 against — this is what we resolve to a Workload via the alias chain.

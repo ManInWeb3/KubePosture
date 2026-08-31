@@ -7,7 +7,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Iterable
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 
 from core.models import (
     Cluster,
@@ -125,25 +125,71 @@ def upsert_findings(
         # Fold in enrichment values.
         defaults.update(_enrichment_for(defaults["vuln_id"]))
 
-        existing = Finding.objects.filter(source=f["source"], hash_code=hc).first()
-        if existing is None:
-            obj = Finding(
-                source=f["source"],
-                hash_code=hc,
-                first_seen=observation_time,
-                last_seen=observation_time,
-                **defaults,
-            )
-            apply_score(obj)
-            obj.save()
+        if _upsert_one_finding(
+            source=f["source"], hash_code=hc,
+            defaults=defaults, observation_time=observation_time,
+        ):
             created += 1
         else:
+            updated += 1
+
+    return created, updated
+
+
+def _upsert_one_finding(
+    *, source: str, hash_code: str, defaults: dict, observation_time,
+) -> bool:
+    """Race-safe create-or-update for one (source, hash_code) Finding.
+    Returns True if created, False if an existing row was updated.
+
+    Two different IngestQueue items — plausibly claimed and processed
+    by two different worker pods at once — can resolve to the same
+    dedup key. The previous plain SELECT-then-INSERT/UPDATE was
+    vulnerable two ways: a lost update (the `last_seen = max(...)`
+    monotonicity check compared against each worker's own stale
+    in-memory read, so it could regress), and a hard failure (the
+    unique constraint rejects the second concurrent INSERT, raising
+    IntegrityError, which propagated up through `_process_one` and
+    failed the WHOLE queue item — silently dropping every finding in
+    that payload with no automatic retry).
+
+    `select_for_update()` serializes concurrent UPDATEs to the same row
+    (the second transaction blocks until the first commits, then reads
+    the now-current row), making the monotonic last_seen check safe.
+    The nested `atomic()` + IntegrityError retry handles the
+    create/create race the same way Django's own `get_or_create` does:
+    if a concurrent transaction wins the INSERT first, this savepoint
+    rolls back cleanly and a second attempt finds the row via SELECT.
+    """
+    for attempt in range(2):
+        existing = (
+            Finding.objects.select_for_update()
+            .filter(source=source, hash_code=hash_code)
+            .first()
+        )
+        if existing is not None:
             for k, v in defaults.items():
                 setattr(existing, k, v)
             if existing.last_seen is None or observation_time > existing.last_seen:
                 existing.last_seen = observation_time
             apply_score(existing)
             existing.save()
-            updated += 1
+            return False
 
-    return created, updated
+        try:
+            with transaction.atomic():
+                obj = Finding(
+                    source=source,
+                    hash_code=hash_code,
+                    first_seen=observation_time,
+                    last_seen=observation_time,
+                    **defaults,
+                )
+                apply_score(obj)
+                obj.save()
+            return True
+        except IntegrityError:
+            if attempt == 0:
+                continue
+            raise
+    raise AssertionError("unreachable")  # pragma: no cover

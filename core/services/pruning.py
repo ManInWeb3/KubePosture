@@ -9,8 +9,10 @@ Targets and rationale:
 - **ImportMark** — REAPED state is audit-only; default 90 days.
 - **ScanInconsistency** — per the model's docstring, "rows older than
   30 days are pruned by a maintenance job"; default 30 days.
-- **Finding** — soft-resolved findings (workload undeployed or NULL,
-  not observed for a long window); default 180 days.
+- **Finding** — soft-resolved findings not observed for a long window:
+  workload undeployed (or NULL), OR the finding's own image is no
+  longer the (workload, image) pair's currently-deployed one; default
+  180 days.
 - **SbomComponent** — components on images that haven't been observed
   recently AND aren't currently deployed anywhere; default 90 days.
 
@@ -92,21 +94,43 @@ def prune_scan_inconsistencies(*, days: int = 30, dry_run: bool = False) -> Prun
 
 
 def prune_stale_findings(*, days: int = 180, dry_run: bool = False) -> PruneResult:
-    """Hard-delete Findings that have:
-      - `last_seen` older than `days`, AND
-      - their workload undeployed (or no workload — cluster-scoped).
+    """Hard-delete Findings that have `last_seen` older than `days`, AND
+    are no longer relevant by either of:
+      - their workload is undeployed (or no workload — cluster-scoped), OR
+      - the finding is bound to a specific image (e.g. a vulnerability),
+        and that exact (workload, image) pair is no longer currently
+        deployed — the workload may still be deployed and healthy, just
+        running a different image now (the common "redeployed with a
+        fixed image" case). A Finding is scored against the specific
+        image it was found on, not the workload in the abstract, so once
+        that image is gone from the workload the CVE is gone with it
+        regardless of whether the workload itself still exists.
 
-    Findings on currently-deployed workloads are protected (every
-    inventory cycle bumps `last_seen`, so they can't naturally drift
-    past the cutoff).
-
-    Cluster-scoped findings (`workload IS NULL`) are pruned on the same
-    rule via the OR branch — for those the `last_seen` cutoff is the
-    only safeguard.
+    Both branches still require `last_seen` to have gone stale for
+    `days` first — a fast rollout shouldn't instantly hard-delete a
+    Finding; give it a grace window in case the same image comes back.
+    This only controls storage cleanup: default-view visibility already
+    excludes both cases immediately, at read time, via
+    `restrict_to_currently_deployed_images` / `base_finding_filter`
+    (see core/services/inventory.py) — deletion just catches up later.
     """
-    qs = Finding.objects.filter(
-        last_seen__lt=_cutoff(days),
-    ).filter(Q(workload__deployed=False) | Q(workload__isnull=True))
+    image_no_longer_deployed = Finding.objects.filter(
+        image_id__isnull=False,
+    ).annotate(
+        _image_still_deployed=Exists(
+            WorkloadImageObservation.objects.filter(
+                workload_id=OuterRef("workload_id"),
+                image_id=OuterRef("image_id"),
+                currently_deployed=True,
+            )
+        ),
+    ).filter(_image_still_deployed=False)
+
+    qs = Finding.objects.filter(last_seen__lt=_cutoff(days)).filter(
+        Q(workload__deployed=False)
+        | Q(workload__isnull=True)
+        | Q(pk__in=image_no_longer_deployed.values("pk"))
+    )
     n = qs.count()
     if not dry_run and n:
         qs.delete()

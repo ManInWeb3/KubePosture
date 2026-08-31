@@ -79,6 +79,32 @@ def _reap_inventory(mark: ImportMark) -> dict:
         transition_mark_to_reaped(mark)
         return counters
 
+    # Monotonic guard: a mark can reap late — e.g. its queue drained
+    # slowly, or one of its items was reclaimed after a worker was
+    # killed mid-item (see core.services.queue) — and reap for a NEWER
+    # import_id of the same cluster may have already run by then.
+    # Applying this (older) cycle's diff now would use a stale cutoff:
+    # reap_inventory_diff would resurrect workloads/observations the
+    # newer cycle already correctly retired, and last_complete_inventory_at
+    # would roll backward. Only ever advance on a strictly newer cycle.
+    if (
+        cluster.last_complete_inventory_at is not None
+        and mark.started_at <= cluster.last_complete_inventory_at
+    ):
+        counters["superseded"] = True
+        transition_mark_to_reaped(mark)
+        log.warning(
+            "reap.inventory.superseded",
+            extra={
+                "cluster": cluster.name,
+                "import_id": mark.import_id,
+                "mark_started_at": mark.started_at.isoformat(),
+                "cluster_last_complete_inventory_at":
+                    cluster.last_complete_inventory_at.isoformat(),
+            },
+        )
+        return counters
+
     # Reset the incomplete counter — this cycle was clean.
     update_fields = []
     if cluster.consecutive_incomplete_inventories != 0:
@@ -322,14 +348,44 @@ def _write_scan_inconsistencies_for_outage(cluster: Cluster, mark: ImportMark) -
 
 
 def _signal_ids_for_kind(kind: str) -> set[str]:
-    """Which signal_ids could plausibly be reported by `kind`?"""
-    from core.signals import SignalSource
+    """Which signal_ids could plausibly be reported by `kind`?
+
+    Scope must be a strict partition across sibling Trivy report kinds:
+    a signal only ever bumped by kind A must never be in kind B's set,
+    or a healthy reap of B can incorrectly clear a signal that A's own
+    (possibly currently outage-affected) mark should exclusively own —
+    bypassing A's zero-input protection as a side effect.
+
+    RBAC checks are identified by `SignalCategory.RBAC_ELEVATION`
+    (all four are: KSV-0041/0044/0051/0053) rather than an AVD-id
+    prefix — the previous `startswith("ksv:KSV-005")` heuristic missed
+    KSV-0041/KSV-0044, which ConfigAuditReport's (much broader) TRIVY-wide
+    set then incorrectly swept up as its own.
+
+    Kyverno's PolicyReport vs ClusterPolicyReport aren't split: every
+    `kyverno:*` signal currently defined targets Pod-level policies,
+    which only ever surface via the namespaced PolicyReport CRD in
+    practice — there's no live case where a cluster-scoped policy result
+    could be misattributed. If a cluster-scoped-resource Kyverno policy
+    is ever added to the registry, this will need its own discriminator
+    (SignalDef has none today) to keep the two kinds' clearing scopes
+    correctly separated the same way RBAC/ConfigAudit now are.
+    """
+    from core.signals import SignalCategory, SignalSource
     if kind in ("kyverno.PolicyReport", "kyverno.ClusterPolicyReport"):
         return {sid for sid, sd in SIGNALS.items() if sd.source is SignalSource.KYVERNO}
     if kind == "trivy.ConfigAuditReport":
-        return {sid for sid, sd in SIGNALS.items() if sd.source is SignalSource.TRIVY}
+        return {
+            sid for sid, sd in SIGNALS.items()
+            if sd.source is SignalSource.TRIVY
+            and sd.category is not SignalCategory.RBAC_ELEVATION
+        }
     if kind in ("trivy.RbacAssessmentReport", "trivy.ClusterRbacAssessmentReport"):
-        return {sid for sid, sd in SIGNALS.items() if sd.source is SignalSource.TRIVY and sid.startswith("ksv:KSV-005")}
+        return {
+            sid for sid, sd in SIGNALS.items()
+            if sd.source is SignalSource.TRIVY
+            and sd.category is SignalCategory.RBAC_ELEVATION
+        }
     if kind == "trivy.ExposedSecretReport":
         return {"kp:exposed-secret-in-image"}
     return set()

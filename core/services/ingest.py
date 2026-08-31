@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import logging
+
 from django.db import transaction
 from django.utils import timezone
 
@@ -25,11 +27,26 @@ from core.parsers import trivy as trivy_parser
 from core.services.dedup import upsert_findings
 from core.signals import SIGNALS
 
+log = logging.getLogger("core.ingest")
+
 
 # ── Helpers --------------------------------------------------------
 
 def _get_cluster(name: str) -> Cluster | None:
     return Cluster.objects.filter(name=name).first()
+
+
+def _fit(model: type, field_name: str, value: str | None) -> str:
+    """Truncate a string to the model field's max_length.
+
+    Upstream CycloneDX data occasionally exceeds our CharField limits
+    (e.g. generated component names, multi-value license/supplier
+    strings) — truncate rather than let the whole item fail with an
+    unhandled DataError.
+    """
+    value = value or ""
+    max_length = model._meta.get_field(field_name).max_length
+    return value[:max_length] if max_length else value
 
 
 def _get_or_create_image(*, ref: str, digest: str) -> Image | None:
@@ -105,6 +122,16 @@ def _process_inventory(item: IngestQueue) -> dict:
     mark = ImportMark.objects.filter(
         cluster=cluster, kind="inventory", import_id=item.import_id
     ).first()
+    if mark is None:
+        # Should be unreachable: a mark always transitions to `draining`
+        # (see ImportMark docstring) before the worker can claim any of
+        # its queue items. Falling back to "now" rather than failing
+        # loudly silently masks that invariant being violated — surface
+        # it so a real occurrence gets noticed.
+        log.warning(
+            "ingest.inventory.missing_mark",
+            extra={"cluster": cluster.name, "import_id": item.import_id},
+        )
     started_at = mark.started_at if mark else timezone.now()
 
     staging = inventory_parser.parse_envelope(item.raw_json or {}, cluster)
@@ -168,7 +195,7 @@ def _process_trivy_per_workload(item: IngestQueue, parser_func) -> dict:
         if image.os_family != parsed["os_family"]:
             image.os_family = parsed["os_family"]
             changed_fields.append("os_family")
-        if image.os_version != parsed.get("os_version") or "":
+        if image.os_version != (parsed.get("os_version") or ""):
             image.os_version = parsed.get("os_version") or ""
             changed_fields.append("os_version")
         if image.base_eosl != parsed.get("base_eosl", False):
@@ -259,15 +286,15 @@ def _process_sbom(item: IngestQueue, parser_func) -> dict:
     for c in components:
         _, was_created = SbomComponent.objects.update_or_create(
             image=image,
-            purl=c["purl"],
+            purl=_fit(SbomComponent, "purl", c["purl"]),
             defaults={
-                "name": c["name"],
-                "version": c["version"],
-                "ecosystem": c["ecosystem"],
-                "component_type": c["component_type"],
-                "supplier": c["supplier"],
-                "license": c["license"],
-                "layer_digest": c["layer_digest"],
+                "name": _fit(SbomComponent, "name", c["name"]),
+                "version": _fit(SbomComponent, "version", c["version"]),
+                "ecosystem": _fit(SbomComponent, "ecosystem", c["ecosystem"]),
+                "component_type": _fit(SbomComponent, "component_type", c["component_type"]),
+                "supplier": _fit(SbomComponent, "supplier", c["supplier"]),
+                "license": _fit(SbomComponent, "license", c["license"]),
+                "layer_digest": _fit(SbomComponent, "layer_digest", c["layer_digest"]),
                 "raw": c["raw"],
             },
         )
