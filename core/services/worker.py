@@ -14,6 +14,7 @@ Public entry points:
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 
@@ -51,6 +52,25 @@ def _process_one(item_id: int) -> tuple[bool, str]:
 
     delay = _ITEM_DEADLOCK_BACKOFF_BASE
     for attempt in range(1, _ITEM_DEADLOCK_MAX_ATTEMPTS + 1):
+        # DEBUG only, and the payload_bytes estimate is gated behind
+        # isEnabledFor so a full json.dumps of a large raw_json never runs
+        # unless DEBUG logging is actually on — process_item logs nothing
+        # until it returns, so for a large/slow item this is the only
+        # trace of what a pod was working on if it dies before finishing
+        # (OOMKilled, deadline-killed) with no "worker.item.done" ever
+        # reaching Loki.
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug(
+                "worker.item.started",
+                extra={
+                    "item_id": item.id,
+                    "kind": item.kind,
+                    "cluster": item.cluster_name,
+                    "import_id": item.import_id,
+                    "attempt": attempt,
+                    "payload_bytes": len(json.dumps(item.raw_json, default=str)),
+                },
+            )
         try:
             with transaction.atomic():
                 summary = ingest.process_item(item)

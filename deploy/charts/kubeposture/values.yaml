@@ -210,10 +210,15 @@ cronJobs:
         memory: 2Gi
     activeDeadlineSeconds: 900
 
-  # Safety-net for import-level auto-resolve. The queue processor reaps
-  # inline after each item transitions to DONE (zero-latency); this
-  # CronJob covers the case where the processor restarts or misses a
-  # signal, so a stranded ImportMark doesn't leak findings indefinitely.
+  # Safety-net for import-level auto-resolve, covering both ends of the
+  # ImportMark lifecycle. The queue processor reaps inline after each
+  # item transitions to DONE (zero-latency); this CronJob covers the
+  # case where the processor restarts or misses a signal, so a stranded
+  # `draining` mark doesn't leak findings indefinitely. It also promotes
+  # marks abandoned in `state=open` (importer crashed before
+  # /imports/finish/) so their queue tuples stop being permanently
+  # unclaimable — two passes per run, both cheap single-row updates over
+  # an indexed query.
   reapSafetyNet:
     enabled: true
     schedule: "7 * * * *"       # hourly at :07 to stagger from other crons

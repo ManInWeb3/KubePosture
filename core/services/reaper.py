@@ -1,5 +1,11 @@
 """Reaper — kind-dispatched wrap-up after a `(cluster, kind, import_id)`
 queue drains. Idempotent against marks already in `state=reaped`.
+
+Also covers the OTHER end of the ImportMark lifecycle: `reap_stuck_open`
+promotes marks abandoned in `state=open` (importer crashed before
+`/imports/finish/`) so their queue tuples stop being permanently
+unclaimable. See `reap_all_drainable` for the `draining -> reaped`
+safety net this complements.
 """
 from __future__ import annotations
 
@@ -8,12 +14,13 @@ from datetime import timedelta
 
 from django.db import transaction
 from django.db.models import Q
+from django.utils import timezone
 
 from core.constants import (
+    WORKLOAD_OBSERVATION_RETENTION_DAYS,
     ImageSetChangeKind,
     ImportMarkState,
     SnapshotScope,
-    WORKLOAD_OBSERVATION_RETENTION_DAYS,
 )
 from core.models import (
     Cluster,
@@ -25,8 +32,6 @@ from core.models import (
     WorkloadSignal,
 )
 from core.parsers.inventory import reap_inventory_diff
-from core.signals import SIGNALS
-from core.urgency import recompute_batch
 from core.services.inventory import (
     default_finding_qs,
     restrict_to_currently_deployed_images,
@@ -37,6 +42,8 @@ from core.services.snapshot import (
     _severity_counts,
     capture_cluster_heartbeat,
 )
+from core.signals import SIGNALS
+from core.urgency import recompute_batch
 
 log = logging.getLogger("core.reaper")
 
@@ -392,6 +399,71 @@ def _signal_ids_for_kind(kind: str) -> set[str]:
 
 
 # ── Public dispatch -----------------------------------------------
+
+# TTL for an `open` ImportMark before it's presumed abandoned (crashed
+# importer that never reached /imports/finish/) and force-promoted to
+# `draining` so its queue tuple stops being permanently unclaimable.
+# Deliberately larger than api.views.IMPORT_LOCK_TIMEOUT's 1800s default
+# (that timeout is a read-only gate on starting a NEW cycle, never
+# mutates a row) — this performs an actual state mutation, which is
+# less reversible. It's also comfortably past the importer Job's own
+# activeDeadlineSeconds (1800s, deploy/charts/kubeposture-import/
+# values.yaml) — by the time this fires, Kubernetes has already
+# SIGKILLed the importer, so "still alive but slow" isn't possible.
+STUCK_OPEN_TIMEOUT_SECONDS = 3600
+
+
+def reap_stuck_open() -> int:
+    """Safety-net for the OTHER lifecycle boundary `reap_all_drainable`
+    doesn't cover: a mark stuck in `state=open` because the importer
+    crashed before calling `/imports/finish/` for it. Left alone,
+    `_CLAIM_SQL` in core.services.queue never claims that tuple's
+    IngestQueue rows — they're unclaimable forever.
+
+    Force-promotes each such mark straight to `draining`, mirroring
+    what `/imports/finish/` would have done, minus `observed_count` —
+    deliberately left `None` (not backfilled from the actual queue row
+    count) so `_reap_scan`'s zero-input no-op rule fires on it:
+    `mark.observed_count or 0 == 0` takes the protective
+    ScanInconsistency-only branch, never the destructive signal-clearing
+    branch. Backfilling a real count here would make an interrupted
+    cycle look like a complete, clean scan that legitimately found
+    nothing at N items, silently clearing real signals for workloads
+    the truncated cycle never actually got to.
+
+    Does not reap directly — `reap_all_drainable()`, called right after
+    by the same management command, picks up every mark this promotes
+    in the same run.
+    """
+    cutoff = timezone.now() - timedelta(seconds=STUCK_OPEN_TIMEOUT_SECONDS)
+    stuck = ImportMark.objects.filter(
+        state=ImportMarkState.OPEN.value,
+        started_at__lt=cutoff,
+    ).select_related("cluster")
+    promoted = 0
+    for mark in stuck:
+        # Conditional UPDATE — safe if this races a legitimate late
+        # /imports/finish/ call landing concurrently (that view writes
+        # unconditionally, so either order is a harmless overwrite).
+        affected = ImportMark.objects.filter(
+            id=mark.id, state=ImportMarkState.OPEN.value,
+        ).update(
+            state=ImportMarkState.DRAINING.value,
+            completed_at=timezone.now(),
+        )
+        if affected:
+            promoted += 1
+            log.warning(
+                "reap.stuck_open_promoted",
+                extra={
+                    "cluster": mark.cluster.name,
+                    "kind": mark.kind,
+                    "import_id": mark.import_id,
+                    "started_at": mark.started_at.isoformat(),
+                },
+            )
+    return promoted
+
 
 def maybe_reap(mark: ImportMark) -> dict | None:
     """Call after a worker commits an item. If the queue for this tuple

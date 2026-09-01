@@ -18,10 +18,12 @@ non-trivial part and lives in the parser, not the reaper.
 """
 from __future__ import annotations
 
+import io
 from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
+from django.core.management import call_command
 from django.utils import timezone
 
 from core.constants import (
@@ -31,6 +33,7 @@ from core.constants import (
 )
 from core.models import (
     Cluster,
+    Image,
     ImportMark,
     IngestQueue,
     Namespace,
@@ -39,14 +42,14 @@ from core.models import (
     WorkloadImageObservation,
     WorkloadSignal,
 )
-from core.models import Image
 from core.services.queue import transition_mark_to_reaped
 from core.services.reaper import (
+    STUCK_OPEN_TIMEOUT_SECONDS,
     _reap_scan,
     maybe_reap,
     reap_all_drainable,
+    reap_stuck_open,
 )
-
 
 # ── helpers ─────────────────────────────────────────────────────────
 
@@ -496,6 +499,147 @@ def test_reap_all_drainable_ignores_already_reaped_marks():
     assert fired == 0
     already.refresh_from_db()
     assert already.state == ImportMarkState.REAPED.value
+
+
+# ── reap_stuck_open ─────────────────────────────────────────────────
+
+
+@pytest.mark.django_db
+def test_reap_stuck_open_ignores_fresh_open_mark():
+    """An `open` mark well within the timeout is left alone — the
+    importer may still be legitimately mid-cycle."""
+    c = _cluster()
+    mark = _mark(c, state=ImportMarkState.OPEN.value, started_at=timezone.now())
+
+    promoted = reap_stuck_open()
+
+    assert promoted == 0
+    mark.refresh_from_db()
+    assert mark.state == ImportMarkState.OPEN.value
+
+
+@pytest.mark.django_db
+def test_reap_stuck_open_ignores_draining_and_reaped_marks():
+    """Only `state=open` is in scope — draining/reaped marks (even with
+    an ancient `started_at`) are untouched by this sweep."""
+    c = _cluster()
+    stale = timezone.now() - timedelta(seconds=STUCK_OPEN_TIMEOUT_SECONDS + 60)
+    draining = _mark(
+        c, kind="trivy.ConfigAuditReport", import_id="imp-d",
+        state=ImportMarkState.DRAINING.value, started_at=stale,
+    )
+    reaped = _mark(
+        c, kind="trivy.ConfigAuditReport", import_id="imp-r",
+        state=ImportMarkState.REAPED.value, started_at=stale,
+    )
+
+    promoted = reap_stuck_open()
+
+    assert promoted == 0
+    draining.refresh_from_db()
+    reaped.refresh_from_db()
+    assert draining.state == ImportMarkState.DRAINING.value
+    assert reaped.state == ImportMarkState.REAPED.value
+
+
+@pytest.mark.django_db
+def test_reap_stuck_open_promotes_mark_past_timeout_with_no_items():
+    """A mark stuck `open` past STUCK_OPEN_TIMEOUT_SECONDS with zero
+    IngestQueue rows for its tuple (importer crashed before posting
+    anything) is promoted to draining, observed_count left untouched
+    (None) so the zero-input no-op rule governs its eventual reap."""
+    c = _cluster()
+    stale = timezone.now() - timedelta(seconds=STUCK_OPEN_TIMEOUT_SECONDS + 60)
+    mark = _mark(
+        c, kind="trivy.ConfigAuditReport", import_id="imp-empty",
+        state=ImportMarkState.OPEN.value, observed_count=None, started_at=stale,
+    )
+
+    promoted = reap_stuck_open()
+
+    assert promoted == 1
+    mark.refresh_from_db()
+    assert mark.state == ImportMarkState.DRAINING.value
+    assert mark.observed_count is None
+    assert mark.completed_at is not None
+
+
+@pytest.mark.django_db
+def test_reap_stuck_open_promotes_mark_with_partial_items_then_reap_all_drainable_resolves_it():
+    """A mark stuck open past timeout WITH some queue items already
+    landed (importer partially posted before dying): promotion alone
+    doesn't reap it, but a subsequent reap_all_drainable — the queue
+    for that tuple is already DONE — reaps it in the same command run."""
+    c = _cluster()
+    stale = timezone.now() - timedelta(seconds=STUCK_OPEN_TIMEOUT_SECONDS + 60)
+    mark = _mark(
+        c, kind="trivy.ConfigAuditReport", import_id="imp-partial",
+        state=ImportMarkState.OPEN.value, observed_count=None, started_at=stale,
+    )
+    IngestQueue.objects.create(
+        cluster_name=c.name, kind=mark.kind, import_id=mark.import_id,
+        raw_json={}, status=IngestQueueStatus.DONE.value,
+    )
+
+    promoted = reap_stuck_open()
+    assert promoted == 1
+    mark.refresh_from_db()
+    assert mark.state == ImportMarkState.DRAINING.value
+
+    with patch("core.services.reaper._maybe_capture_heartbeat"):
+        fired = reap_all_drainable()
+
+    assert fired == 1
+    mark.refresh_from_db()
+    assert mark.state == ImportMarkState.REAPED.value
+
+
+@pytest.mark.django_db
+def test_reap_stuck_open_promoted_scan_mark_does_not_clear_existing_signals():
+    """Core safety property: a force-promoted scan mark must take the
+    zero-input protective branch on reap, NOT the destructive
+    signal-clearing branch — an interrupted cycle must never look like
+    a complete, clean scan that found nothing."""
+    c = _cluster()
+    w = _workload(c)
+    stale = timezone.now() - timedelta(seconds=STUCK_OPEN_TIMEOUT_SECONDS + 60)
+    live_signal = WorkloadSignal.objects.create(
+        workload=w, signal_id="kyverno:disallow-privileged-containers",
+        currently_active=True, last_seen_at=stale - timedelta(minutes=5),
+    )
+    _mark(
+        c, kind="kyverno.PolicyReport", import_id="imp-stuck",
+        state=ImportMarkState.OPEN.value, observed_count=None, started_at=stale,
+    )
+
+    reap_stuck_open()
+    with patch("core.services.reaper._maybe_capture_heartbeat"):
+        reap_all_drainable()
+
+    live_signal.refresh_from_db()
+    assert live_signal.currently_active is True, (
+        "a force-drained scan mark must not clear signals it never actually re-scanned"
+    )
+
+
+@pytest.mark.django_db
+def test_reap_safety_net_command_promotes_and_reaps_in_one_run():
+    """End-to-end: `manage.py reap_safety_net` promotes a stuck open
+    mark AND reaps it (queue already empty) in the same invocation."""
+    c = _cluster()
+    stale = timezone.now() - timedelta(seconds=STUCK_OPEN_TIMEOUT_SECONDS + 60)
+    _mark(
+        c, kind="trivy.ConfigAuditReport", import_id="imp-e2e",
+        state=ImportMarkState.OPEN.value, observed_count=None, started_at=stale,
+    )
+
+    out = io.StringIO()
+    with patch("core.services.reaper._maybe_capture_heartbeat"):
+        call_command("reap_safety_net", stdout=out)
+
+    body = out.getvalue()
+    assert "promoted: 1" in body
+    assert "reaped: 1" in body
 
 
 @pytest.mark.django_db

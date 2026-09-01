@@ -303,7 +303,7 @@ re-run on the same triggers (or just on demand).
 | `enrich_fetch --source epss` | daily | first.org EPSS publishes daily |
 | `enrich_fetch --source osv-supply-chain` | hourly | OSV.dev per-ecosystem bulk-zip snapshots; conditional GET keeps off-cycle ticks cheap; streams each zip to disk so memory stays flat; calls the matcher inline |
 | `match_supply_chain` | on-demand | Re-run matcher without re-fetching feeds (after seeding test IoCs, or after a matching-logic change) |
-| `reap_safety_net` | hourly | Catches stuck `state=draining` ImportMarks the inline reaper missed |
+| `reap_safety_net` | hourly | Catches stuck `state=draining` ImportMarks the inline reaper missed, and promotes marks abandoned in `state=open` (importer crashed before `/imports/finish/`) so their queue tuples stop being permanently unclaimable |
 | `snapshot_capture` | daily (after enrichment + reaper) | End-of-day heartbeat at global / cluster / namespace / workload scopes; feeds trend charts |
 | `prune_stale_data` | daily | DB hygiene — prunes `IngestQueue` (14d), `ImportMark` REAPED (90d), `ScanInconsistency` (30d), stale `Finding` rows (180d), `SbomComponent` on long-undeployed images (90d). Configurable per target. |
 | `prune_snapshots` | daily or weekly | Deletes Snapshot rows older than `SNAPSHOT_RETENTION_DAYS` (default 365) |
@@ -364,7 +364,7 @@ Each scenario:
 | Prune old snapshots | `python manage.py prune_snapshots [--dry-run]` |
 | Daily DB hygiene (all targets) | `python manage.py prune_stale_data [--dry-run]` |
 | Dry-run DB hygiene (preview deletions) | `python manage.py prune_stale_data --dry-run` |
-| Sweep stuck draining marks | `python manage.py reap_safety_net` |
+| Sweep stuck draining/open marks | `python manage.py reap_safety_net` |
 | Fetch latest EPSS / KEV | `python manage.py enrich_fetch --source {epss,kev}` |
 | Load EPSS / KEV from file (offline) | `python manage.py enrich_from_file --source {epss,kev} <path>` |
 | Pull supply-chain IoC feed (OSV bulk zip) | `python manage.py enrich_fetch --source osv-supply-chain` |
@@ -430,6 +430,3 @@ tests/scenario_runner/           # pytest plugin walking Architecture/mock_tests
   decisions as `FindingAction.FALSE_POSITIVE` overlays.
 - Helm chart for the central + importer not yet bumped to the new
   endpoint contract — local dev only for now.
-- `reap_safety_net` fires drainable reaps but does not yet delete
-  stuck `state=open` marks past 1h. Workaround: clear them via Django
-  admin or a SQL DELETE.

@@ -5,6 +5,7 @@ Dedup hash per dev_docs/03-data-model.md *Finding — Dedup key*.
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import Iterable
 
 from django.db import IntegrityError, transaction
@@ -18,6 +19,16 @@ from core.models import (
     Workload,
 )
 from core.urgency import apply_score
+
+log = logging.getLogger("core.dedup")
+
+# Progress breadcrumb interval for upsert_findings' loop — see its
+# docstring: the whole call is one @transaction.atomic, one
+# select_for_update() per finding, with nothing logged until it returns.
+# For a heavily-vulnerable image (hundreds/thousands of CVEs) that can run
+# for minutes; without this, a pod that OOMs or gets deadline-killed mid
+# loop leaves no trace of how far it got.
+_PROGRESS_LOG_EVERY = 250
 
 
 def compute_hash(
@@ -95,6 +106,7 @@ def upsert_findings(
     created = 0
     updated = 0
     cluster_name = cluster.name
+    processed = 0
 
     for f in findings:
         hc = compute_hash(
@@ -132,6 +144,18 @@ def upsert_findings(
             created += 1
         else:
             updated += 1
+
+        processed += 1
+        if processed % _PROGRESS_LOG_EVERY == 0:
+            log.debug(
+                "dedup.upsert_findings.progress",
+                extra={
+                    "cluster": cluster_name,
+                    "processed": processed,
+                    "created": created,
+                    "updated": updated,
+                },
+            )
 
     return created, updated
 

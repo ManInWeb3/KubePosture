@@ -135,6 +135,21 @@ def _process_inventory(item: IngestQueue) -> dict:
     started_at = mark.started_at if mark else timezone.now()
 
     staging = inventory_parser.parse_envelope(item.raw_json or {}, cluster)
+    # `persist()` is one @transaction.atomic covering every namespace and
+    # workload in this snapshot — for a large/busy cluster that can be a
+    # long-held transaction with no progress signal until it returns.
+    # This size is the one cheap thing worth knowing before it starts.
+    log.debug(
+        "ingest.inventory.persist_starting",
+        extra={
+            "cluster": cluster.name,
+            "import_id": item.import_id,
+            "namespaces": len(staging.namespace_labels),
+            "workloads": len(staging.workloads),
+            "services": len(staging.services),
+            "ingresses": len(staging.ingresses),
+        },
+    )
     counters = inventory_parser.persist(staging, mark_started_at=started_at)
     return counters
 
@@ -176,6 +191,20 @@ def _process_trivy_per_workload(item: IngestQueue, parser_func) -> dict:
     if item.kind != "trivy.ConfigAuditReport":
         findings_to_upsert = parsed.get("findings") or []
 
+    # upsert_findings holds one lock per finding for the whole call (see
+    # its docstring) — for a report with hundreds/thousands of CVEs
+    # (a heavily-vulnerable base image, most commonly) that's a
+    # proportionally long-held set of locks with nothing logged until it
+    # returns. Worth knowing the size going in.
+    log.debug(
+        "ingest.trivy.upsert_findings_starting",
+        extra={
+            "kind": item.kind,
+            "cluster": cluster.name,
+            "findings": len(findings_to_upsert),
+            "image_ref": parsed.get("image_ref") or "",
+        },
+    )
     created, updated = upsert_findings(
         cluster=cluster,
         workload=workload,
@@ -282,6 +311,14 @@ def _process_sbom(item: IngestQueue, parser_func) -> dict:
         )
 
     components = parsed.get("components") or []
+    log.debug(
+        "ingest.sbom.upsert_starting",
+        extra={
+            "cluster": cluster.name,
+            "image_ref": parsed.get("image_ref") or "",
+            "components": len(components),
+        },
+    )
     created, updated = 0, 0
     # Sorted by purl so concurrent workers upserting overlapping images'
     # components acquire row locks in the same relative order — the

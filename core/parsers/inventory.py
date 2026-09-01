@@ -9,6 +9,7 @@ skipped.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 
 from django.conf import settings
@@ -26,6 +27,15 @@ from core.models import (
     WorkloadSignal,
 )
 from core.signals import SIGNALS
+
+log = logging.getLogger("core.inventory_parser")
+
+# Progress breadcrumb interval for persist()'s workload loop — see
+# ingest._process_inventory's "persist_starting" log for the sizes going
+# in. persist() is one @transaction.atomic for the whole snapshot; for a
+# large/busy cluster this is the only trace of how far it got if a pod
+# dies mid-loop with nothing else logged until the call returns.
+_PROGRESS_LOG_EVERY = 250
 
 CONTROLLER_KINDS_TO_WORKLOAD = {
     "Deployment": WorkloadKind.DEPLOYMENT.value,
@@ -711,6 +721,7 @@ def persist(st: _InventoryStaging, mark_started_at) -> dict:
 
     # 4. Workloads -------------------------------------------------------
     persisted_workloads: dict[tuple[str, str, str], Workload] = {}
+    _workloads_done = 0
     for key, w in st.workloads.items():
         ns_name, wkind, wname = key
         ns = st.namespaces.get(ns_name)
@@ -769,6 +780,17 @@ def persist(st: _InventoryStaging, mark_started_at) -> dict:
                 **defaults,
             )
             persisted_workloads[key] = new
+
+        _workloads_done += 1
+        if _workloads_done % _PROGRESS_LOG_EVERY == 0:
+            log.debug(
+                "inventory.persist.workloads_progress",
+                extra={
+                    "cluster": cluster.name,
+                    "processed": _workloads_done,
+                    "total": len(st.workloads),
+                },
+            )
     st.workloads = persisted_workloads
 
     # 5. WorkloadAlias — persist a DIRECT (alias_kind, alias_name) -> final
