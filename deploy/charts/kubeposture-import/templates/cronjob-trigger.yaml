@@ -36,10 +36,7 @@ spec:
           {{- end }}
           serviceAccountName: {{ include "kubeposture-import.serviceAccountName" . }}
           securityContext:
-            runAsNonRoot: true
-            runAsUser: 1000
-            runAsGroup: 1000
-            fsGroup: 1000
+            {{- include "kubeposture-import.podSecurityContext" . | nindent 12 }}
           restartPolicy: Never
           containers:
             - name: import-trigger
@@ -54,41 +51,16 @@ spec:
                 - --in-cluster
                 - --on-demand-only
               env:
-                - name: KUBEPOSTURE_URL
-                  value: {{ .Values.kubepostureUrl | quote }}
-                - name: KUBEPOSTURE_HTTP_TIMEOUT
-                  value: {{ .Values.httpTimeoutSeconds | quote }}
-                - name: KUBEPOSTURE_TOKEN
-                {{- if .Values.token.secretRef.name }}
-                  valueFrom:
-                    secretKeyRef:
-                      name: {{ .Values.token.secretRef.name }}
-                      key: {{ .Values.token.secretRef.key }}
-                {{- else }}
-                  value: {{ .Values.token.value | quote }}
-                {{- end }}
-                - name: KUBEPOSTURE_CLEANUP_FAILED_JOBS
-                  value: {{ .Values.cleanupFailedJobsOnSuccess | quote }}
-                - name: KUBEPOSTURE_CRONJOB_NAME
-                  value: {{ printf "%s-trigger" (include "kubeposture-import.fullname" .) | quote }}
-                - name: KUBEPOSTURE_NAMESPACE
-                  valueFrom:
-                    fieldRef:
-                      fieldPath: metadata.namespace
+                {{- include "kubeposture-import.containerEnv" (dict "root" $ "cronjobName" (printf "%s-trigger" (include "kubeposture-import.fullname" .))) | nindent 16 }}
               securityContext:
-                allowPrivilegeEscalation: false
-                readOnlyRootFilesystem: true
-                capabilities:
-                  drop:
-                    - ALL
+                {{- include "kubeposture-import.containerSecurityContext" . | nindent 16 }}
               resources:
                 {{- toYaml .Values.resources | nindent 16 }}
               volumeMounts:
                 - name: tmp
                   mountPath: /tmp
           volumes:
-            - name: tmp
-              emptyDir: {}
+            {{- include "kubeposture-import.tmpVolume" . | nindent 12 }}
           {{- with .Values.nodeSelector }}
           nodeSelector:
             {{- toYaml . | nindent 12 }}

@@ -1,8 +1,9 @@
 # -- kubeposture-import: imports Trivy/Kyverno CRD data from this cluster into KubePosture
 #
 # Deploy this chart to EACH cluster that has Trivy Operator and/or Kyverno installed.
-# It creates a CronJob that reads CRDs from the local K8s API and POSTs them to the
-# KubePosture ingest endpoint.
+# It creates a CronJob that reads CRDs from the local K8s API, filters them for
+# relevance, and uploads one compressed bundle per kind to the KubePosture
+# bundle endpoints, committing the import atomically.
 
 # -- Cluster name as registered in KubePosture (e.g. cluster-name-1, cluster-name-2)
 clusterName: ""
@@ -30,8 +31,42 @@ initialRun: true
 # -- CronJob schedule (default: every 6 hours)
 schedule: "0 */6 * * *"
 
-# -- Maximum run time for the import job
+# -- Maximum run time for the import job. Must stay <= the central's
+# IMPORT_LOCK_TIMEOUT_SECONDS (2700) so a slow-but-alive import is never
+# raced by a second one.
 activeDeadlineSeconds: 1800
+
+# -- Wall-clock budget for uploads + commit inside one run. Past it the
+# importer stops retrying and aborts the import server-side, so a clean
+# abort always lands before Kubernetes SIGKILLs the pod at
+# activeDeadlineSeconds. Must be < activeDeadlineSeconds.
+uploadDeadlineSeconds: 1500
+
+# -- Relevance filter: drop scan reports for images that are not
+# currently running (Trivy keeps a report for every historical
+# ReplicaSet) and for workloads no longer in the snapshot. The central
+# would skip or hide those anyway; shipping them is pure cost. Set to
+# false as an escape hatch while investigating a digest mismatch
+# (coverage ratio unexpectedly low) — no central change needed.
+relevanceFilter: true
+
+# -- Scan-coverage check (record + alert, never aborts the import).
+coverage:
+  # Ratio (matched / expected) below which the importer prints a WARNING
+  # and the central logs `import.coverage_low`.
+  minRatio: 0.9
+  # Kinds to report informationally only, e.g. ["trivy.ExposedSecretReport"].
+  ignoreKinds: []
+
+# -- Importer log verbosity: info | debug (debug lists unmatched digests
+# and every deployed digest with its source — useful once, noisy always).
+logLevel: info
+
+# -- Scratch space for building the bundles (one uncompressed pass of
+# the snapshot, ~20 MB for a mid-size cluster, then the gzipped
+# bundles). Mounted at /tmp (readOnlyRootFilesystem is on).
+tmp:
+  sizeLimit: 256Mi
 
 # -- When an import run succeeds, delete previously failed Jobs owned by
 # the same CronJob (main or trigger, whichever just succeeded). Transient
@@ -41,10 +76,9 @@ activeDeadlineSeconds: 1800
 # itself can't run (flag disabled, or the delete fails).
 cleanupFailedJobsOnSuccess: true
 
-# -- Per-request HTTP timeout (seconds) for POSTs to the KubePosture API.
-# Bump this if your import job sees intermittent connection-reset failures
-# during long ingest cycles — the central server can occasionally take
-# >30s to respond under burst load via an LB/ingress.
+# -- Per-request HTTP timeout (seconds) for calls to the KubePosture API.
+# A bundle upload is one request; bump this if uploads of SBOM-heavy
+# clusters time out through a slow LB/ingress.
 httpTimeoutSeconds: 60
 
 # -- Extra annotations on the install/upgrade Job (NOT the CronJob).
@@ -65,9 +99,9 @@ jobAnnotations: {}
 trigger:
   enabled: true
   schedule: "* * * * *"
-  # Tighter deadline than the main job: idle ticks complete in seconds.
-  # When a real import fires it inherits the main `activeDeadlineSeconds`
-  # because the on-demand job runs the same code path.
+  # Same deadline as the main job: idle ticks complete in seconds, but
+  # when a real import fires it runs the same code path and needs the
+  # same budget.
   activeDeadlineSeconds: 1800
 
 # -- Image containing the import script + kubernetes Python client
@@ -78,11 +112,13 @@ image:
 
 imagePullSecrets: []
 
-# -- Resources for the import job
+# -- Resources for the import job. The kubernetes client's typed objects
+# for a full cluster listing dominate RSS; the bundle path itself streams
+# and adds no large in-memory copies.
 resources:
   requests:
     cpu: 1
-    memory: 128Mi
+    memory: 256Mi
   limits:
     cpu: 2
     memory: 512Mi

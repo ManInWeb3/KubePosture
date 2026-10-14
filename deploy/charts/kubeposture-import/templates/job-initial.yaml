@@ -36,52 +36,31 @@ spec:
       {{- end }}
       serviceAccountName: {{ include "kubeposture-import.serviceAccountName" . }}
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
-        fsGroup: 1000
+        {{- include "kubeposture-import.podSecurityContext" . | nindent 8 }}
       restartPolicy: Never
       containers:
         - name: import
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          # Token comes from KUBEPOSTURE_TOKEN env var (not positional arg)
-          # to keep it out of `ps` and `kubectl describe pod`.
           # See cronjob.yaml for why import.trivy / import.kyverno are
-          # not passed as flags.
+          # not passed as flags. No failed-Job cleanup here: this Job is
+          # not owned by a CronJob.
           command:
             - python
             - scripts/import-cluster.py
             - {{ required "clusterName is required" .Values.clusterName }}
             - --in-cluster
           env:
-            - name: KUBEPOSTURE_URL
-              value: {{ .Values.kubepostureUrl | quote }}
-            - name: KUBEPOSTURE_HTTP_TIMEOUT
-              value: {{ .Values.httpTimeoutSeconds | quote }}
-            - name: KUBEPOSTURE_TOKEN
-            {{- if .Values.token.secretRef.name }}
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.token.secretRef.name }}
-                  key: {{ .Values.token.secretRef.key }}
-            {{- else }}
-              value: {{ .Values.token.value | quote }}
-            {{- end }}
+            {{- include "kubeposture-import.containerEnv" (dict "root" $ "cronjobName" "") | nindent 12 }}
           securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop:
-                - ALL
+            {{- include "kubeposture-import.containerSecurityContext" . | nindent 12 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
       volumes:
-        - name: tmp
-          emptyDir: {}
+        {{- include "kubeposture-import.tmpVolume" . | nindent 8 }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
