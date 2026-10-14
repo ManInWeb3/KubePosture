@@ -2,7 +2,7 @@ import copy
 
 import pytest
 from kubeposture_importer.kinds import CLUSTER_LEVEL_KINDS
-from kubeposture_importer.relevance import apply_relevance_filter, filter_kind
+from kubeposture_importer.relevance import apply_relevance_filter, filter_kind, subject_of_trivy
 from kubeposture_importer.snapshot_index import build_index
 
 from .fixtures_builders import (
@@ -11,6 +11,7 @@ from .fixtures_builders import (
     SHA_OLD,
     by_kind,
     cronjob,
+    deployment,
     deployment_chain,
     job,
     kyverno_result,
@@ -99,6 +100,36 @@ def test_config_audit_subject_resolution(idx):
     assert kept == [via_rs, via_old_rs]
     assert stats.dropped_no_subject == 1
     assert stats.resolved_subjects == {("ns", "Deployment", "api")}
+
+
+def test_config_audit_with_name_hash_label_resolves_through_owner_reference():
+    """Trivy omits `resource.name` for names over 63 chars and sets only
+    `resource.name-hash`; the real name lives in ownerReferences. The
+    filter must resolve it exactly as the server parser does, or it
+    would drop reports the server could use."""
+    long_rs = "api-" + "x" * 70 + "-abc"
+    idx = build_index(by_kind(
+        deployment("api"),
+        replicaset(long_rs, owner_name="api"),
+    ))
+    report = trivy_report("ConfigAuditReport", subject_kind="ReplicaSet", subject_name="ignored", digest=None)
+    del report["metadata"]["labels"]["trivy-operator.resource.name"]
+    report["metadata"]["labels"]["trivy-operator.resource.name-hash"] = "85c5b9fbdd"
+    report["metadata"]["ownerReferences"] = [
+        {"kind": "ReplicaSet", "name": long_rs, "controller": True, "uid": "u"},
+    ]
+
+    assert subject_of_trivy(report) == ("ns", "ReplicaSet", long_rs)
+    kept, stats = filter_kind(CONFIG, [report], idx, enabled=True)
+    assert kept == [report] and stats.dropped_no_subject == 0
+    assert stats.resolved_subjects == {("ns", "Deployment", "api")}
+
+
+def test_nameless_report_without_a_usable_owner_is_dropped_not_crashed(idx):
+    report = trivy_report("ConfigAuditReport", subject_kind="ReplicaSet", subject_name="x", digest=None)
+    del report["metadata"]["labels"]["trivy-operator.resource.name"]
+    kept, stats = filter_kind(CONFIG, [report], idx, enabled=True)
+    assert kept == [] and stats.dropped_no_subject == 1
 
 
 def test_config_audit_for_standalone_pod_kept():

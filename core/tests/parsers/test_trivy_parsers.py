@@ -78,6 +78,63 @@ def test_vuln_report_extracts_workload_identity_from_labels():
     assert parsed["container_name"] == "app"
 
 
+def _long_name_report(obj: dict, *, owner_kind: str = "ReplicaSet", owner_name: str | None = None) -> dict:
+    """Shape Trivy emits when the scanned resource's name exceeds the
+    63-character label-value limit: no `resource.name` label, only
+    `resource.name-hash`, the real name in the report's ownerReferences."""
+    name = owner_name or ("a-very-long-deployment-name-" + "x" * 40 + "-7d9f5b6c8d")
+    assert len(name) > 63
+    labels = obj["metadata"]["labels"]
+    del labels["trivy-operator.resource.name"]
+    labels["trivy-operator.resource.name-hash"] = "85c5b9fbdd"
+    obj["metadata"]["ownerReferences"] = [
+        {"apiVersion": "apps/v1", "kind": owner_kind, "name": name, "controller": True,
+         "blockOwnerDeletion": False, "uid": "u-1"},
+    ]
+    return obj
+
+
+def test_identity_falls_back_to_owner_reference_when_name_label_is_missing():
+    """Regression found on real data: Trivy drops the name label for
+    names over 63 chars; without the fallback the report resolved to no
+    workload and every finding on it was silently dropped."""
+    long_name = "a-very-long-deployment-name-" + "x" * 40 + "-7d9f5b6c8d"
+    obj = _long_name_report(_vuln_report(vulns=[_vuln("CVE-2024-1234")]), owner_name=long_name)
+
+    parsed = trivy.parse_vulnerability_report(obj)
+
+    assert (parsed["namespace"], parsed["resource_kind"], parsed["resource_name"]) == (
+        "payments", "ReplicaSet", long_name,
+    )
+    assert len(parsed["findings"]) == 1
+
+
+def test_identity_fallback_ignores_an_owner_of_a_different_kind():
+    obj = _long_name_report(_vuln_report(), owner_kind="Pod")
+    obj["metadata"]["ownerReferences"][0]["kind"] = "Pod"
+    # label kind is ReplicaSet; a Pod owner is not the scanned resource.
+    parsed = trivy.parse_vulnerability_report(obj)
+    assert parsed["resource_name"] == ""
+
+
+def test_identity_label_wins_over_owner_reference():
+    obj = _vuln_report()
+    obj["metadata"]["ownerReferences"] = [
+        {"kind": "ReplicaSet", "name": "something-else", "controller": True},
+    ]
+    assert trivy.parse_vulnerability_report(obj)["resource_name"] == "api-server-7d9f5b6c8d"
+
+
+def test_identity_fallback_covers_every_per_workload_report_kind():
+    for parse, obj in (
+        (trivy.parse_vulnerability_report, _vuln_report()),
+        (trivy.parse_sbom_report, {**_vuln_report(), "kind": "SbomReport",
+                                    "report": {"artifact": _vuln_report()["report"]["artifact"], "components": {}}}),
+    ):
+        parsed = parse(_long_name_report(obj))
+        assert parsed["resource_name"].startswith("a-very-long-deployment-name-")
+
+
 def test_vuln_report_extracts_image_digest_from_artifact():
     digest = "sha256:" + "b" * 64
     obj = _vuln_report(image_digest=digest, vulns=[_vuln("CVE-2024-1234")])

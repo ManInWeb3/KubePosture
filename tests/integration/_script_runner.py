@@ -46,6 +46,7 @@ def run_import(*, cluster: str, folder: Path, url: str, token: str, tmp_dir: Pat
         "KUBEPOSTURE_TOKEN": token,
         "KUBEPOSTURE_TMP": str(tmp_dir),
         "KUBEPOSTURE_HTTP_TIMEOUT": "30",
+        "KUBEPOSTURE_HTTP_RETRY_BASE_DELAY": "0.05",
         "PYTHONUNBUFFERED": "1",
         **(env or {}),
     }
@@ -53,11 +54,13 @@ def run_import(*, cluster: str, folder: Path, url: str, token: str, tmp_dir: Pat
     return ScriptRun(proc.returncode, proc.stdout, proc.stderr, parse_summary(proc.stdout))
 
 
-def start_import(*, cluster: str, folder: Path, url: str, token: str, tmp_dir: Path) -> subprocess.Popen:
+def start_import(*, cluster: str, folder: Path, url: str, token: str, tmp_dir: Path,
+                 env: dict[str, str] | None = None) -> subprocess.Popen:
     cmd = [sys.executable, str(SCRIPT), cluster, "--from-folder", str(folder)]
-    env = {**os.environ, "KUBEPOSTURE_URL": url, "KUBEPOSTURE_TOKEN": token,
-           "KUBEPOSTURE_TMP": str(tmp_dir), "KUBEPOSTURE_HTTP_TIMEOUT": "30", "PYTHONUNBUFFERED": "1"}
-    return subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=REPO)
+    full_env = {**os.environ, "KUBEPOSTURE_URL": url, "KUBEPOSTURE_TOKEN": token,
+                "KUBEPOSTURE_TMP": str(tmp_dir), "KUBEPOSTURE_HTTP_TIMEOUT": "30",
+                "KUBEPOSTURE_HTTP_RETRY_BASE_DELAY": "0.05", "PYTHONUNBUFFERED": "1", **(env or {})}
+    return subprocess.Popen(cmd, env=full_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=REPO)
 
 
 def parse_summary(stdout: str) -> dict | None:

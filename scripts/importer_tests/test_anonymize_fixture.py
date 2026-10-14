@@ -105,7 +105,7 @@ def _capture(root: Path) -> Path:
     ns, kube = "payments", "kube-system"
     api_img = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/payments/api:1.2.3"
     chain_rs = replicaset("api-7d9f5b6c8d", ns, owner_name="api", image=api_img)
-    chain_pod = pod("api-7d9f5b6c8d-x1", ns, owner_ref={"apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "api-7d9f5b6c8d", "controller": True},
+    chain_pod = pod("api-7d9f5b6c8d-x7k2m", ns, owner_ref={"apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "api-7d9f5b6c8d", "controller": True},
                     image=api_img, digest=SHA_A, image_id_style="docker-pullable")
     old_rs = replicaset("api-5555555555", ns, owner_name="api", image="123456789012.dkr.ecr.eu-west-1.amazonaws.com/payments/api:1.2.2", replicas=0)
     agent_pod = pod("agent-abc12", kube, image="docker.io/library/busybox:1.36", digest=SHA_B)
@@ -137,8 +137,8 @@ def _capture(root: Path) -> Path:
     _write(root, "kyverno/policyreports.json", [{
         "apiVersion": "wgpolicyk8s.io/v1alpha2", "kind": "PolicyReport",
         "metadata": {"name": "9f1c2d3e-4a5b-6c7d-8e9f-0a1b2c3d4e5f", "namespace": ns},
-        "scope": {"kind": "Pod", "name": "api-7d9f5b6c8d-x1", "namespace": ns, "uid": "9f1c2d3e-4a5b-6c7d-8e9f-0a1b2c3d4e5f"},
-        "results": [kyverno_result(subjects=[subject("Pod", "api-7d9f5b6c8d-x1", ns)]) | {"message": "validation error: pod api-7d9f5b6c8d-x1 in payments"}],
+        "scope": {"kind": "Pod", "name": "api-7d9f5b6c8d-x7k2m", "namespace": ns, "uid": "9f1c2d3e-4a5b-6c7d-8e9f-0a1b2c3d4e5f"},
+        "results": [kyverno_result(subjects=[subject("Pod", "api-7d9f5b6c8d-x7k2m", ns)]) | {"message": "validation error: pod api-7d9f5b6c8d-x7k2m in payments"}],
     }])
     (root / "kubeapi/version.json").write_text(json.dumps({"serverVersion": {"gitVersion": "v1.30.2"}}))
     (root / "capture-meta.json").write_text(json.dumps({"captured_at": "2026-10-01", "kubectl_version": "x"}))
@@ -192,11 +192,13 @@ def test_suffix_structure_preserved_through_deployment_rs_pod_and_reports(run):
     assert rs_new == f"{dep_new}-7d9f5b6c8d"
     assert out["ReplicaSet"][0]["metadata"]["ownerReferences"][0]["name"] == dep_new
     pod_ = next(p for p in out["Pod"] if p["metadata"]["namespace"] != "kube-system")
-    assert pod_["metadata"]["name"] == f"{rs_new}-x1"
+    assert pod_["metadata"]["name"] == f"{rs_new}-x7k2m"
     assert pod_["metadata"]["ownerReferences"][0]["name"] == rs_new
     vuln = next(v for v in out["VulnerabilityReport"] if v["metadata"]["labels"]["trivy-operator.resource.name"] == rs_new)
-    assert vuln["metadata"]["name"] == f"replicaset-{rs_new}-app"
-    assert out["PolicyReport"][0]["results"][0]["subjects"][0]["name"] == f"{rs_new}-x1"
+    ctr = anon.ctr("app")
+    assert vuln["metadata"]["name"] == f"replicaset-{rs_new}-{ctr}"
+    assert vuln["metadata"]["labels"]["trivy-operator.container.name"] == ctr
+    assert out["PolicyReport"][0]["results"][0]["subjects"][0]["name"] == f"{rs_new}-x7k2m"
 
 
 def test_digest_rehash_consistent_across_imageid_artifact_sbom_and_pinned_refs(run):
@@ -235,27 +237,182 @@ def test_images_registries_hosts_nodes_and_labels(run):
     assert node["metadata"]["labels"]["topology.kubernetes.io/region"] == "eu-west-1"
     assert node["spec"]["providerID"].startswith("aws:///eu-west-1a/i-")
     assert node["status"] == {"nodeInfo": {"kubeletVersion": "v1.30.2", "osImage": "Bottlerocket"}}
-    assert dep["spec"]["template"]["spec"]["nodeName"] == node["metadata"]["name"]
+    assert "nodeName" not in dep["spec"]["template"]["spec"], "the server never reads nodeName"
 
 
-def test_secrets_redacted_and_annotations_allowlisted(run):
+def test_pod_spec_is_an_allowlist_secrets_never_survive(run):
+    """env, command, args, mounts, probes, non-hostPath volumes, PVC
+    templates: none of it is read by the server, so none of it is kept."""
     _, out_dir, out = run()
     dep = next(d for d in out["Deployment"] if d["metadata"]["name"].startswith("wl-"))
-    c = dep["spec"]["template"]["spec"]["containers"][0]
-    assert c["env"][0]["value"] == "REDACTED"
-    assert c["env"][1]["valueFrom"]["secretKeyRef"]["name"] != "db-secret"
-    assert c["command"] == ["REDACTED"]
-    assert dep["spec"]["template"]["spec"]["volumes"][0]["secret"]["secretName"] != "tls-cert"
-    assert dep["spec"]["template"]["spec"]["serviceAccountName"].startswith("sa-")
+    spec = dep["spec"]["template"]["spec"]
+    c = spec["containers"][0]
+    assert set(c) <= {"name", "image", "securityContext"}
+    assert c["name"].startswith("ctr-")
+    assert "volumes" not in spec and "imagePullSecrets" not in spec and "nodeName" not in spec
+    assert spec["serviceAccountName"].startswith("sa-")
     assert dep["metadata"]["annotations"] == {"posture.io/contains-sensitive-data": "true"}
+    assert set(dep["metadata"]) <= {"name", "namespace", "uid", "labels", "annotations", "ownerReferences"}
     assert "creationTimestamp" not in dep["metadata"] and "managedFields" not in dep["metadata"]
     assert out["ExposedSecretReport"][0]["report"]["secrets"][0]["match"] == "REDACTED"
     assert out["ExposedSecretReport"][0]["report"]["secrets"][0]["target"] == "/app/.env"
     assert out["PolicyReport"][0]["results"][0]["message"] == "disallow-host-namespaces/r"
-    assert "clusterIP" not in out["Service"][0]["spec"]
+    assert set(out["Service"][0]["spec"]) == {"type", "selector", "ports"}
     text = "".join(gzip.open(p, "rt").read() for p in out_dir.rglob("*.gz"))
-    for secret in ("hunter2", "AKIA1234567890SECRET", "db-secret", "tls-cert", "last-applied", "10.0.1.23", "ip-10-0-1-23"):
+    for secret in ("hunter2", "AKIA1234567890SECRET", "db-secret", "tls-cert", "last-applied", "10.0.1.23",
+                   "ip-10-0-1-23", "DB_PASSWORD", "curl http://internal", "regcred"):
         assert secret not in text, secret
+
+
+def test_host_path_volumes_survive_because_the_server_reads_them(anon_mod, tmp_path):
+    src = _capture(tmp_path / "src")
+    deps = json.loads((src / "kubeapi/deployments.json").read_text())
+    deps["items"][0]["spec"]["template"]["spec"].update({
+        "hostNetwork": True,
+        "volumes": [{"name": "docker-sock", "hostPath": {"path": "/var/run/docker.sock"}},
+                    {"name": "cfg", "configMap": {"name": "secret-config"}}],
+    })
+    deps["items"][0]["spec"]["template"]["spec"]["containers"][0]["securityContext"] = {
+        "privileged": True, "capabilities": {"add": ["SYS_ADMIN"]}, "runAsUser": 0,
+    }
+    (src / "kubeapi/deployments.json").write_text(json.dumps(deps))
+    out = tmp_path / "out"
+    anon_mod.anonymize(src, out, salt=SALT)
+    spec = next(d for d in _load_out(out)["Deployment"] if d["metadata"]["name"].startswith("wl-"))["spec"]["template"]["spec"]
+    assert spec["hostNetwork"] is True
+    assert spec["volumes"] == [{"name": spec["volumes"][0]["name"], "hostPath": {"path": "/REDACTED"}}]
+    assert spec["containers"][0]["securityContext"] == {"privileged": True}
+    text = "".join(gzip.open(p, "rt").read() for p in out.rglob("*.gz"))
+    assert "docker.sock" not in text and "secret-config" not in text
+
+
+def test_container_names_hashed_consistently_across_spec_status_and_trivy_label(run):
+    anon, _, out = run()
+    ctr = anon.ctr("app")
+    dep = next(d for d in out["Deployment"] if d["metadata"]["name"].startswith("wl-"))
+    pod_ = next(p for p in out["Pod"] if p["metadata"]["namespace"] != "kube-system")
+    assert dep["spec"]["template"]["spec"]["containers"][0]["name"] == ctr
+    assert pod_["spec"]["containers"][0]["name"] == pod_["status"]["containerStatuses"][0]["name"] == ctr
+    assert all(r["metadata"]["labels"]["trivy-operator.container.name"] == ctr for r in out["VulnerabilityReport"])
+
+
+def test_only_generated_name_suffixes_are_preserved(anon_mod):
+    a = anon_mod.Anonymizer(SALT)
+    a.controllers = {"ns": {"api"}}
+    base = a.obj_name("ns", "api")
+    assert a.obj_name("ns", "api-7d9f5b6c8d") == base + "-7d9f5b6c8d", "ReplicaSet hash"
+    assert a.obj_name("ns", "api-7d9f5b6c8d-x7k2m") == base + "-7d9f5b6c8d-x7k2m", "Pod suffix"
+    assert a.obj_name("ns", "api-0") == base + "-0", "StatefulSet ordinal"
+    assert a.obj_name("ns", "api-28391472") == base + "-28391472", "Job timestamp"
+    leaked = a.obj_name("ns", "api-data-redis-0")
+    assert "data" not in leaked and "redis" not in leaked, "human text after the controller name is hashed whole"
+
+
+@pytest.mark.parametrize(
+    ("reference", "kept_verbatim"),
+    [
+        ("registry.k8s.io/pause:3.9", True),
+        ("registry.k8s.io/ingress-nginx/controller:v1.9", True),
+        ("public.ecr.aws/eks/coredns:v1.11", True),
+        ("nginx:1.25", True),
+        ("docker.io/library/busybox:1.36", True),
+        ("ghcr.io/acme/payroll:1.0", False),
+        ("quay.io/acme/payroll:1.0", False),
+        ("docker.io/acme/payroll:1.0", False),
+        ("acme/payroll:1.0", False),
+        ("123456789012.dkr.ecr.eu-west-1.amazonaws.com/acme/payroll:1.0", False),
+    ],
+)
+def test_image_repo_policy_hashes_anything_that_could_be_a_private_repo(anon_mod, reference, kept_verbatim):
+    out = anon_mod.Anonymizer(SALT).image(reference)
+    repo_path = reference.split("/", 1)[1].split(":")[0] if "/" in reference else reference.split(":")[0]
+    if kept_verbatim:
+        assert out == reference
+    else:
+        assert "acme" not in out and "payroll" not in out, out
+        assert out.endswith(":1.0"), "version-like tags survive"
+        assert repo_path not in out
+
+
+def test_label_key_domains_are_hashed_unless_well_known(anon_mod):
+    a = anon_mod.Anonymizer(SALT)
+    for public in ("app.kubernetes.io/name", "topology.kubernetes.io/zone", "eks.amazonaws.com/nodegroup",
+                   "helm.sh/chart", "posture.io/contains-sensitive-data", "app", "trivy-operator.resource.name"):
+        assert a.label_key(public) == public
+    hashed = a.label_key("superapp.acme.com/preview")
+    assert "acme" not in hashed and "superapp" not in hashed and hashed.endswith(".example/preview")
+    assert a.label_key("superapp.acme.com/preview") == hashed, "deterministic, so selectors still match"
+    assert a.label_key("vector.dev/exclude").endswith(".example/exclude")
+
+
+def test_sbom_root_component_is_rebuilt_without_image_labels_or_registry(anon_mod, tmp_path):
+    src = _capture(tmp_path / "src")
+    sboms = json.loads((src / "trivy/sbomreports.json").read_text())
+    bom = sboms["items"][0]["report"]["components"]
+    bom["metadata"]["component"].update({
+        "bom-ref": "pkg:oci/api@sha256:" + "a" * 64 + "?repository_url=registry.corp.example%2Facme%2Fapi",
+        "properties": [
+            {"name": "aquasecurity:trivy:Labels:org.opencontainers.image.source", "value": "https://github.com/acme/api"},
+            {"name": "aquasecurity:trivy:RepoDigest", "value": "registry.corp.example/acme/api@sha256:" + "a" * 64},
+        ],
+    })
+    bom["dependencies"] = [{"ref": "pkg:oci/api@x", "dependsOn": []}]
+    bom["components"][0]["properties"].append({"name": "aquasecurity:trivy:FilePath", "value": "app/node_modules/@acme/core"})
+    (src / "trivy/sbomreports.json").write_text(json.dumps(sboms))
+    out = tmp_path / "out"
+    anon_mod.anonymize(src, out, salt=SALT)
+    doc = _load_out(out)["SbomReport"][0]["report"]["components"]
+    root = doc["metadata"]["component"]
+    assert set(root) == {"type", "name", "bom-ref", "purl"} and root["purl"].startswith("pkg:oci/")
+    assert "dependencies" not in doc and "serialNumber" not in doc
+    names = {p["name"] for c in doc["components"] for p in c.get("properties", [])}
+    assert names <= {"aquasecurity:trivy:PkgType", "aquasecurity:trivy:LayerDigest",
+                     "aquasecurity:trivy:Class", "aquasecurity:trivy:Type"}
+    text = "".join(gzip.open(p, "rt").read() for p in out.rglob("*.gz"))
+    for secret in ("github.com/acme", "registry.corp.example", "@acme/core", "acme/api"):
+        assert secret not in text, secret
+
+
+def test_private_words_scrubbed_from_everywhere_and_verified_absent(anon_mod, tmp_path):
+    """Internal package names inside the SBOMs of your own images
+    (@acme/core, github.com/acme/...) can't be detected generically — the
+    operator names the words, they are scrubbed from values AND keys, and
+    verify fails if any survives."""
+    src = _capture(tmp_path / "src")
+    sboms = json.loads((src / "trivy/sbomreports.json").read_text())
+    sboms["items"][0]["report"]["components"]["components"] = [
+        {"type": "library", "name": "@Acme/core", "version": "1.0.0", "purl": "pkg:npm/%40acme/core@1.0.0",
+         "bom-ref": "pkg:npm/%40acme/core@1.0.0", "group": "@acme", "properties": []},
+        {"type": "library", "name": "openssl", "version": "3.0.1", "purl": "pkg:deb/debian/openssl@3.0.1", "properties": []},
+    ]
+    (src / "trivy/sbomreports.json").write_text(json.dumps(sboms))
+    out = tmp_path / "out"
+    anon = anon_mod.anonymize(src, out, salt=SALT, private_words=["acme"])
+    comps = _load_out(out)["SbomReport"][0]["report"]["components"]["components"]
+    assert "acme" not in json.dumps(comps).lower()
+    assert comps[0]["purl"].startswith("pkg:npm/%40w") and comps[0]["version"] == "1.0.0", "structure + ecosystem intact"
+    assert comps[1]["purl"] == "pkg:deb/debian/openssl@3.0.1", "unrelated packages untouched"
+    assert anon_mod.verify(anon, out) == []
+
+    p = next(out.glob("trivy/sbomreports.json.gz"))
+    doc = json.loads(gzip.open(p, "rt").read())
+    doc["items"][0]["report"]["components"]["components"][0]["name"] = "ACME-internal"
+    with gzip.open(p, "wt") as fh:
+        fh.write(json.dumps(doc))
+    assert any("private word still present: 'acme'" in m for m in anon_mod.verify(anon, out))
+
+
+def test_suggest_private_words_names_candidates_still_present(anon_mod, tmp_path):
+    src = _capture(tmp_path / "src")
+    sboms = json.loads((src / "trivy/sbomreports.json").read_text())
+    sboms["items"][0]["report"]["components"]["components"].append(
+        {"type": "library", "name": "payments-sdk", "version": "1", "purl": "pkg:npm/payments-sdk@1", "properties": []})
+    (src / "trivy/sbomreports.json").write_text(json.dumps(sboms))
+    out = tmp_path / "out"
+    anon = anon_mod.anonymize(src, out, salt=SALT)
+    assert "payments" in anon_mod.suggest_private_words(anon, out)
+    anon2 = anon_mod.anonymize(src, tmp_path / "out2", salt=SALT, private_words=["payments"])
+    assert "payments" not in anon_mod.suggest_private_words(anon2, tmp_path / "out2")
 
 
 def test_uuid_names_mapped_consistently(run):
@@ -293,11 +450,11 @@ def test_verify_detects_a_leak(anon_mod, run):
     anon, out_dir, _ = run()
     p = next(out_dir.glob("kubeapi/deployments.json.gz"))
     doc = json.loads(gzip.open(p, "rt").read())
-    doc["items"][0]["metadata"]["annotations"]["note"] = "cluster payments api"
+    doc["items"][0]["metadata"]["annotations"]["note"] = "owned by the other-team group"
     with gzip.open(p, "wt") as fh:
         fh.write(json.dumps(doc))
     problems = anon_mod.verify(anon, out_dir)
-    assert any("leaked" in msg and "payments" in msg for msg in problems)
+    assert any("leaked" in msg and "other-team" in msg for msg in problems)
 
 
 def test_write_golden_produces_stats_bundles_and_unfiltered_counts(anon_mod, run):

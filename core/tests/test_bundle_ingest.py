@@ -448,3 +448,73 @@ def test_store_items_round_trips_through_the_same_path(cluster):
     with pytest.raises(BundleError) as excinfo:
         bi.store_items(cluster=cluster, import_id="imp-1", kind="nope", items=[])
     assert excinfo.value.code == "unknown_kind"
+
+
+# ── transfers that stop part-way ───────────────────────────────────
+
+BIG = [{"kind": "VulnerabilityReport", "metadata": {"name": f"r{i}"}, "pad": "x" * 150} for i in range(40)]
+
+
+def _cut_offsets(n: int, *, points: int = 60) -> list[int]:
+    step = max(1, n // points)
+    return sorted({*range(1, n, step), n - 1, n - 2, 1, 2, 3})
+
+
+def test_gzip_stream_truncated_at_every_offset_never_yields_a_bundle():
+    """No prefix of a gzip bundle — wherever the connection died, down to
+    the last byte of the CRC trailer — may be accepted."""
+    body = gzip.compress(_raw("imp-1", VULN, BIG))
+    for cut in _cut_offsets(len(body)):
+        with pytest.raises(BundleError) as excinfo:
+            bi.spool_bundle(io.BytesIO(body[:cut]), gzip_encoded=True, limits=LIMITS).close()
+        assert excinfo.value.code in {"bad_gzip", "missing_manifest", "bad_manifest"}, (cut, excinfo.value.code)
+
+
+def _store_uncompressed(cluster, raw: bytes):
+    with bi.spool_bundle(io.BytesIO(raw), gzip_encoded=False, limits=LIMITS) as sp:
+        bi.check_manifest(sp.manifest, import_id="imp-1", kind=VULN)
+        bi.verify_bundle(sp, limits=LIMITS)
+        return bi.store_bundle(cluster=cluster, spooled=sp)
+
+
+@pytest.mark.django_db
+def test_uncompressed_stream_truncated_at_every_offset_never_stores_anything(cluster):
+    """Same sweep without compression: a cut in the manifest, mid-line or
+    exactly on a line boundary must all be rejected before any row or
+    mark is written."""
+    raw = _raw("imp-1", VULN, BIG)
+    for cut in _cut_offsets(len(raw)):
+        with pytest.raises(BundleError) as excinfo:
+            _store_uncompressed(cluster, raw[:cut])
+        assert excinfo.value.code in {
+            "missing_manifest", "bad_manifest", "count_mismatch", "sha256_mismatch",
+        }, (cut, excinfo.value.code)
+        assert IngestQueue.objects.count() == 0 and ImportMark.objects.count() == 0, cut
+
+
+@pytest.mark.django_db
+def test_failure_mid_insert_rolls_back_every_row_and_the_mark(cluster):
+    """The server itself dies part-way through writing a bundle (DB
+    error on the third batch): the earlier batches and the mark must not
+    survive, so a retry starts from nothing."""
+    items = [{"kind": "VulnerabilityReport", "metadata": {"name": f"r{i}"}} for i in range(250)]
+    raw = _raw("imp-1", VULN, items)
+    real = IngestQueue.objects.bulk_create
+    calls = {"n": 0}
+
+    def flaky(objs, *a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise RuntimeError("connection to the database was lost")
+        return real(objs, *a, **kw)
+
+    with patch.object(IngestQueue.objects, "bulk_create", side_effect=flaky):
+        with pytest.raises(RuntimeError, match="database was lost"):
+            _store(cluster, raw, import_id="imp-1", kind=VULN)
+
+    assert calls["n"] == 3, "two batches had been written before the failure"
+    assert IngestQueue.objects.count() == 0
+    assert ImportMark.objects.count() == 0
+
+    result = _store(cluster, raw, import_id="imp-1", kind=VULN)
+    assert result.created and result.rows_inserted == 250

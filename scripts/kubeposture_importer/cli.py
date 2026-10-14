@@ -39,7 +39,7 @@ from .coverage import (
     read_kind_set,
     read_threshold,
 )
-from .http import HTTP_TIMEOUT_DEFAULT, HttpClient
+from .http import HTTP_RETRY_BASE_DELAY, HTTP_TIMEOUT_DEFAULT, HttpClient
 from .kinds import INVENTORY_ITEM_KINDS, INVENTORY_KIND, SCAN_KINDS
 from .pending import check_pending, clear_pending
 from .relevance import apply_relevance_filter
@@ -130,6 +130,11 @@ def parse_args(argv: list[str] | None = None, env=None) -> argparse.Namespace:
     args.base_url = env.get("KUBEPOSTURE_URL", "http://localhost:8000")
     args.token = args.token or env.get("KUBEPOSTURE_TOKEN", "")
     args.http_timeout = _env_int(env, "KUBEPOSTURE_HTTP_TIMEOUT", HTTP_TIMEOUT_DEFAULT, warn=_err)
+    try:
+        args.http_retry_base_delay = float(env.get("KUBEPOSTURE_HTTP_RETRY_BASE_DELAY") or HTTP_RETRY_BASE_DELAY)
+    except ValueError:
+        _err("KUBEPOSTURE_HTTP_RETRY_BASE_DELAY is not a number; using the default")
+        args.http_retry_base_delay = HTTP_RETRY_BASE_DELAY
     args.relevance_filter = (not args.no_relevance_filter) and _env_bool(env, "KUBEPOSTURE_RELEVANCE_FILTER", True)
     args.coverage_threshold = (
         args.coverage_min_ratio if args.coverage_min_ratio is not None else read_threshold(env, warn=_err)
@@ -246,7 +251,7 @@ def run_cycle(*, args: argparse.Namespace, by_kind: dict, out=print, err=_err) -
 
     client = HttpClient(
         args.base_url, args.token, timeout=args.http_timeout,
-        deadline_at=started + args.upload_deadline,
+        base_delay=args.http_retry_base_delay, deadline_at=started + args.upload_deadline,
     )
     try:
         rc = run_upload_plan(

@@ -53,12 +53,31 @@ def _meta(item: dict) -> dict:
     return item.get("metadata") or {}
 
 
+def _owner_reference(item: dict, kind: str) -> dict | None:
+    refs = [r for r in (_meta(item).get("ownerReferences") or []) if isinstance(r, dict)]
+    for ref in refs:
+        if ref.get("controller") is True and (not kind or ref.get("kind") == kind):
+            return ref
+    for ref in refs:
+        if not kind or ref.get("kind") == kind:
+            return ref
+    return None
+
+
 def subject_of_trivy(item: dict) -> Key:
-    """Mirrors core/parsers/trivy.py::_resource_identity."""
+    """Mirrors core/parsers/trivy.py::_resource_identity, including the
+    ownerReferences fallback: Trivy omits the `resource.name` label when
+    the scanned resource's name exceeds the 63-character label limit and
+    sets only `resource.name-hash`."""
     labels = _meta(item).get("labels") or {}
     namespace = labels.get("trivy-operator.resource.namespace") or _meta(item).get("namespace") or ""
     kind = labels.get("trivy-operator.resource.kind") or ""
     name = labels.get("trivy-operator.resource.name") or ""
+    if not name:
+        ref = _owner_reference(item, kind)
+        if ref is not None:
+            name = ref.get("name") or ""
+            kind = kind or ref.get("kind") or ""
     return (namespace, kind, name)
 
 

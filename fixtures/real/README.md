@@ -36,6 +36,7 @@ scripts/capture-cluster-fixture.sh /tmp/capture --context prod-1
 # 2. Anonymise, verify faithfulness, write golden files. Keep the salt private.
 python scripts/anonymize-fixture.py /tmp/capture fixtures/real/prod-a \
     --salt-file ~/.kubeposture-fixture-salt --keep-namespaces payments,platform --slim \
+    --private-words acme,payroll \
     --verify --write-golden
 
 # 3. Review, then describe the capture.
@@ -46,6 +47,28 @@ $EDITOR fixtures/real/prod-a/golden/expectations.yaml   # optional DSL assertion
 pytest -m realdata
 pytest tests/integration/test_import_e2e_realdata.py
 ```
+
+### What is and isn't anonymised
+
+Objects are rebuilt from an **allowlist** of the fields the server parses
+(pod spec: host namespaces, container name / image / four security flags,
+`hostPath` presence, service account; metadata: name, namespace, labels,
+ownerReferences). Env, commands, mounts, probes, volumes, PVC templates,
+container-status messages (raw log output), OCI image labels and BOM
+dependency graphs are not carried over at all. Names, namespaces, label
+values, label-key domains, registries, image repos (except well-known
+public ones such as `registry.k8s.io`), hostnames and digests are renamed
+consistently, so every cross-reference the importer's filter and the
+server's resolver rely on still holds.
+
+**One thing it cannot know:** the SBOM of *your own* image lists your
+internal packages (`@acme/billing`, `github.com/acme/…`). Pass your
+company / product names as `--private-words`; they are scrubbed from
+every value and key everywhere, and `--verify` fails if one survives.
+After a run, `--verify` prints a `hint:` with words from your private
+identifiers that still appear in the output — add the ones that are
+yours. Review the result before committing it anywhere you consider
+public.
 
 `--verify` fails if the importer's relevance-filter statistics differ
 between the raw and the anonymised capture, or if any original

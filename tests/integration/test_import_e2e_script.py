@@ -9,8 +9,6 @@ test_import_e2e_realdata.py repeats the core checks over fixtures/real.
 """
 from __future__ import annotations
 
-import signal
-import time
 from datetime import timedelta
 
 import pytest
@@ -38,7 +36,7 @@ from core.services.reaper import STUCK_OPEN_TIMEOUT_SECONDS
 from core.services.worker import drain_until_empty
 
 from ._chaos_proxy import ChaosProxy
-from ._script_runner import run_import, start_import, write_synthetic_capture
+from ._script_runner import run_import, write_synthetic_capture
 
 pytestmark = [pytest.mark.e2e, pytest.mark.django_db(transaction=True)]
 
@@ -167,13 +165,11 @@ def test_upload_failure_mid_way_aborts_and_leaves_nothing(live_server, token, ca
     # aborts the whole import. Earlier bundles were already stored
     # server-side and must vanish with the abort.
     with ChaosProxy(live_server.url, fail_paths={"/bundles/trivy.SbomReport/": 500}) as proxy:
-        run = run_import(cluster="e2e-chaos", folder=capture, url=proxy.url, token=token, tmp_dir=scratch,
-                         env={"KUBEPOSTURE_HTTP_TIMEOUT": "10"})
+        run = run_import(cluster="e2e-chaos", folder=capture, url=proxy.url, token=token, tmp_dir=scratch)
     assert run.returncode == 1
     assert "ABORTED import_id=" in run.stderr
     assert run.summary and run.summary["aborted"] is True
-    sbom_attempts = [p for p in proxy.seen if "/bundles/trivy.SbomReport/" in p]
-    assert len(sbom_attempts) == 3, "5xx is retried, then the import is aborted"
+    assert proxy.count("/bundles/trivy.SbomReport/") == 3, "5xx is retried, then the import is aborted"
     assert proxy.seen[-1].endswith("/abort/")
     assert not any(p.endswith("/commit/") for p in proxy.seen)
     assert drain_until_empty()["claimed"] == 0
@@ -234,21 +230,6 @@ def test_on_demand_only_runs_and_clears_the_pending_flag(live_server, token, cap
                        extra_args=["--on-demand-only"])
     assert again.returncode == 0 and "no pending request" in again.stdout
     assert again.summary is None, "nothing imported on an idle tick"
-
-
-def test_sigterm_mid_upload_aborts_server_side(live_server, token, capture, scratch):
-    with ChaosProxy(live_server.url, delay_paths={"/bundles/trivy.SbomReport/": 8.0}) as proxy:
-        seen_sbom = proxy.watch("/bundles/trivy.SbomReport/")
-        proc = start_import(cluster="e2e-term", folder=capture, url=proxy.url, token=token, tmp_dir=scratch)
-        assert seen_sbom.wait(timeout=60), "importer never reached the SBOM upload"
-        time.sleep(0.2)
-        proc.send_signal(signal.SIGTERM)
-        stdout, stderr = proc.communicate(timeout=60)
-    assert proc.returncode == 1, stderr
-    assert "SIGTERM" in stderr and "ABORTED import_id=" in stderr
-    assert proxy.seen[-1].endswith("/abort/")
-    assert not ImportMark.objects.filter(cluster__name="e2e-term").exists()
-    assert not IngestQueue.objects.filter(cluster_name="e2e-term").exists()
 
 
 def test_request_sequence_on_the_wire(live_server, token, capture, scratch):
