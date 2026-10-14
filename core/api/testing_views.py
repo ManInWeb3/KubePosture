@@ -1,18 +1,17 @@
 """/api/v1/testing/* harness endpoints — gated by TESTING_HARNESS_ENABLED.
 
-Per dev_docs/12-testing.md *Test-harness HTTP API*. The mock_tests
-pytest plugin uses these to drive scenarios end-to-end against a
-throwable DB.
+Lets a test drive the pipeline synchronously against a throwable DB
+without going through HTTP bundle uploads.
 
 Endpoints:
 
   POST /api/v1/testing/reset/
         TRUNCATE every app table (preserves auth_user / Django internals).
   POST /api/v1/testing/load_scenario/
-        body: {cluster, scenario_dir} OR {cluster, payloads: [...], finishes: [...]}
-        Synchronous: registers the cluster + token, posts each
-        ingest payload to /ingest/ effectively, drains the queue
-        inline, fires reaps.
+        body: {cluster, import_id, payloads: [...], finishes: [...]}
+        Synchronous: stores one bundle per (import_id, kind) through the
+        same service the upload endpoint uses, commits each import,
+        drains the queue inline, fires reaps.
   POST /api/v1/testing/run_snapshot/
         Fires the daily snapshot-capture inline.
   POST /api/v1/testing/run_enrichment/
@@ -31,13 +30,12 @@ Endpoints:
 """
 from __future__ import annotations
 
-import json
 from datetime import timedelta
-from pathlib import Path
 
 from django.conf import settings
 from django.db import connection, transaction
 from django.db.models import F
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import (
     api_view,
@@ -47,15 +45,16 @@ from rest_framework.decorators import (
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
-from core.constants import ImportMarkState
 from core.models import (
     Cluster,
-    IngestToken,
+    EpssScore,
     Finding,
     FindingAction,
     Image,
     ImportMark,
     IngestQueue,
+    IngestToken,
+    KevEntry,
     Namespace,
     ScanInconsistency,
     Snapshot,
@@ -63,13 +62,10 @@ from core.models import (
     WorkloadAlias,
     WorkloadImageObservation,
     WorkloadSignal,
-    EpssScore,
-    KevEntry,
 )
-from core.services.test_assertions import evaluate_assertions
-from core.services.queue import enqueue
 from core.services import worker as worker_service
-from django.utils import timezone
+from core.services.bundle_ingest import BundleError, commit_import, store_items
+from core.services.test_assertions import evaluate_assertions
 
 
 def _gated() -> Response | None:
@@ -117,22 +113,6 @@ def reset(request):
     })
 
 
-def _post_envelope_directly(envelope: dict) -> int:
-    """Bypass HTTP — enqueue an ingest payload as if the API were called."""
-    payload = envelope.get("payload") or {}
-    complete_snapshot = envelope.get("complete_snapshot")
-    if complete_snapshot is None and isinstance(payload, dict):
-        complete_snapshot = bool(payload.get("complete_snapshot"))
-    item = enqueue(
-        cluster_name=envelope["cluster"],
-        kind=envelope["kind"],
-        import_id=envelope["import_id"],
-        raw_json=payload,
-        complete_snapshot=bool(complete_snapshot),
-    )
-    return item.id
-
-
 def _ensure_cluster(name: str) -> Cluster:
     cluster, _ = Cluster.objects.get_or_create(name=name)
     return cluster
@@ -144,307 +124,76 @@ def _ensure_cluster(name: str) -> Cluster:
 def load_scenario(request):
     """Replay one scenario synchronously.
 
-    Two body shapes:
-
-    1. Inline payloads (preferred for the runner):
+    Body:
        {
          "cluster": "...",
          "import_id": "...",
-         "starts": [{"kind": "..."}, ...],          # /imports/start/ calls
          "payloads": [
-            {"kind": "...", "payload": {...}, "complete_snapshot": true},
+            {"kind": "...", "payload": {...}, "complete_snapshot": true,
+             "import_id": "..."?},
             ...
          ],
-         "finishes": [{"kind": "...", "observed_count": N}, ...]
+         "finishes": [{"kind": "...", "observed_count": N, "import_id": "..."?}, ...]
        }
 
-    2. Disk-rooted: {"scenario_dir": "/abs/path/to/01-happy-path"}
-       — reads imports/*.json + 007_finish.yaml etc.
+    Payloads are grouped into one bundle per (import_id, kind) and
+    stored via `bundle_ingest.store_items`; each import_id named in
+    `finishes` is then committed with those counts (a finish for a kind
+    with no payloads stores an empty bundle first — count 0 is a valid
+    outage signal). `observed_count` must equal the number of payloads
+    posted for that kind, exactly as a real commit requires. A legacy
+    `starts` list is accepted and ignored.
     """
     if (gate := _gated()):
         return gate
 
     body = request.data
-    if scenario_dir := body.get("scenario_dir"):
-        return _load_from_disk(scenario_dir, body)
-    return _load_inline(body)
-
-
-def _load_inline(body: dict) -> Response:
     cluster_name = body["cluster"]
     import_id = body.get("import_id") or ""
     cluster = _ensure_cluster(cluster_name)
 
-    starts = body.get("starts") or []
     payloads = body.get("payloads") or []
     finishes = body.get("finishes") or []
 
-    # /imports/start/
-    for s in starts:
-        ImportMark.open(
-            cluster=cluster,
-            kind=s["kind"],
-            import_id=s.get("import_id", import_id),
-        )
-
-    # /ingest/
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    complete: dict[tuple[str, str], bool] = {}
     for env in payloads:
-        env.setdefault("cluster", cluster_name)
-        env.setdefault("import_id", import_id)
-        _post_envelope_directly(env)
+        key = (env.get("import_id") or import_id, env["kind"])
+        payload = env.get("payload") or {}
+        grouped.setdefault(key, []).append(payload)
+        flag = env.get("complete_snapshot")
+        if flag is None and isinstance(payload, dict):
+            flag = payload.get("complete_snapshot")
+        if flag:
+            complete[key] = True
 
-    # /imports/finish/
+    finishes_by_import: dict[str, list[tuple[str, int]]] = {}
     for f in finishes:
-        ImportMark.objects.filter(
-            cluster=cluster,
-            kind=f["kind"],
-            import_id=f.get("import_id", import_id),
-        ).update(
-            state=ImportMarkState.DRAINING.value,
-            completed_at=timezone.now(),
-            observed_count=f["observed_count"],
-        )
+        iid = f.get("import_id") or import_id
+        finishes_by_import.setdefault(iid, []).append((f["kind"], int(f["observed_count"])))
+        grouped.setdefault((iid, f["kind"]), [])
+
+    try:
+        for (iid, kind), items in grouped.items():
+            store_items(
+                cluster=cluster, import_id=iid, kind=kind, items=items,
+                complete_snapshot=complete.get((iid, kind), False),
+            )
+        for iid, kinds in finishes_by_import.items():
+            commit_import(cluster=cluster, import_id=iid, kinds=kinds)
+    except BundleError as exc:
+        return Response(exc.as_body(), status=exc.http_status)
 
     # Drain queue + fire reaps.
     totals = worker_service.drain_until_empty()
     return Response({
         "cluster": cluster_name,
         "import_id": import_id,
-        "starts": len(starts),
+        "bundles": len(grouped),
         "payloads": len(payloads),
         "finishes": len(finishes),
         **totals,
     })
-
-
-def _load_from_disk(scenario_dir: str, body: dict) -> Response:
-    base = Path(scenario_dir).resolve()
-    imports_dir = base / "imports"
-    if not imports_dir.is_dir():
-        return Response(
-            {"error": f"no imports/ directory at {base}"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
-    cluster_name = body.get("cluster") or ""
-    import_id_default = body.get("import_id") or ""
-
-    files = sorted(p for p in imports_dir.iterdir() if p.is_file())
-
-    # Pass 1 — discover all (import_id, kind) tuples we'll touch and
-    # build the post-plan. We split *List wrappers up-front because
-    # each item posts as its own /ingest/ payload with its own kind.
-    finishes_collected: list[dict] = []
-    post_plan: list[dict] = []  # list of envelopes to post, in order
-    for p in files:
-        name_lower = p.name.lower()
-        if "finish" in name_lower:
-            finishes_collected.extend(_parse_finishes(p, import_id_default))
-            continue
-        if p.suffix.lower() != ".json":
-            continue
-        doc = json.loads(p.read_text())
-
-        if _looks_like_inventory_envelope(doc):
-            post_plan.append({
-                "cluster": cluster_name,
-                "kind": "inventory",
-                "import_id": import_id_default,
-                "payload": doc,
-                "complete_snapshot": bool(doc.get("complete_snapshot")),
-            })
-            continue
-
-        if _looks_like_list_wrapper(doc):
-            for item in doc.get("items") or []:
-                ikind = _envelope_kind_for_item_kind(item.get("kind"))
-                if not ikind:
-                    continue
-                post_plan.append({
-                    "cluster": cluster_name,
-                    "kind": ikind,
-                    "import_id": import_id_default,
-                    "payload": item,
-                    "complete_snapshot": False,
-                })
-            continue
-
-        # Single-item file — try to derive its kind directly.
-        ikind = _envelope_kind_for_item_kind(doc.get("kind")) if isinstance(doc, dict) else None
-        if ikind:
-            post_plan.append({
-                "cluster": cluster_name,
-                "kind": ikind,
-                "import_id": import_id_default,
-                "payload": doc,
-                "complete_snapshot": False,
-            })
-
-    # Pass 2 — /imports/start/ for every (import_id, kind) we'll post
-    # AND every kind referenced in finishes (a finish file may declare
-    # a kind we didn't post — observed_count=0 is valid).
-    cluster = _ensure_cluster(cluster_name)
-    kinds_to_open: dict[str, set[str]] = {}
-    for env in post_plan:
-        kinds_to_open.setdefault(env["import_id"], set()).add(env["kind"])
-    for f in finishes_collected:
-        kinds_to_open.setdefault(f.get("import_id", import_id_default), set()).add(f["kind"])
-    for iid, kinds in kinds_to_open.items():
-        for k in kinds:
-            ImportMark.open(cluster=cluster, kind=k, import_id=iid)
-
-    posted: list[str] = []
-    for env in post_plan:
-        _post_envelope_directly(env)
-        posted.append(env["kind"])
-
-    # Apply collected finishes.
-    for f in finishes_collected:
-        ImportMark.objects.filter(
-            cluster=cluster,
-            kind=f["kind"],
-            import_id=f.get("import_id", import_id_default),
-        ).update(
-            state=ImportMarkState.DRAINING.value,
-            completed_at=timezone.now(),
-            observed_count=f["observed_count"],
-        )
-
-    totals = worker_service.drain_until_empty()
-    return Response({
-        "cluster": cluster_name,
-        "scenario_dir": str(base),
-        "posted": posted,
-        "finishes": len(finishes_collected),
-        **totals,
-    })
-
-
-def _looks_like_inventory_envelope(doc: dict) -> bool:
-    if not isinstance(doc, dict):
-        return False
-    if "cluster_meta" in doc and "items" in doc:
-        return True
-    return False
-
-
-def _looks_like_list_wrapper(doc: dict) -> bool:
-    if not isinstance(doc, dict):
-        return False
-    if "kind" not in doc:
-        return False
-    if not str(doc.get("kind", "")).endswith("List"):
-        return False
-    return isinstance(doc.get("items"), list)
-
-
-_ITEM_KIND_TO_ENVELOPE = {
-    "VulnerabilityReport": "trivy.VulnerabilityReport",
-    "ConfigAuditReport": "trivy.ConfigAuditReport",
-    "ExposedSecretReport": "trivy.ExposedSecretReport",
-    "RbacAssessmentReport": "trivy.RbacAssessmentReport",
-    "ClusterRbacAssessmentReport": "trivy.ClusterRbacAssessmentReport",
-    "InfraAssessmentReport": "trivy.InfraAssessmentReport",
-    "ClusterInfraAssessmentReport": "trivy.InfraAssessmentReport",
-    "ClusterComplianceReport": "trivy.ClusterComplianceReport",
-    "PolicyReport": "kyverno.PolicyReport",
-    "ClusterPolicyReport": "kyverno.ClusterPolicyReport",
-}
-
-
-def _envelope_kind_for_item_kind(item_kind: str | None) -> str | None:
-    if not item_kind:
-        return None
-    return _ITEM_KIND_TO_ENVELOPE.get(item_kind)
-
-
-_FILENAME_TO_KIND = [
-    ("inventory", "inventory"),
-    ("trivy_vuln", "trivy.VulnerabilityReport"),
-    ("trivy_configaudit", "trivy.ConfigAuditReport"),
-    ("trivy_exposedsecret", "trivy.ExposedSecretReport"),
-    ("trivy_rbac", "trivy.RbacAssessmentReport"),
-    ("trivy_clusterrbac", "trivy.ClusterRbacAssessmentReport"),
-    ("trivy_infra", "trivy.InfraAssessmentReport"),
-    ("trivy_compliance", "trivy.ClusterComplianceReport"),
-    ("kyverno_clusterpolicy", "kyverno.ClusterPolicyReport"),
-    ("kyverno_policy", "kyverno.PolicyReport"),
-]
-
-
-def _kind_for_filename(name: str) -> str | None:
-    lower = name.lower()
-    for token, kind in _FILENAME_TO_KIND:
-        if token in lower:
-            return kind
-    return None
-
-
-def _parse_finishes(path: Path, default_import_id: str = "") -> list[dict]:
-    text = path.read_text()
-    # Try JSON first, fall back to a tiny YAML reader for the simple shape:
-    #   cluster: name
-    #   import_id: id
-    #   finishes:
-    #     - kind: ...
-    #       observed_count: N
-    try:
-        doc = json.loads(text)
-    except json.JSONDecodeError:
-        doc = _parse_simple_yaml(text)
-    finishes = doc.get("finishes") or []
-    iid = doc.get("import_id") or default_import_id
-    out = []
-    for f in finishes:
-        out.append({
-            "kind": f["kind"],
-            "observed_count": int(f.get("observed_count") or 0),
-            "import_id": iid,
-        })
-    return out
-
-
-def _parse_simple_yaml(text: str) -> dict:
-    """Minimal YAML reader for the shape used by `*_finish.yaml`. NOT a
-    general parser — just enough for the harness fixtures.
-    """
-    out: dict = {}
-    current_list_key: str | None = None
-    current_list: list[dict] | None = None
-    current_dict: dict | None = None
-    for raw in text.splitlines():
-        line = raw.split("#", 1)[0].rstrip()
-        if not line.strip():
-            continue
-        stripped = line.lstrip(" ")
-        indent = len(line) - len(stripped)
-
-        if indent == 0 and stripped.endswith(":"):
-            current_list_key = stripped[:-1].strip()
-            current_list = []
-            out[current_list_key] = current_list
-            current_dict = None
-            continue
-        if indent == 0 and ":" in stripped:
-            k, _, v = stripped.partition(":")
-            out[k.strip()] = v.strip()
-            current_list_key = None
-            current_list = None
-            current_dict = None
-            continue
-        if indent >= 2 and stripped.startswith("- "):
-            current_dict = {}
-            assert current_list is not None
-            current_list.append(current_dict)
-            tail = stripped[2:]
-            if ":" in tail:
-                k, _, v = tail.partition(":")
-                current_dict[k.strip()] = v.strip()
-            continue
-        if current_dict is not None and ":" in stripped:
-            k, _, v = stripped.partition(":")
-            current_dict[k.strip()] = v.strip()
-    return out
 
 
 @api_view(["POST"])
@@ -495,7 +244,7 @@ def run_enrichment(request):
 # safe — F("col") - delta on NULL stays NULL.
 _CLOCK_SHIFTABLE: list[tuple[type, list[str]]] = [
     (ImportMark, ["started_at", "completed_at"]),
-    (IngestQueue, ["created_at", "processed_at"]),
+    (IngestQueue, ["created_at", "claimed_at", "processed_at"]),
     (Workload, ["last_inventory_at", "first_seen_at", "last_seen_at"]),
     (WorkloadImageObservation, ["first_seen_at", "last_seen_at"]),
     (WorkloadAlias, ["last_seen_at"]),

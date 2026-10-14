@@ -21,8 +21,27 @@ app:
     ALLOWED_HOSTS: "*"
     CSRF_TRUSTED_ORIGINS: ""      # e.g. "https://kubeposture.example.com"
     LOG_LEVEL: "INFO"
-    INGEST_QUEUE_MAX_ATTEMPTS: "3"
     INTERNAL_INGRESS_CLASSES: ""  # CSV of ingress class names treated as not public, e.g. "pomerium,nginx-internal"
+    # -- Import bundles (see core/services/bundle_ingest.py). The upload
+    # view streams the body itself, so these caps — not Django's
+    # DATA_UPLOAD_MAX_MEMORY_SIZE — bound a bundle. A cycle is ~20 MB
+    # uncompressed / ~2 MB gzipped today; defaults leave wide headroom.
+    IMPORT_BUNDLE_MAX_COMPRESSED_BYTES: "67108864"      # 64 MiB
+    IMPORT_BUNDLE_MAX_UNCOMPRESSED_BYTES: "536870912"   # 512 MiB
+    IMPORT_BUNDLE_MAX_ITEMS: "50000"
+    IMPORT_BUNDLE_MAX_LINE_BYTES: "33554432"            # 32 MiB — the inventory envelope is one line
+    # commit logs `import.coverage_low` at ERROR when the importer-reported
+    # scan coverage (matched / expected) is below this; the import proceeds.
+    IMPORT_COVERAGE_ALERT_RATIO: "0.9"
+    # Debugging aid only. The reap deletes a tuple's queue rows once it has
+    # recorded failed_count / last_error on the ImportMark; "true" keeps
+    # `failed` rows (with their raw payloads) for the 14-day prune so a
+    # reproducible parse failure can be replayed. Turn on while
+    # investigating, off afterwards.
+    IMPORT_KEEP_FAILED_PAYLOADS: "false"
+    # Plain-JSON endpoints (commit, the testing harness) still go through
+    # Django's in-memory body limit.
+    DATA_UPLOAD_MAX_MEMORY_SIZE: "16777216"             # 16 MiB
     # -- Proxy-forwarded JWT auth. When JWT_AUTH_ENABLED="true", requests
     # carrying a valid JWT in JWT_AUTH_HEADER auto-create a Django User in
     # the `viewer` group and start a session. Importer paths bypass this.
@@ -37,12 +56,12 @@ app:
     METRICS_BUSINESS_TTL_SECONDS: "300"   # business gauges cached this long; finding counts only change when imports complete
     # TTL for the in-flight-import "lock". An open/draining ImportMark
     # older than this is treated as abandoned (crashed importer) and
-    # stops blocking new on-demand imports. Lower if a crashed importer
-    # leaves the in-cluster trigger skipping for too long; raise if
-    # legitimate slow imports get raced. Defaults to 30min, matching
-    # the workload-cluster job's activeDeadlineSeconds (900s) with 2x
-    # headroom for slow networks.
-    IMPORT_LOCK_TIMEOUT_SECONDS: "900"
+    # stops blocking new on-demand imports. Must be >= the importer
+    # Job's activeDeadlineSeconds (1800 in kubeposture-import) so a
+    # slow-but-alive import is never raced by a second one, and < the
+    # reaper's STUCK_OPEN_TIMEOUT_SECONDS (3600) so an abandoned import
+    # stops gating new ones before it is discarded.
+    IMPORT_LOCK_TIMEOUT_SECONDS: "2700"
 
 # Compliance framework loading is not implemented in this milestone.
 # The fixtures/ directory holds sample YAMLs but no `load_frameworks`
@@ -214,11 +233,12 @@ cronJobs:
   # ImportMark lifecycle. The queue processor reaps inline after each
   # item transitions to DONE (zero-latency); this CronJob covers the
   # case where the processor restarts or misses a signal, so a stranded
-  # `draining` mark doesn't leak findings indefinitely. It also promotes
-  # marks abandoned in `state=open` (importer crashed before
-  # /imports/finish/) so their queue tuples stop being permanently
-  # unclaimable — two passes per run, both cheap single-row updates over
-  # an indexed query.
+  # `draining` mark doesn't leak findings indefinitely. It also discards
+  # imports that can never complete: marks abandoned in `state=open`
+  # (importer died before /imports/<id>/commit/) and imports whose
+  # inventory payload failed. Discarding deletes the import's queue
+  # rows and marks its ImportMarks reaped with a `discard_reason` —
+  # nothing partial is ever processed.
   reapSafetyNet:
     enabled: true
     schedule: "7 * * * *"       # hourly at :07 to stagger from other crons
@@ -359,6 +379,12 @@ service:
 ingress:
   enabled: false
   className: ""
+  # The importer uploads one gzip bundle per kind per cycle (~2 MB today;
+  # SBOM-heavy clusters larger). ingress-nginx's default body limit is
+  # 1m, so raise it, and give a slow upload room:
+  #   nginx.ingress.kubernetes.io/proxy-body-size: "64m"
+  #   nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+  #   nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
   annotations: {}
   hosts:
     - host: kubeposture.central.someorg.xyz

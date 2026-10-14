@@ -184,9 +184,42 @@ LOGGING = {
     },
 }
 
-# ── Ingest Queue ───────────────────────────────────────────────
+# ── Import bundles ─────────────────────────────────────────────
+# See core/services/bundle_ingest.py. The upload view streams the body
+# itself (DRF parsers are bypassed), so these caps — not Django's
+# DATA_UPLOAD_MAX_MEMORY_SIZE — bound a bundle. Sized for a cycle of
+# ~20 MB uncompressed today with generous headroom; all env-tunable.
 
-INGEST_QUEUE_MAX_ATTEMPTS = env.int("INGEST_QUEUE_MAX_ATTEMPTS", default=3)
+IMPORT_BUNDLE_MAX_COMPRESSED_BYTES = env.int(
+    "IMPORT_BUNDLE_MAX_COMPRESSED_BYTES", default=64 * 1024 * 1024,
+)
+IMPORT_BUNDLE_MAX_UNCOMPRESSED_BYTES = env.int(
+    "IMPORT_BUNDLE_MAX_UNCOMPRESSED_BYTES", default=512 * 1024 * 1024,
+)
+IMPORT_BUNDLE_MAX_ITEMS = env.int("IMPORT_BUNDLE_MAX_ITEMS", default=50_000)
+# The inventory envelope is one line (~1 MB today for a mid-size cluster).
+IMPORT_BUNDLE_MAX_LINE_BYTES = env.int(
+    "IMPORT_BUNDLE_MAX_LINE_BYTES", default=32 * 1024 * 1024,
+)
+# None → tempfile's default (TMPDIR / /tmp — an emptyDir in the chart).
+IMPORT_BUNDLE_TMP_DIR = env("IMPORT_BUNDLE_TMP_DIR", default=None) or None
+
+# commit logs `import.coverage_low` at ERROR when an importer-reported
+# coverage ratio (matched / expected) is below this. The import still
+# proceeds — partial scanner coverage is a valid snapshot.
+IMPORT_COVERAGE_ALERT_RATIO = env.float("IMPORT_COVERAGE_ALERT_RATIO", default=0.9)
+
+# Debugging aid only. The reap deletes a tuple's IngestQueue rows once it
+# has recorded failed_count / last_error on the ImportMark; with this on,
+# `failed` rows (and their raw payloads) are kept for the 14-day prune so
+# a reproducible parse failure can be replayed. Turn on while
+# investigating, off afterwards.
+IMPORT_KEEP_FAILED_PAYLOADS = env.bool("IMPORT_KEEP_FAILED_PAYLOADS", default=False)
+
+# Plain-JSON endpoints (commit, the testing harness) still go through
+# Django's in-memory body limit; the default 2.5 MB is too small for
+# harness scenarios that inline an inventory envelope.
+DATA_UPLOAD_MAX_MEMORY_SIZE = env.int("DATA_UPLOAD_MAX_MEMORY_SIZE", default=16 * 1024 * 1024)
 
 # ── Inventory exposure ─────────────────────────────────────────
 

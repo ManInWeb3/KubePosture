@@ -1,25 +1,40 @@
 """ImportMark — kind-discriminated tracking of one (cluster, kind, import_id) cycle.
 
-The importer generates a ULID `import_id` at cycle start and stamps it
-on every payload. One ImportMark row exists per `(cluster, kind,
-import_id)`; the kind discriminator dispatches the reap behaviour.
+The importer generates a ULID `import_id` at cycle start, uploads ONE
+bundle per kind (`POST /api/v1/imports/<import_id>/bundles/<kind>/`),
+then commits the whole import (`POST /api/v1/imports/<import_id>/commit/`).
+One ImportMark row exists per `(cluster, kind, import_id)`; the kind
+discriminator dispatches the reap behaviour. See
+core.services.bundle_ingest for the upload/commit/abort side and
+core.services.reaper for reap/discard.
 
 Lifecycle:
-  open      — created by /imports/start/. Worker MAY NOT process queue
+  open      — created by the bundle upload, in the same transaction as
+              the kind's IngestQueue rows. `started_at` is shared by every
+              mark of the import (the first upload fixes it) — it is the
+              anchor `last_complete_inventory_at` advances to, so every
+              row's `created_at` must be at or after it regardless of
+              which kind was uploaded first. Worker MAY NOT process queue
               items for this tuple yet.
-  draining  — set by /imports/finish/. Worker may now claim items.
-              Reap fires once the queue for this tuple is empty.
-  reaped    — set by reap commit. Row is preserved as a per-cycle
-              audit trail (not deleted).
+  draining  — set by commit, for every kind of the import at once. Worker
+              may now claim items. Reap fires once the queue for this
+              tuple is empty.
+  reaped    — terminal. Set first thing by the reap (claim-first, so two
+              workers racing the same drain can't both run the body), or
+              by a discard (`discard_reason` set) when the import was
+              never committed or its inventory payload failed. Row is
+              preserved as a per-cycle audit trail; the queue rows are
+              deleted at that point.
 
-`observed_count` is set by /imports/finish/ — the count of distinct
-payloads the importer sent for this kind. The reap consults it for
-the universal zero-input no-op rule (see dev_docs/11-import-robustness.md).
+`observed_count` is set by commit — the number of payloads the importer
+actually delivered for this kind. Zero is legitimate (the kind's CRD is
+installed but currently has no objects) and drives the zero-input no-op
+rule in the reaper; a kind whose CRD is absent is simply not part of the
+import.
 """
 from django.db import models
-from django.utils import timezone
 
-from core.constants import ImportMarkState
+from core.constants import ImportDiscardReason, ImportMarkState
 
 
 class ImportMark(models.Model):
@@ -34,8 +49,8 @@ class ImportMark(models.Model):
             "inventory | trivy.VulnerabilityReport | trivy.ConfigAuditReport | "
             "trivy.ExposedSecretReport | trivy.RbacAssessmentReport | "
             "trivy.ClusterRbacAssessmentReport | trivy.InfraAssessmentReport | "
-            "trivy.ClusterComplianceReport | kyverno.PolicyReport | "
-            "kyverno.ClusterPolicyReport"
+            "trivy.ClusterComplianceReport | trivy.SbomReport | "
+            "kyverno.PolicyReport | kyverno.ClusterPolicyReport"
         ),
     )
     import_id = models.CharField(
@@ -54,7 +69,67 @@ class ImportMark(models.Model):
     observed_count = models.IntegerField(
         null=True,
         blank=True,
-        help_text="Set by /imports/finish/. Gates the zero-input no-op rule for scan kinds.",
+        help_text=(
+            "Set by /imports/<id>/commit/: payloads delivered for this kind. "
+            "Gates the zero-input no-op rule for scan kinds."
+        ),
+    )
+
+    # ── bundle protocol ────────────────────────────────────────────
+    bundle_sha256 = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text=(
+            "sha256 of the uploaded bundle's item lines — idempotency key: a "
+            "re-upload with the same hash is a no-op, a different hash is a 409."
+        ),
+    )
+    coverage_expected = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Importer-reported denominator of the scan-coverage check (deployed "
+            "images for image-anchored kinds, top-level controllers for "
+            "workload-anchored kinds). NULL when the kind has no coverage notion."
+        ),
+    )
+    coverage_matched = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Importer-reported numerator: distinct subjects a kept report covered.",
+    )
+    bundle_manifest = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "Non-core manifest fields the importer sent (relevance-filter stats, "
+            "importer version, flags). Core fields live in their own columns."
+        ),
+    )
+
+    # ── terminal bookkeeping ───────────────────────────────────────
+    discard_reason = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        choices=ImportDiscardReason.choices,
+        help_text=(
+            "Empty for a normal reap. Set when the mark was moved to `reaped` "
+            "by a discard instead — its data was never applied."
+        ),
+    )
+    failed_count = models.PositiveIntegerField(
+        default=0,
+        help_text=(
+            "IngestQueue rows of this tuple that ended `failed`, captured at reap "
+            "/ discard before the rows are deleted."
+        ),
+    )
+    last_error = models.TextField(
+        blank=True,
+        default="",
+        help_text="error_message of the newest failed row of this tuple (truncated).",
     )
 
     class Meta:
@@ -67,27 +142,12 @@ class ImportMark(models.Model):
         indexes = [
             models.Index(fields=["cluster", "kind", "state"], name="import_mark_state"),
             models.Index(fields=["state", "started_at"], name="import_mark_safetynet"),
+            # commit / abort / discard / sibling-started_at lookups are all
+            # per import — the unique constraint's (cluster, kind, import_id)
+            # column order doesn't serve them.
+            models.Index(fields=["cluster", "import_id"], name="import_mark_import"),
         ]
         ordering = ["-started_at"]
 
     def __str__(self) -> str:
         return f"{self.cluster.name}/{self.kind}/{self.import_id} [{self.state}]"
-
-    @classmethod
-    def open(cls, *, cluster, kind: str, import_id: str) -> tuple["ImportMark", bool]:
-        """Idempotently open a mark for `(cluster, kind, import_id)`.
-
-        Resets state to `open` and clears completed_at / observed_count
-        so a retry of the same `import_id` starts clean.
-        """
-        return cls.objects.update_or_create(
-            cluster=cluster,
-            kind=kind,
-            import_id=import_id,
-            defaults={
-                "state": ImportMarkState.OPEN.value,
-                "started_at": timezone.now(),
-                "completed_at": None,
-                "observed_count": None,
-            },
-        )

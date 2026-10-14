@@ -1,9 +1,11 @@
 """Ingest queue claim + drain helpers.
 
-Worker claims pending IngestQueue items whose matching ImportMark is in
-`state='draining'` — items posted while a cycle is still open sit
-pending until the importer signals finish. SKIP LOCKED partitions
-work cleanly across parallel workers.
+Rows are inserted by core.services.bundle_ingest (one bundle per
+`(cluster, kind, import_id)`, stored atomically with its ImportMark in
+state `open`). Worker claims pending IngestQueue items whose matching
+ImportMark is in `state='draining'` — i.e. only after the importer has
+committed the whole import. SKIP LOCKED partitions work cleanly across
+parallel workers.
 
 **Inventory gate.** Within a single `import_id`, a non-inventory item
 is only claimable once that import's `inventory` queue row has reached
@@ -12,8 +14,9 @@ resolve workloads via aliases that the inventory parser populates;
 processing them before inventory lands silently drops the report
 because `_resolve_workload` returns None. Holding non-inventory items
 until inventory is done closes that race. If inventory `failed`, the
-gate stays closed — the queue blocks visibly rather than dropping
-data silently; operator intervention is then expected.
+gate stays closed; the worker then discards the whole import (see
+core.services.reaper.discard_import_for_failed_inventory) rather than
+leaving its rows blocked forever.
 
 The drain check counts both `pending` AND `processing` rows so a
 worker mid-item still keeps the count > 0 — preventing premature
@@ -38,6 +41,11 @@ Rows reclaimed past `MAX_RECLAIM_ATTEMPTS` (a poison item reliably
 crashing whatever worker touches it) are excluded from claiming and
 instead marked `failed` outright — otherwise, with nothing left to
 ever claim them again, they'd sit in `processing` forever anyway.
+
+**Row lifetime.** Nothing reads a row's `raw_json` after it is `done`,
+so the reap deletes the tuple's rows (see `delete_tuple_rows`) once it
+has recorded what it needs on the ImportMark. The queue therefore only
+ever holds in-flight work; `prune_stale_data` is a safety net.
 """
 from __future__ import annotations
 
@@ -63,22 +71,8 @@ STALE_PROCESSING_SECONDS = 900
 # crashes/OOMs every worker that claims it.
 MAX_RECLAIM_ATTEMPTS = 5
 
-
-def enqueue(
-    *,
-    cluster_name: str,
-    kind: str,
-    import_id: str,
-    raw_json: dict,
-    complete_snapshot: bool = False,
-) -> IngestQueue:
-    return IngestQueue.objects.create(
-        cluster_name=cluster_name,
-        kind=kind,
-        import_id=import_id,
-        raw_json=raw_json,
-        complete_snapshot=complete_snapshot,
-    )
+# `last_error` on ImportMark keeps this much of the newest failure.
+LAST_ERROR_MAX_CHARS = 2000
 
 
 # Worker claim: SKIP LOCKED + JOIN to ImportMark.state='draining', plus
@@ -86,6 +80,10 @@ def enqueue(
 # for their import's inventory row to reach status='done'. Also reclaims
 # `processing` rows abandoned by a killed worker (see "Stale reclaim"
 # above) in the same query, rather than a separate flip-to-pending pass.
+#
+# ORDER BY created_at, id: every row of a bundle shares one created_at
+# (they are bulk-inserted in one transaction), so the id tie-break keeps
+# claim order deterministic.
 _CLAIM_SQL = """
 WITH claimed AS (
     SELECT q.id
@@ -113,7 +111,7 @@ WITH claimed AS (
                     AND qi.status     <> 'done'
              )
        )
-     ORDER BY q.created_at
+     ORDER BY q.created_at, q.id
      FOR UPDATE OF q SKIP LOCKED
      LIMIT %s
 )
@@ -190,20 +188,49 @@ def claim_batch(
         return [row[0] for row in cur.fetchall()]
 
 
-def mark_done(item_id: int) -> None:
-    IngestQueue.objects.filter(id=item_id).update(
-        status=IngestQueueStatus.DONE.value,
-        processed_at=timezone.now(),
+def _tuple_qs(*, cluster_name: str, kind: str, import_id: str):
+    return IngestQueue.objects.filter(
+        cluster_name=cluster_name, kind=kind, import_id=import_id,
     )
 
 
-def mark_failed(item_id: int, error: str) -> None:
-    IngestQueue.objects.filter(id=item_id).update(
+def count_rows(*, cluster_name: str, kind: str, import_id: str) -> int:
+    """Rows stored for the tuple, any status — what commit checks the
+    importer's delivered count against."""
+    return _tuple_qs(cluster_name=cluster_name, kind=kind, import_id=import_id).count()
+
+
+def failure_summary(*, cluster_name: str, kind: str, import_id: str) -> tuple[int, str]:
+    """`(failed_count, last_error)` for the tuple — the two facts the reap
+    records on the ImportMark before the rows are deleted."""
+    qs = _tuple_qs(cluster_name=cluster_name, kind=kind, import_id=import_id).filter(
         status=IngestQueueStatus.FAILED.value,
-        processed_at=timezone.now(),
-        error_message=error[:2000],
-        attempts=connection.ops.no_limit_value() if False else 0,  # stub
     )
+    n = qs.count()
+    if not n:
+        return 0, ""
+    last = qs.order_by("-id").values_list("error_message", flat=True).first() or ""
+    return n, last[:LAST_ERROR_MAX_CHARS]
+
+
+def delete_tuple_rows(*, cluster_name: str, kind: str, import_id: str, keep_failed: bool) -> int:
+    """Delete the tuple's queue rows once the reap has recorded what it
+    needs. `keep_failed=True` (settings.IMPORT_KEEP_FAILED_PAYLOADS — a
+    debugging aid) leaves `failed` rows for the 14-day prune so a
+    reproducible parse failure can be replayed from its exact payload.
+    """
+    qs = _tuple_qs(cluster_name=cluster_name, kind=kind, import_id=import_id)
+    if keep_failed:
+        qs = qs.exclude(status=IngestQueueStatus.FAILED.value)
+    return qs.delete()[0]
+
+
+def delete_import_rows(*, cluster_name: str, import_id: str, keep_failed: bool) -> int:
+    """Every kind's rows for one import — the discard paths."""
+    qs = IngestQueue.objects.filter(cluster_name=cluster_name, import_id=import_id)
+    if keep_failed:
+        qs = qs.exclude(status=IngestQueueStatus.FAILED.value)
+    return qs.delete()[0]
 
 
 def drain_check(*, cluster_name: str, kind: str, import_id: str) -> bool:
@@ -212,10 +239,7 @@ def drain_check(*, cluster_name: str, kind: str, import_id: str) -> bool:
     Counts both states to prevent the reap from firing while a worker
     is mid-item on the same tuple.
     """
-    return not IngestQueue.objects.filter(
-        cluster_name=cluster_name,
-        kind=kind,
-        import_id=import_id,
+    return not _tuple_qs(cluster_name=cluster_name, kind=kind, import_id=import_id).filter(
         status__in=[
             IngestQueueStatus.PENDING.value,
             IngestQueueStatus.PROCESSING.value,
@@ -227,6 +251,12 @@ def drain_check(*, cluster_name: str, kind: str, import_id: str) -> bool:
 def transition_mark_to_reaped(mark: ImportMark) -> bool:
     """Idempotent state-machine flip from `draining` → `reaped`. Returns
     True if this caller won the race.
+
+    This is the reap's claim: callers run it FIRST and return without
+    doing anything when it returns False. The conditional UPDATE takes
+    the row lock, so a concurrent reaper blocks on it, re-evaluates
+    `WHERE state='draining'` after the winner commits, and matches
+    nothing.
     """
     affected = ImportMark.objects.filter(
         id=mark.id, state=ImportMarkState.DRAINING.value,

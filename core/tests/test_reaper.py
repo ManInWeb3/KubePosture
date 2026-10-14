@@ -2,15 +2,19 @@
 
 Covers:
 - `maybe_reap` dispatcher gates: state guard, drain guard, inventory-
-  vs-scan dispatch.
+  vs-scan dispatch, and the claim-first race (two reapers, one body).
+- Delete-at-reap: every terminal path deletes the tuple's queue rows
+  (failed ones too unless IMPORT_KEEP_FAILED_PAYLOADS) after recording
+  `failed_count` / `last_error` on the mark.
 - `_reap_scan` zero-input no-op rule + ScanInconsistency emission for
-  image-anchored kinds.
+  image-anchored kinds; partial-failure protective branch.
 - `_reap_scan` signal clearing — stale Kyverno/Trivy signals flip
   `currently_active=False` when their `last_seen_at` is older than the
   reap's `started_at`.
-- `transition_mark_to_reaped` idempotence under double-call (two
-  workers racing the same drain).
+- `transition_mark_to_reaped` idempotence under double-call.
 - `reap_all_drainable` safety-net sweep over leftover draining marks.
+- Discards: `reap_stuck_open` (never committed) and the inventory-failed
+  paths never apply data and never advance the cluster anchor.
 
 Inventory reap (`_reap_inventory`) is covered indirectly via
 `test_inventory_parser.py` — its `reap_inventory_diff` body is the
@@ -19,15 +23,19 @@ non-trivial part and lives in the parser, not the reaper.
 from __future__ import annotations
 
 import io
+import threading
 from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
 from django.core.management import call_command
+from django.db import connection
+from django.test import override_settings
 from django.utils import timezone
 
 from core.constants import (
     Environment,
+    ImportDiscardReason,
     ImportMarkState,
     IngestQueueStatus,
 )
@@ -46,6 +54,8 @@ from core.services.queue import transition_mark_to_reaped
 from core.services.reaper import (
     STUCK_OPEN_TIMEOUT_SECONDS,
     _reap_scan,
+    discard_import_for_failed_inventory,
+    discard_inventory_failed_imports,
     maybe_reap,
     reap_all_drainable,
     reap_stuck_open,
@@ -84,11 +94,25 @@ def _mark(
     )
 
 
+def _row(mark: ImportMark, *, status: str = IngestQueueStatus.DONE.value,
+         error: str = "", complete_snapshot: bool = False, kind: str | None = None) -> IngestQueue:
+    return IngestQueue.objects.create(
+        cluster_name=mark.cluster.name, kind=kind or mark.kind, import_id=mark.import_id,
+        raw_json={}, status=status, error_message=error, complete_snapshot=complete_snapshot,
+    )
+
+
 def _workload(cluster: Cluster, *, name: str = "api") -> Workload:
     ns = Namespace.objects.create(cluster=cluster, name="payments")
     return Workload.objects.create(
         cluster=cluster, namespace=ns, kind="Deployment", name=name, deployed=True,
     )
+
+
+def _rows(mark: ImportMark) -> int:
+    return IngestQueue.objects.filter(
+        cluster_name=mark.cluster.name, kind=mark.kind, import_id=mark.import_id,
+    ).count()
 
 
 # ── maybe_reap dispatcher ───────────────────────────────────────────
@@ -111,16 +135,11 @@ def test_maybe_reap_returns_none_when_queue_not_drained():
     mark in draining state."""
     c = _cluster()
     mark = _mark(c, import_id="imp-pending")
-    IngestQueue.objects.create(
-        cluster_name=c.name,
-        kind=mark.kind,
-        import_id=mark.import_id,
-        raw_json={},
-        status=IngestQueueStatus.PENDING.value,
-    )
+    _row(mark, status=IngestQueueStatus.PENDING.value)
     assert maybe_reap(mark) is None
     mark.refresh_from_db()
     assert mark.state == ImportMarkState.DRAINING.value
+    assert _rows(mark) == 1
 
 
 @pytest.mark.django_db
@@ -137,17 +156,65 @@ def test_maybe_reap_dispatches_to_scan_path_and_transitions_to_reaped():
 
 
 @pytest.mark.django_db
+def test_maybe_reap_returns_none_when_mark_already_reaped_in_db():
+    """The in-memory mark says draining, the DB says reaped (another
+    reaper won) — the claim fails and nothing runs."""
+    c = _cluster()
+    mark = _mark(c, kind="trivy.ConfigAuditReport")
+    ImportMark.objects.filter(pk=mark.pk).update(state=ImportMarkState.REAPED.value)
+    with patch("core.services.reaper._maybe_capture_heartbeat") as hb:
+        assert maybe_reap(mark) is None
+    hb.assert_not_called()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_reap_scan_two_threads_only_one_applies():
+    """Two workers see the same drained tuple at once. Exactly one runs
+    the body: a zero-input VulnerabilityReport mark over one deployed
+    image must produce ONE ScanInconsistency row with consecutive_cycles
+    1 — not 2 (which the old reap-then-transition order allowed)."""
+    c = _cluster()
+    w = _workload(c)
+    img = Image.objects.create(digest="sha256:" + "a" * 64, ref="img:v1")
+    WorkloadImageObservation.objects.create(
+        workload=w, image=img, container_name="app", currently_deployed=True,
+    )
+    mark = _mark(c, kind="trivy.VulnerabilityReport", observed_count=0)
+
+    barrier = threading.Barrier(2)
+    results: list = []
+    errors: list = []
+
+    def run():
+        try:
+            m = ImportMark.objects.select_related("cluster").get(pk=mark.pk)
+            barrier.wait()
+            results.append(_reap_scan(m))
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            connection.close()
+
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, errors
+    assert sorted(r is None for r in results) == [False, True]
+    rows = list(ScanInconsistency.objects.all())
+    assert len(rows) == 1 and rows[0].consecutive_cycles == 1
+
+
+@pytest.mark.django_db
 def test_maybe_reap_dispatches_to_inventory_path_for_inventory_kind():
     """An inventory-kind mark routes through `_reap_inventory`. The
     payload had no `complete_snapshot=true` so the consecutive
-    counter bumps and the mark still reaches REAPED."""
+    counter bumps, the mark still reaches REAPED, and the row is gone."""
     c = _cluster()
     mark = _mark(c, kind="inventory", import_id="imp-inv")
-    IngestQueue.objects.create(
-        cluster_name=c.name, kind="inventory", import_id=mark.import_id,
-        raw_json={}, status=IngestQueueStatus.DONE.value,
-        complete_snapshot=False,
-    )
+    _row(mark, complete_snapshot=False)
     result = maybe_reap(mark)
     assert result is not None
     assert result.get("complete_snapshot") is False
@@ -155,6 +222,7 @@ def test_maybe_reap_dispatches_to_inventory_path_for_inventory_kind():
     assert c.consecutive_incomplete_inventories == 1
     mark.refresh_from_db()
     assert mark.state == ImportMarkState.REAPED.value
+    assert _rows(mark) == 0
 
 
 @pytest.mark.django_db
@@ -173,11 +241,7 @@ def test_reap_inventory_skips_diff_when_superseded_by_newer_cycle():
         c, kind="inventory", import_id="imp-stale",
         started_at=newer_reap_time - timedelta(minutes=10),
     )
-    IngestQueue.objects.create(
-        cluster_name=c.name, kind="inventory", import_id=stale_mark.import_id,
-        raw_json={}, status=IngestQueueStatus.DONE.value,
-        complete_snapshot=True,
-    )
+    _row(stale_mark, complete_snapshot=True)
 
     result = maybe_reap(stale_mark)
 
@@ -191,6 +255,72 @@ def test_reap_inventory_skips_diff_when_superseded_by_newer_cycle():
     assert c.last_complete_inventory_at == newer_reap_time, (
         "a stale reap must not roll the cluster's watermark backward"
     )
+    assert _rows(stale_mark) == 0, "superseded path still deletes the rows"
+
+
+# ── delete-at-reap + failure bookkeeping ───────────────────────────
+
+
+@pytest.mark.django_db
+def test_reap_deletes_all_rows_and_records_failures_on_mark():
+    c = _cluster()
+    mark = _mark(c, kind="trivy.ConfigAuditReport", observed_count=3)
+    _row(mark)
+    _row(mark, status=IngestQueueStatus.FAILED.value, error="first boom")
+    _row(mark, status=IngestQueueStatus.FAILED.value, error="second boom")
+
+    result = maybe_reap(mark)
+
+    assert result["queue_rows_deleted"] == 3
+    assert result["failed_count"] == 2
+    assert _rows(mark) == 0
+    mark.refresh_from_db()
+    assert mark.failed_count == 2
+    assert mark.last_error == "second boom"
+
+
+@pytest.mark.django_db
+@override_settings(IMPORT_KEEP_FAILED_PAYLOADS=True)
+def test_reap_keeps_failed_rows_under_debug_flag():
+    c = _cluster()
+    mark = _mark(c, kind="trivy.ConfigAuditReport", observed_count=2)
+    _row(mark)
+    failed = _row(mark, status=IngestQueueStatus.FAILED.value, error="boom")
+
+    maybe_reap(mark)
+
+    assert list(IngestQueue.objects.values_list("pk", flat=True)) == [failed.pk]
+    mark.refresh_from_db()
+    assert mark.failed_count == 1
+
+
+@pytest.mark.django_db
+def test_reap_inventory_reads_complete_snapshot_before_deleting_rows():
+    c = _cluster()
+    mark = _mark(c, kind="inventory", import_id="imp-c")
+    _row(mark, complete_snapshot=True)
+
+    result = maybe_reap(mark)
+
+    assert result["complete_snapshot"] is True
+    c.refresh_from_db()
+    assert c.last_complete_inventory_at == mark.started_at
+    assert _rows(mark) == 0
+
+
+@pytest.mark.django_db
+def test_reap_body_exception_rolls_back_claim_and_rows():
+    """A failing body must leave the mark draining and the rows in
+    place for the safety net — the claim is part of the transaction."""
+    c = _cluster()
+    mark = _mark(c, kind="trivy.ConfigAuditReport", observed_count=2)
+    _row(mark)
+    with patch("core.services.reaper._reap_scan_body", side_effect=RuntimeError("body exploded")):
+        with pytest.raises(RuntimeError):
+            maybe_reap(mark)
+    mark.refresh_from_db()
+    assert mark.state == ImportMarkState.DRAINING.value
+    assert _rows(mark) == 1
 
 
 # ── _reap_scan zero-input no-op ────────────────────────────────────
@@ -274,6 +404,33 @@ def test_reap_scan_zero_input_non_image_kind_skips_inconsistency():
     result = _reap_scan(mark)
     assert result.get("skipped_zero_input") is True
     assert ScanInconsistency.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_reap_scan_partial_failure_takes_protective_branch():
+    """Some of the kind's payloads failed → their signals were never
+    bumped. Clearing "everything not bumped" would retire real findings,
+    so the reap keeps them and flags the failure on the mark instead."""
+    c = _cluster()
+    w = _workload(c)
+    started_at = timezone.now()
+    stale_signal = WorkloadSignal.objects.create(
+        workload=w, signal_id="kyverno:disallow-privileged-containers", currently_active=True,
+    )
+    _bump(stale_signal, last_seen_at=started_at - timedelta(minutes=10))
+    mark = _mark(c, kind="kyverno.PolicyReport", observed_count=5, started_at=started_at)
+    _row(mark)
+    _row(mark, status=IngestQueueStatus.FAILED.value, error="parser blew up")
+
+    result = _reap_scan(mark)
+
+    assert result.get("skipped_partial_failure") is True
+    assert "signals_cleared" not in result
+    stale_signal.refresh_from_db()
+    assert stale_signal.currently_active is True
+    mark.refresh_from_db()
+    assert mark.failed_count == 1 and mark.last_error == "parser blew up"
+    assert _rows(mark) == 0
 
 
 # ── _reap_scan signal clearing ─────────────────────────────────────
@@ -451,13 +608,7 @@ def test_reap_all_drainable_fires_only_for_drained_tuples():
     c = _cluster()
     drained = _mark(c, kind="trivy.ConfigAuditReport", import_id="imp-drained")
     not_drained = _mark(c, kind="trivy.ConfigAuditReport", import_id="imp-busy")
-    IngestQueue.objects.create(
-        cluster_name=c.name,
-        kind=not_drained.kind,
-        import_id=not_drained.import_id,
-        raw_json={},
-        status=IngestQueueStatus.PENDING.value,
-    )
+    _row(not_drained, status=IngestQueueStatus.PENDING.value)
 
     # Suppress the heartbeat — the sweep would otherwise try to write
     # a Snapshot row; that path is exercised by snapshot tests.
@@ -473,7 +624,7 @@ def test_reap_all_drainable_fires_only_for_drained_tuples():
 
 @pytest.mark.django_db
 def test_reap_all_drainable_ignores_open_marks():
-    """A mark still in OPEN state — the importer hasn't finished yet —
+    """A mark still in OPEN state — the importer hasn't committed yet —
     must not be reaped by the safety-net sweep."""
     c = _cluster()
     open_mark = _mark(c, kind="trivy.ConfigAuditReport", state=ImportMarkState.OPEN.value)
@@ -501,21 +652,25 @@ def test_reap_all_drainable_ignores_already_reaped_marks():
     assert already.state == ImportMarkState.REAPED.value
 
 
-# ── reap_stuck_open ─────────────────────────────────────────────────
+# ── reap_stuck_open: discard, don't promote ─────────────────────────
+
+
+def _stale():
+    return timezone.now() - timedelta(seconds=STUCK_OPEN_TIMEOUT_SECONDS + 60)
 
 
 @pytest.mark.django_db
-def test_reap_stuck_open_ignores_fresh_open_mark():
+def test_reap_stuck_open_leaves_fresh_open_mark():
     """An `open` mark well within the timeout is left alone — the
-    importer may still be legitimately mid-cycle."""
+    importer may still be legitimately mid-upload."""
     c = _cluster()
     mark = _mark(c, state=ImportMarkState.OPEN.value, started_at=timezone.now())
+    _row(mark, status=IngestQueueStatus.PENDING.value)
 
-    promoted = reap_stuck_open()
-
-    assert promoted == 0
+    assert reap_stuck_open() == 0
     mark.refresh_from_db()
     assert mark.state == ImportMarkState.OPEN.value
+    assert _rows(mark) == 1
 
 
 @pytest.mark.django_db
@@ -523,19 +678,16 @@ def test_reap_stuck_open_ignores_draining_and_reaped_marks():
     """Only `state=open` is in scope — draining/reaped marks (even with
     an ancient `started_at`) are untouched by this sweep."""
     c = _cluster()
-    stale = timezone.now() - timedelta(seconds=STUCK_OPEN_TIMEOUT_SECONDS + 60)
     draining = _mark(
         c, kind="trivy.ConfigAuditReport", import_id="imp-d",
-        state=ImportMarkState.DRAINING.value, started_at=stale,
+        state=ImportMarkState.DRAINING.value, started_at=_stale(),
     )
     reaped = _mark(
         c, kind="trivy.ConfigAuditReport", import_id="imp-r",
-        state=ImportMarkState.REAPED.value, started_at=stale,
+        state=ImportMarkState.REAPED.value, started_at=_stale(),
     )
 
-    promoted = reap_stuck_open()
-
-    assert promoted == 0
+    assert reap_stuck_open() == 0
     draining.refresh_from_db()
     reaped.refresh_from_db()
     assert draining.state == ImportMarkState.DRAINING.value
@@ -543,103 +695,148 @@ def test_reap_stuck_open_ignores_draining_and_reaped_marks():
 
 
 @pytest.mark.django_db
-def test_reap_stuck_open_promotes_mark_past_timeout_with_no_items():
-    """A mark stuck `open` past STUCK_OPEN_TIMEOUT_SECONDS with zero
-    IngestQueue rows for its tuple (importer crashed before posting
-    anything) is promoted to draining, observed_count left untouched
-    (None) so the zero-input no-op rule governs its eventual reap."""
+def test_reap_stuck_open_discards_rows_and_all_marks_of_the_import():
+    """An import the importer never committed: every one of its marks
+    goes to reaped/stuck_open together, its rows are deleted, and
+    nothing is ever applied."""
     c = _cluster()
-    stale = timezone.now() - timedelta(seconds=STUCK_OPEN_TIMEOUT_SECONDS + 60)
-    mark = _mark(
-        c, kind="trivy.ConfigAuditReport", import_id="imp-empty",
-        state=ImportMarkState.OPEN.value, observed_count=None, started_at=stale,
-    )
+    inv = _mark(c, kind="inventory", import_id="imp-stuck", state=ImportMarkState.OPEN.value,
+                observed_count=None, started_at=_stale())
+    vuln = _mark(c, kind="trivy.VulnerabilityReport", import_id="imp-stuck",
+                 state=ImportMarkState.OPEN.value, observed_count=None, started_at=_stale())
+    _row(inv, status=IngestQueueStatus.PENDING.value, complete_snapshot=True)
+    _row(vuln, status=IngestQueueStatus.PENDING.value)
+    _row(vuln, status=IngestQueueStatus.PENDING.value)
+    other = _mark(c, kind="inventory", import_id="imp-other", state=ImportMarkState.OPEN.value,
+                  started_at=timezone.now())
+    _row(other, status=IngestQueueStatus.PENDING.value)
 
-    promoted = reap_stuck_open()
+    assert reap_stuck_open() == 2
 
-    assert promoted == 1
-    mark.refresh_from_db()
-    assert mark.state == ImportMarkState.DRAINING.value
-    assert mark.observed_count is None
-    assert mark.completed_at is not None
+    for m in (inv, vuln):
+        m.refresh_from_db()
+        assert m.state == ImportMarkState.REAPED.value
+        assert m.discard_reason == ImportDiscardReason.STUCK_OPEN.value
+        assert m.completed_at is not None
+        assert m.observed_count is None
+        assert m.failed_count == 0
+    assert IngestQueue.objects.filter(import_id="imp-stuck").count() == 0
+    other.refresh_from_db()
+    assert other.state == ImportMarkState.OPEN.value and _rows(other) == 1
+    c.refresh_from_db()
+    assert c.last_complete_inventory_at is None
+    assert c.consecutive_incomplete_inventories == 0
 
 
 @pytest.mark.django_db
-def test_reap_stuck_open_promotes_mark_with_partial_items_then_reap_all_drainable_resolves_it():
-    """A mark stuck open past timeout WITH some queue items already
-    landed (importer partially posted before dying): promotion alone
-    doesn't reap it, but a subsequent reap_all_drainable — the queue
-    for that tuple is already DONE — reaps it in the same command run."""
-    c = _cluster()
-    stale = timezone.now() - timedelta(seconds=STUCK_OPEN_TIMEOUT_SECONDS + 60)
-    mark = _mark(
-        c, kind="trivy.ConfigAuditReport", import_id="imp-partial",
-        state=ImportMarkState.OPEN.value, observed_count=None, started_at=stale,
-    )
-    IngestQueue.objects.create(
-        cluster_name=c.name, kind=mark.kind, import_id=mark.import_id,
-        raw_json={}, status=IngestQueueStatus.DONE.value,
-    )
-
-    promoted = reap_stuck_open()
-    assert promoted == 1
-    mark.refresh_from_db()
-    assert mark.state == ImportMarkState.DRAINING.value
-
-    with patch("core.services.reaper._maybe_capture_heartbeat"):
-        fired = reap_all_drainable()
-
-    assert fired == 1
-    mark.refresh_from_db()
-    assert mark.state == ImportMarkState.REAPED.value
-
-
-@pytest.mark.django_db
-def test_reap_stuck_open_promoted_scan_mark_does_not_clear_existing_signals():
-    """Core safety property: a force-promoted scan mark must take the
-    zero-input protective branch on reap, NOT the destructive
-    signal-clearing branch — an interrupted cycle must never look like
-    a complete, clean scan that found nothing."""
+def test_reap_stuck_open_discarded_scan_mark_never_clears_signals():
+    """Core safety property: a discarded scan mark must never reach the
+    signal-clearing branch — an interrupted cycle must not look like a
+    complete, clean scan that found nothing."""
     c = _cluster()
     w = _workload(c)
-    stale = timezone.now() - timedelta(seconds=STUCK_OPEN_TIMEOUT_SECONDS + 60)
     live_signal = WorkloadSignal.objects.create(
         workload=w, signal_id="kyverno:disallow-privileged-containers",
-        currently_active=True, last_seen_at=stale - timedelta(minutes=5),
+        currently_active=True,
     )
+    _bump(live_signal, last_seen_at=_stale() - timedelta(minutes=5))
     _mark(
         c, kind="kyverno.PolicyReport", import_id="imp-stuck",
-        state=ImportMarkState.OPEN.value, observed_count=None, started_at=stale,
+        state=ImportMarkState.OPEN.value, observed_count=None, started_at=_stale(),
     )
 
-    reap_stuck_open()
+    assert reap_stuck_open() == 1
     with patch("core.services.reaper._maybe_capture_heartbeat"):
-        reap_all_drainable()
+        assert reap_all_drainable() == 0, "a discarded mark is terminal — nothing left to reap"
 
     live_signal.refresh_from_db()
-    assert live_signal.currently_active is True, (
-        "a force-drained scan mark must not clear signals it never actually re-scanned"
-    )
+    assert live_signal.currently_active is True
+
+
+# ── inventory-failed discard ───────────────────────────────────────
 
 
 @pytest.mark.django_db
-def test_reap_safety_net_command_promotes_and_reaps_in_one_run():
-    """End-to-end: `manage.py reap_safety_net` promotes a stuck open
-    mark AND reaps it (queue already empty) in the same invocation."""
+def test_discard_import_for_failed_inventory_keeps_nothing_but_the_facts():
     c = _cluster()
-    stale = timezone.now() - timedelta(seconds=STUCK_OPEN_TIMEOUT_SECONDS + 60)
-    _mark(
-        c, kind="trivy.ConfigAuditReport", import_id="imp-e2e",
-        state=ImportMarkState.OPEN.value, observed_count=None, started_at=stale,
-    )
+    inv = _mark(c, kind="inventory", import_id="imp-f", observed_count=1)
+    vuln = _mark(c, kind="trivy.VulnerabilityReport", import_id="imp-f", observed_count=2)
+    _row(inv, status=IngestQueueStatus.FAILED.value, error="inventory parser exploded")
+    _row(vuln, status=IngestQueueStatus.PENDING.value)
+    _row(vuln, status=IngestQueueStatus.PENDING.value)
+
+    result = discard_import_for_failed_inventory(cluster_name=c.name, import_id="imp-f")
+
+    assert result == {"marks": 2, "rows": 3}
+    inv.refresh_from_db()
+    vuln.refresh_from_db()
+    assert inv.discard_reason == vuln.discard_reason == ImportDiscardReason.INVENTORY_FAILED.value
+    assert inv.state == vuln.state == ImportMarkState.REAPED.value
+    assert inv.failed_count == 1 and inv.last_error == "inventory parser exploded"
+    assert vuln.failed_count == 0
+    assert IngestQueue.objects.count() == 0
+    c.refresh_from_db()
+    assert c.last_complete_inventory_at is None
+
+
+@pytest.mark.django_db
+@override_settings(IMPORT_KEEP_FAILED_PAYLOADS=True)
+def test_discard_keeps_failed_inventory_row_under_debug_flag():
+    c = _cluster()
+    inv = _mark(c, kind="inventory", import_id="imp-f", observed_count=1)
+    failed = _row(inv, status=IngestQueueStatus.FAILED.value, error="boom")
+    _row(inv, status=IngestQueueStatus.PENDING.value, kind="trivy.VulnerabilityReport")
+
+    discard_import_for_failed_inventory(cluster_name=c.name, import_id="imp-f")
+
+    assert list(IngestQueue.objects.values_list("pk", flat=True)) == [failed.pk]
+
+
+@pytest.mark.django_db
+def test_discard_inventory_failed_sweep_catches_rows_failed_outside_the_worker():
+    """`claim_batch`'s abandon-exhausted SQL flips rows to failed without
+    the worker's discard hook running; the hourly sweep covers it."""
+    c = _cluster()
+    inv = _mark(c, kind="inventory", import_id="imp-abandoned", observed_count=1)
+    _row(inv, status=IngestQueueStatus.FAILED.value,
+         error="abandoned: stuck in processing past reclaim attempt limit")
+    scan = _mark(c, kind="trivy.ConfigAuditReport", import_id="imp-abandoned", observed_count=1)
+    _row(scan, status=IngestQueueStatus.PENDING.value)
+    # An unrelated, healthy draining import is untouched.
+    healthy = _mark(c, kind="inventory", import_id="imp-healthy", observed_count=1)
+    _row(healthy, status=IngestQueueStatus.PENDING.value)
+
+    assert discard_inventory_failed_imports() == 2
+
+    inv.refresh_from_db()
+    scan.refresh_from_db()
+    healthy.refresh_from_db()
+    assert inv.discard_reason == scan.discard_reason == ImportDiscardReason.INVENTORY_FAILED.value
+    assert "abandoned" in inv.last_error
+    assert healthy.state == ImportMarkState.DRAINING.value and _rows(healthy) == 1
+
+
+@pytest.mark.django_db
+def test_reap_safety_net_command_discards_and_reaps_in_one_run():
+    """End-to-end: `manage.py reap_safety_net` discards a stuck-open
+    import, discards an inventory-failed import, and reaps a healthy
+    drained mark — all in one invocation."""
+    c = _cluster()
+    _mark(c, kind="trivy.ConfigAuditReport", import_id="imp-stuck",
+          state=ImportMarkState.OPEN.value, observed_count=None, started_at=_stale())
+    inv = _mark(c, kind="inventory", import_id="imp-f", observed_count=1)
+    _row(inv, status=IngestQueueStatus.FAILED.value, error="boom")
+    _mark(c, kind="trivy.ConfigAuditReport", import_id="imp-ok", observed_count=1)
 
     out = io.StringIO()
     with patch("core.services.reaper._maybe_capture_heartbeat"):
         call_command("reap_safety_net", stdout=out)
 
     body = out.getvalue()
-    assert "promoted: 1" in body
+    assert "discarded_stuck_open: 1" in body
+    assert "discarded_inventory_failed: 1" in body
     assert "reaped: 1" in body
+    assert set(ImportMark.objects.values_list("state", flat=True)) == {ImportMarkState.REAPED.value}
 
 
 @pytest.mark.django_db
@@ -667,11 +864,7 @@ def test_inventory_reap_scaled_to_zero_image_not_currently_deployed():
     _bump(obs, last_seen_at=mark.started_at + timedelta(seconds=1))
 
     # Complete-snapshot payload so the reap runs the deployed diff + mirror.
-    IngestQueue.objects.create(
-        cluster_name=c.name, kind="inventory", import_id=mark.import_id,
-        raw_json={}, status=IngestQueueStatus.DONE.value,
-        complete_snapshot=True,
-    )
+    _row(mark, complete_snapshot=True)
 
     result = maybe_reap(mark)
     assert result is not None

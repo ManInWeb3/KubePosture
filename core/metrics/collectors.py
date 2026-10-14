@@ -5,11 +5,12 @@ so the scrape rate decouples from the DB-query rate.
 """
 from __future__ import annotations
 
-from django.db.models import Count
+from django.db.models import Count, Min
 from django.utils import timezone
 from prometheus_client.core import GaugeMetricFamily
 
-from core.models import Cluster, IngestQueue, Namespace, Workload
+from core.constants import ImportMarkState
+from core.models import Cluster, ImportMark, IngestQueue, Namespace, Workload
 from core.services.inventory import default_finding_qs
 
 from .registry import cached
@@ -86,6 +87,35 @@ def _ingest_queue_depth():
     return [(r["status"], r["n"]) for r in rows]
 
 
+def _ingest_queue_oldest_age_seconds():
+    """Age of the oldest row per status. The queue only holds in-flight
+    work now (rows are deleted at reap), so a growing `pending` age means
+    the worker isn't keeping up or an import can't be claimed."""
+    now = timezone.now()
+    rows = IngestQueue.objects.values("status").annotate(oldest=Min("created_at"))
+    return [(r["status"], (now - r["oldest"]).total_seconds()) for r in rows]
+
+
+def _import_scan_coverage_ratio():
+    """matched / expected from the newest committed, non-discarded mark
+    per (cluster, kind) that reported a coverage denominator."""
+    rows = (
+        ImportMark.objects
+        .filter(
+            coverage_expected__gt=0,
+            state__in=[ImportMarkState.DRAINING.value, ImportMarkState.REAPED.value],
+            discard_reason="",
+        )
+        .order_by("cluster__name", "kind", "-started_at")
+        .distinct("cluster__name", "kind")
+        .values_list("cluster__name", "kind", "coverage_expected", "coverage_matched")
+    )
+    return [
+        (cluster, kind, (matched or 0) / expected)
+        for cluster, kind, expected, matched in rows
+    ]
+
+
 def _inventory_age_seconds():
     now = timezone.now()
     return [
@@ -117,6 +147,12 @@ _METRIC_DESCRIPTORS = (
     ("kubeposture_ingest_queue_depth",
      "Items in the ingest queue, by status.",
      ["status"]),
+    ("kubeposture_ingest_queue_oldest_age_seconds",
+     "Age of the oldest ingest queue item, by status.",
+     ["status"]),
+    ("kubeposture_import_scan_coverage_ratio",
+     "Importer-reported scan coverage (matched / expected) of the latest committed import, per cluster and kind.",
+     ["cluster", "kind"]),
     ("kubeposture_last_inventory_age_seconds",
      "Seconds since the most recent complete inventory cycle, per cluster.",
      ["cluster"]),
@@ -200,6 +236,24 @@ class KubePostureCollector:
         )
         for status, n in cached("ingest_queue_depth", _ingest_queue_depth):
             g.add_metric([status], n)
+        yield g
+
+        g = GaugeMetricFamily(
+            "kubeposture_ingest_queue_oldest_age_seconds",
+            "Age of the oldest ingest queue item, by status.",
+            labels=["status"],
+        )
+        for status, age in cached("ingest_queue_oldest_age", _ingest_queue_oldest_age_seconds):
+            g.add_metric([status], age)
+        yield g
+
+        g = GaugeMetricFamily(
+            "kubeposture_import_scan_coverage_ratio",
+            "Importer-reported scan coverage (matched / expected) of the latest committed import, per cluster and kind.",
+            labels=["cluster", "kind"],
+        )
+        for cluster, kind, ratio in cached("import_scan_coverage", _import_scan_coverage_ratio):
+            g.add_metric([cluster, kind], ratio)
         yield g
 
         g = GaugeMetricFamily(

@@ -103,6 +103,17 @@ def _process_one(item_id: int) -> tuple[bool, str]:
                 processed_at=timezone.now(),
                 error_message=str(exc)[:2000],
             )
+            if item.kind == "inventory":
+                # The inventory gate would hold every scan row of this
+                # import forever; the import is unusable as a whole.
+                try:
+                    reaper.discard_import_for_failed_inventory(
+                        cluster_name=item.cluster_name, import_id=item.import_id,
+                    )
+                except Exception:  # pragma: no cover - must not mask the item failure
+                    log.exception(
+                        "worker.discard_failed import_id=%s", item.import_id,
+                    )
             return False, str(exc)
     # Unreachable — the loop always returns via the except branch on its
     # final attempt — but keeps the function's return type honest.

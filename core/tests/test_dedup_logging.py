@@ -44,14 +44,21 @@ def test_upsert_findings_progress_log_does_not_break_at_debug(caplog):
     cluster = Cluster.objects.create(name="c-dedup-logging")
     n = dedup._PROGRESS_LOG_EVERY * 2 + 1  # crosses the breadcrumb twice
 
-    with caplog.at_level(logging.DEBUG, logger="core.dedup"):
-        created, updated = dedup.upsert_findings(
-            cluster=cluster,
-            workload=None,
-            image=None,
-            findings=[_finding(i) for i in range(n)],
-            observation_time=timezone.now(),
-        )
+    # settings.LOGGING gives the `core` logger propagate=False, so caplog's
+    # root handler never sees these records — attach it directly.
+    dedup_logger = logging.getLogger("core.dedup")
+    dedup_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.DEBUG, logger="core.dedup"):
+            created, updated = dedup.upsert_findings(
+                cluster=cluster,
+                workload=None,
+                image=None,
+                findings=[_finding(i) for i in range(n)],
+                observation_time=timezone.now(),
+            )
+    finally:
+        dedup_logger.removeHandler(caplog.handler)
 
     assert (created, updated) == (n, 0)
     assert Finding.objects.filter(cluster=cluster).count() == n

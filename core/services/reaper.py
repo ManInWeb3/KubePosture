@@ -1,17 +1,35 @@
 """Reaper — kind-dispatched wrap-up after a `(cluster, kind, import_id)`
-queue drains. Idempotent against marks already in `state=reaped`.
+queue drains, plus the two ways an import is *discarded* instead.
 
-Also covers the OTHER end of the ImportMark lifecycle: `reap_stuck_open`
-promotes marks abandoned in `state=open` (importer crashed before
-`/imports/finish/`) so their queue tuples stop being permanently
-unclaimable. See `reap_all_drainable` for the `draining -> reaped`
-safety net this complements.
+**Claim first.** Both reaps begin with `transition_mark_to_reaped` and
+return `None` when they lose that conditional UPDATE — two workers
+seeing the same drained tuple (or a worker racing the safety net) can
+never both run a reap body. Everything after the claim runs in the same
+transaction, so a failing body rolls the claim back and the mark stays
+`draining` for the next sweep.
+
+**Rows go at reap.** Nothing reads `IngestQueue.raw_json` after an item
+is `done`. Once the reap has recorded `failed_count` / `last_error` on
+the mark, the tuple's rows are deleted (`failed` ones too, unless
+settings.IMPORT_KEEP_FAILED_PAYLOADS says to keep them for debugging).
+The queue only ever holds in-flight work.
+
+**Discard, don't promote.** The importer sends a full snapshot every
+cycle, so a cycle that didn't land whole is worth nothing — processing
+part of it would look like "these workloads/findings disappeared".
+`discard_import` deletes an import's rows and moves its marks to
+`reaped` with a `discard_reason`, never touching
+`last_complete_inventory_at`. It is used for marks stuck `open` (the
+importer never committed) and for imports whose inventory payload
+failed (the inventory gate would otherwise hold every scan row of that
+import forever).
 """
 from __future__ import annotations
 
 import logging
 from datetime import timedelta
 
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -19,7 +37,9 @@ from django.utils import timezone
 from core.constants import (
     WORKLOAD_OBSERVATION_RETENTION_DAYS,
     ImageSetChangeKind,
+    ImportDiscardReason,
     ImportMarkState,
+    IngestQueueStatus,
     SnapshotScope,
 )
 from core.models import (
@@ -36,7 +56,13 @@ from core.services.inventory import (
     default_finding_qs,
     restrict_to_currently_deployed_images,
 )
-from core.services.queue import drain_check, transition_mark_to_reaped
+from core.services.queue import (
+    delete_import_rows,
+    delete_tuple_rows,
+    drain_check,
+    failure_summary,
+    transition_mark_to_reaped,
+)
 from core.services.snapshot import (
     _priority_counts,
     _severity_counts,
@@ -48,12 +74,49 @@ from core.urgency import recompute_batch
 log = logging.getLogger("core.reaper")
 
 
+def _keep_failed() -> bool:
+    return bool(getattr(settings, "IMPORT_KEEP_FAILED_PAYLOADS", False))
+
+
+# ── Claim / release ------------------------------------------------
+
+def _claim_reap(mark: ImportMark) -> bool:
+    """Win the `draining → reaped` flip or return False. On success the
+    in-memory mark mirrors the DB and carries the tuple's failure facts
+    so the body can consult them (e.g. `_reap_scan`'s partial-failure
+    branch) before the rows are gone."""
+    if not transition_mark_to_reaped(mark):
+        return False
+    mark.state = ImportMarkState.REAPED.value
+    mark.failed_count, mark.last_error = failure_summary(
+        cluster_name=mark.cluster.name, kind=mark.kind, import_id=mark.import_id,
+    )
+    return True
+
+
+def _release_reap(mark: ImportMark, counters: dict) -> dict:
+    counters["failed_count"] = mark.failed_count
+    counters["queue_rows_deleted"] = delete_tuple_rows(
+        cluster_name=mark.cluster.name, kind=mark.kind, import_id=mark.import_id,
+        keep_failed=_keep_failed(),
+    )
+    mark.save(update_fields=["failed_count", "last_error"])
+    return counters
+
+
 # ── Inventory reap ------------------------------------------------
 
 @transaction.atomic
-def _reap_inventory(mark: ImportMark) -> dict:
+def _reap_inventory(mark: ImportMark) -> dict | None:
+    if not _claim_reap(mark):
+        return None
+    return _release_reap(mark, _reap_inventory_body(mark))
+
+
+def _reap_inventory_body(mark: ImportMark) -> dict:
     cluster = mark.cluster
-    # Did any payload this cycle carry complete_snapshot=true?
+    # Did any payload this cycle carry complete_snapshot=true? Read
+    # before `_release_reap` deletes the rows.
     has_complete = IngestQueue.objects.filter(
         cluster_name=cluster.name,
         kind="inventory",
@@ -83,7 +146,6 @@ def _reap_inventory(mark: ImportMark) -> dict:
                     "consecutive": cluster.consecutive_incomplete_inventories,
                 },
             )
-        transition_mark_to_reaped(mark)
         return counters
 
     # Monotonic guard: a mark can reap late — e.g. its queue drained
@@ -99,7 +161,6 @@ def _reap_inventory(mark: ImportMark) -> dict:
         and mark.started_at <= cluster.last_complete_inventory_at
     ):
         counters["superseded"] = True
-        transition_mark_to_reaped(mark)
         log.warning(
             "reap.inventory.superseded",
             extra={
@@ -172,7 +233,6 @@ def _reap_inventory(mark: ImportMark) -> dict:
     )
     recompute_batch(affected)
 
-    transition_mark_to_reaped(mark)
     log.info("reap.inventory", extra={"cluster": cluster.name, **counters})
     return counters
 
@@ -268,7 +328,13 @@ def _scope_has_items(cluster: Cluster, kind: str) -> bool:
 
 
 @transaction.atomic
-def _reap_scan(mark: ImportMark) -> dict:
+def _reap_scan(mark: ImportMark) -> dict | None:
+    if not _claim_reap(mark):
+        return None
+    return _release_reap(mark, _reap_scan_body(mark))
+
+
+def _reap_scan_body(mark: ImportMark) -> dict:
     cluster = mark.cluster
     counters: dict = {"observed_count": mark.observed_count or 0}
     if (mark.observed_count or 0) == 0 and _scope_has_items(cluster, mark.kind):
@@ -285,7 +351,22 @@ def _reap_scan(mark: ImportMark) -> dict:
             "trivy.ExposedSecretReport",
         ):
             _write_scan_inconsistencies_for_outage(cluster, mark)
-        transition_mark_to_reaped(mark)
+        return counters
+
+    # Some of this kind's payloads failed to process, so their signals
+    # were never bumped this cycle. Clearing "everything not bumped"
+    # would silently retire real findings; keep them instead (the
+    # project errs toward not hiding) and leave the failure visible on
+    # the mark (failed_count / last_error).
+    if mark.failed_count:
+        log.warning(
+            "reap.scan.partial_failure",
+            extra={
+                "cluster": cluster.name, "kind": mark.kind, "import_id": mark.import_id,
+                "failed_count": mark.failed_count, "last_error": mark.last_error[:200],
+            },
+        )
+        counters["skipped_partial_failure"] = True
         return counters
 
     # Source-specific signal clearing — only Kyverno/Trivy signals seen
@@ -315,7 +396,6 @@ def _reap_scan(mark: ImportMark) -> dict:
             findings = list(Finding.objects.filter(workload_id__in=workload_ids))
             recompute_batch(findings)
 
-    transition_mark_to_reaped(mark)
     log.info("reap.scan", extra={"cluster": cluster.name, "kind": mark.kind, **counters})
     return counters
 
@@ -398,77 +478,138 @@ def _signal_ids_for_kind(kind: str) -> set[str]:
     return set()
 
 
-# ── Public dispatch -----------------------------------------------
+# ── Discard -------------------------------------------------------
 
-# TTL for an `open` ImportMark before it's presumed abandoned (crashed
-# importer that never reached /imports/finish/) and force-promoted to
-# `draining` so its queue tuple stops being permanently unclaimable.
-# Deliberately larger than api.views.IMPORT_LOCK_TIMEOUT's 1800s default
-# (that timeout is a read-only gate on starting a NEW cycle, never
-# mutates a row) — this performs an actual state mutation, which is
-# less reversible. It's also comfortably past the importer Job's own
+# TTL for an `open` ImportMark before it's presumed abandoned (importer
+# crashed / was killed before `/imports/<id>/commit/`) and the whole
+# import is discarded. Deliberately larger than api.views'
+# IMPORT_LOCK_TIMEOUT (2700s — a read-only gate on starting a NEW cycle,
+# never mutates a row) — this performs an actual state mutation, which
+# is less reversible. It's also comfortably past the importer Job's own
 # activeDeadlineSeconds (1800s, deploy/charts/kubeposture-import/
 # values.yaml) — by the time this fires, Kubernetes has already
 # SIGKILLed the importer, so "still alive but slow" isn't possible.
 STUCK_OPEN_TIMEOUT_SECONDS = 3600
 
 
+@transaction.atomic
+def discard_import(
+    *,
+    cluster: Cluster,
+    import_id: str,
+    reason: str,
+    from_states: tuple[str, ...],
+) -> dict:
+    """Move every mark of the import currently in `from_states` to
+    `reaped` with `discard_reason=reason`, record each tuple's failure
+    facts, and delete the import's queue rows. Never advances the
+    cluster anchor, never runs a diff, never captures a heartbeat —
+    the cycle simply never happened, except for the audit row."""
+    marks = list(
+        ImportMark.objects.select_for_update().filter(
+            cluster=cluster, import_id=import_id, state__in=list(from_states),
+        )
+    )
+    if not marks:
+        return {"marks": 0, "rows": 0}
+    now = timezone.now()
+    for m in marks:
+        m.failed_count, m.last_error = failure_summary(
+            cluster_name=cluster.name, kind=m.kind, import_id=import_id,
+        )
+        m.state = ImportMarkState.REAPED.value
+        m.discard_reason = reason
+        m.completed_at = now
+    rows = delete_import_rows(
+        cluster_name=cluster.name, import_id=import_id, keep_failed=_keep_failed(),
+    )
+    ImportMark.objects.bulk_update(
+        marks, ["state", "discard_reason", "completed_at", "failed_count", "last_error"],
+    )
+    log.warning(
+        "import.discarded",
+        extra={
+            "cluster": cluster.name, "import_id": import_id, "reason": reason,
+            "marks": len(marks), "rows": rows,
+        },
+    )
+    return {"marks": len(marks), "rows": rows}
+
+
 def reap_stuck_open() -> int:
-    """Safety-net for the OTHER lifecycle boundary `reap_all_drainable`
-    doesn't cover: a mark stuck in `state=open` because the importer
-    crashed before calling `/imports/finish/` for it. Left alone,
-    `_CLAIM_SQL` in core.services.queue never claims that tuple's
-    IngestQueue rows — they're unclaimable forever.
+    """Safety net for imports the importer never committed: every mark
+    still `open` past STUCK_OPEN_TIMEOUT_SECONDS belongs to an import
+    that was uploaded (fully or partly) and then abandoned. Discard it
+    — a partial snapshot must never be processed. Returns the number of
+    marks discarded.
 
-    Force-promotes each such mark straight to `draining`, mirroring
-    what `/imports/finish/` would have done, minus `observed_count` —
-    deliberately left `None` (not backfilled from the actual queue row
-    count) so `_reap_scan`'s zero-input no-op rule fires on it:
-    `mark.observed_count or 0 == 0` takes the protective
-    ScanInconsistency-only branch, never the destructive signal-clearing
-    branch. Backfilling a real count here would make an interrupted
-    cycle look like a complete, clean scan that legitimately found
-    nothing at N items, silently clearing real signals for workloads
-    the truncated cycle never actually got to.
-
-    Does not reap directly — `reap_all_drainable()`, called right after
-    by the same management command, picks up every mark this promotes
-    in the same run.
+    A commit landing concurrently is safe: `discard_import` re-filters
+    on `state=open` under a row lock, and committed marks are
+    `draining`, so they are left alone.
     """
     cutoff = timezone.now() - timedelta(seconds=STUCK_OPEN_TIMEOUT_SECONDS)
-    stuck = ImportMark.objects.filter(
-        state=ImportMarkState.OPEN.value,
-        started_at__lt=cutoff,
-    ).select_related("cluster")
-    promoted = 0
-    for mark in stuck:
-        # Conditional UPDATE — safe if this races a legitimate late
-        # /imports/finish/ call landing concurrently (that view writes
-        # unconditionally, so either order is a harmless overwrite).
-        affected = ImportMark.objects.filter(
-            id=mark.id, state=ImportMarkState.OPEN.value,
-        ).update(
-            state=ImportMarkState.DRAINING.value,
-            completed_at=timezone.now(),
+    stuck = (
+        ImportMark.objects
+        .filter(state=ImportMarkState.OPEN.value, started_at__lt=cutoff)
+        .values_list("cluster_id", "import_id")
+        .distinct()
+    )
+    discarded = 0
+    for cluster_id, import_id in list(stuck):
+        cluster = Cluster.objects.filter(pk=cluster_id).first()
+        if cluster is None:
+            continue
+        result = discard_import(
+            cluster=cluster, import_id=import_id,
+            reason=ImportDiscardReason.STUCK_OPEN.value,
+            from_states=(ImportMarkState.OPEN.value,),
         )
-        if affected:
-            promoted += 1
-            log.warning(
-                "reap.stuck_open_promoted",
-                extra={
-                    "cluster": mark.cluster.name,
-                    "kind": mark.kind,
-                    "import_id": mark.import_id,
-                    "started_at": mark.started_at.isoformat(),
-                },
-            )
-    return promoted
+        discarded += result["marks"]
+    return discarded
 
+
+def discard_import_for_failed_inventory(*, cluster_name: str, import_id: str) -> dict:
+    """The worker calls this the moment an inventory item fails. The
+    inventory gate holds every other row of the import behind that
+    failure forever; the import is unusable as a whole, so discard it.
+    `last_error` on the inventory mark carries the exception."""
+    cluster = Cluster.objects.filter(name=cluster_name).first()
+    if cluster is None:
+        return {"marks": 0, "rows": 0}
+    return discard_import(
+        cluster=cluster, import_id=import_id,
+        reason=ImportDiscardReason.INVENTORY_FAILED.value,
+        from_states=(ImportMarkState.DRAINING.value,),
+    )
+
+
+def discard_inventory_failed_imports() -> int:
+    """Safety-net sweep for inventory rows that reached `failed` without
+    passing through the worker's failure path — `claim_batch`'s
+    abandon-exhausted SQL flips rows straight to `failed`. Returns the
+    number of marks discarded."""
+    pairs = (
+        IngestQueue.objects
+        .filter(kind="inventory", status=IngestQueueStatus.FAILED.value)
+        .values_list("cluster_name", "import_id")
+        .distinct()
+    )
+    discarded = 0
+    for cluster_name, import_id in list(pairs):
+        result = discard_import_for_failed_inventory(
+            cluster_name=cluster_name, import_id=import_id,
+        )
+        discarded += result["marks"]
+    return discarded
+
+
+# ── Public dispatch -----------------------------------------------
 
 def maybe_reap(mark: ImportMark) -> dict | None:
     """Call after a worker commits an item. If the queue for this tuple
     is drained AND the mark is in `state='draining'`, fire the appropriate
-    reap. Returns the counters dict, or None if nothing fired.
+    reap. Returns the counters dict, or None if nothing fired (including
+    losing the claim to a concurrent reaper).
     """
     if mark.state != ImportMarkState.DRAINING.value:
         return None
@@ -482,6 +623,8 @@ def maybe_reap(mark: ImportMark) -> dict | None:
         result = _reap_inventory(mark)
     else:
         result = _reap_scan(mark)
+    if result is None:
+        return None
     _maybe_capture_heartbeat(mark.cluster)
     return result
 
@@ -502,9 +645,11 @@ def reap_all_drainable() -> int:
             continue
         try:
             if mark.kind == "inventory":
-                _reap_inventory(mark)
+                result = _reap_inventory(mark)
             else:
-                _reap_scan(mark)
+                result = _reap_scan(mark)
+            if result is None:
+                continue
             fired += 1
             touched_clusters.add(mark.cluster_id)
         except Exception:  # pragma: no cover

@@ -6,8 +6,9 @@
 {% block settings_content %}
 {% help "Ingest Tokens" %}
   <p>Bearer tokens for the ingest API. The <code>kubeposture-import</code> CronJob on each
-  target cluster sends <code>Authorization: Bearer &lt;token&gt;</code> when posting Trivy
-  and Kyverno reports to <code>/api/v1/ingest/</code>.</p>
+  target cluster sends <code>Authorization: Bearer &lt;token&gt;</code> when uploading its
+  inventory, Trivy and Kyverno bundles to <code>/api/v1/imports/&lt;import_id&gt;/bundles/&lt;kind&gt;/</code>
+  and committing the import.</p>
   <p><strong>How to add a cluster:</strong> create a token here, copy the value (it is
   shown <em>once</em>), paste it into the cluster's Helm <code>values.yaml</code> under
   <code>token.value</code> (or reference a Kubernetes secret), then run

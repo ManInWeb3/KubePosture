@@ -23,8 +23,8 @@ mode), and Traefik forward-auth with an OIDC plugin.
 5. `login()` mints a session — subsequent requests skip the JWT path.
 
 Bypass paths (always unauth or bearer-token auth):
-`/api/v1/ingest/`, `/api/v1/imports/`, `/api/v1/cluster-metadata/`,
-`/healthz`, `/readyz`, `/metrics`.
+`/api/v1/imports/` (bundle upload / commit / abort / pending),
+`/api/v1/cluster-metadata/`, `/healthz`, `/readyz`, `/metrics`.
 
 Verification failures fall through silently — `/accounts/login/`
 password auth stays available as a break-glass path for the initial
