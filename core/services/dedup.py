@@ -147,13 +147,18 @@ def upsert_findings(
 
         processed += 1
         if processed % _PROGRESS_LOG_EVERY == 0:
+            # `extra` keys must not shadow LogRecord attributes: "created"
+            # is one (the record's timestamp), and logging raises
+            # KeyError("Attempt to overwrite 'created' in LogRecord") —
+            # inside this function's transaction, so it fails the whole
+            # queue item. Only fires when DEBUG is enabled for `core`.
             log.debug(
                 "dedup.upsert_findings.progress",
                 extra={
                     "cluster": cluster_name,
                     "processed": processed,
-                    "created": created,
-                    "updated": updated,
+                    "findings_created": created,
+                    "findings_updated": updated,
                 },
             )
 
