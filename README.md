@@ -369,7 +369,7 @@ Side endpoints: `GET /api/v1/imports/pending/?cluster=`,
 docker compose up -d db                       # Postgres (SKIP LOCKED, TRUNCATE … need the real thing)
 pytest -m "not e2e and not realdata"          # unit + service + HTTP contract tests
 pytest -m "e2e or realdata"                   # real endpoints → drain → ORM assertions; real-data fixtures
-pytest scripts/tests                          # the importer package (no DB, no Django)
+pytest scripts/importer_tests                          # the importer package (no DB, no Django)
 ```
 
 - `tests/integration/test_import_e2e.py` drives the bundle endpoints

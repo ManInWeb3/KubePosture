@@ -42,6 +42,8 @@ from core.constants import ImportMarkState, IngestQueueStatus
 from core.models import Cluster, ImportMark, IngestQueue
 from core.services.queue import MAX_RECLAIM_ATTEMPTS, STALE_PROCESSING_SECONDS
 
+pytestmark = pytest.mark.e2e
+
 _UNKNOWN_KIND = "synthetic.E2EWorkerLoad"
 _N_TUPLES = 5
 _ITEMS_PER_TUPLE = 15

@@ -49,6 +49,8 @@ VULN = "trivy.VulnerabilityReport"
 SBOM = "trivy.SbomReport"
 KYVERNO = "kyverno.PolicyReport"
 
+pytestmark = pytest.mark.e2e
+
 
 # ── HTTP + drain helpers ─────────────────────────────────────────
 
