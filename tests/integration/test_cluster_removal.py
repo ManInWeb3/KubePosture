@@ -12,7 +12,6 @@ management command, and `ClusterDeleteView`.
 """
 from __future__ import annotations
 
-from datetime import timedelta
 from io import StringIO
 
 import pytest
@@ -26,8 +25,8 @@ from core.constants import (
     AliasKind,
     Category,
     FindingActionType,
-    IngestQueueStatus,
     ImportMarkState,
+    IngestQueueStatus,
     Severity,
     SnapshotScope,
     Source,
@@ -37,8 +36,8 @@ from core.models import (
     Finding,
     FindingAction,
     Image,
-    IngestQueue,
     ImportMark,
+    IngestQueue,
     Namespace,
     ScanInconsistency,
     Snapshot,
@@ -48,7 +47,6 @@ from core.models import (
     WorkloadSignal,
 )
 from core.services.cluster_removal import remove_cluster
-
 
 # ── Fixtures ──────────────────────────────────────────────────────
 

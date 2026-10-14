@@ -8,7 +8,6 @@ from __future__ import annotations
 from core.constants import Category, Severity, Source
 from core.parsers import trivy
 
-
 # ── Helpers ──────────────────────────────────────────────────────
 
 

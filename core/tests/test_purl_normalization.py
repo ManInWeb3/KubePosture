@@ -25,7 +25,6 @@ from core.purl import (
 from core.services.components import component_detail, search_by_purls
 from core.services.supply_chain_matcher import match_iocs_to_components
 
-
 # ── Unit: normalize_purl ────────────────────────────────────────
 
 

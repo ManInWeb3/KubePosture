@@ -17,7 +17,6 @@ from django.urls import reverse
 
 from core.api.permissions import IsAdmin, IsSecEngineer, IsViewer, _has_role, require_role
 
-
 # ── Fixtures ──────────────────────────────────────────────────────
 
 
@@ -107,8 +106,8 @@ def test_require_role_redirects_anonymous(client, db):
 
 
 def test_require_role_403_for_insufficient_role(db, groups):
-    from django.test import RequestFactory
     from django.core.exceptions import PermissionDenied
+    from django.test import RequestFactory
 
     rf = RequestFactory()
     request = rf.get("/x/")
@@ -192,7 +191,7 @@ def test_login_url_renders(client, db):
 
 
 def test_login_redirects_to_inventory_on_success(client, db, groups):
-    user = _make_user("login_test", role="admin", groups=groups)
+    _make_user("login_test", role="admin", groups=groups)
     response = client.post(reverse("login"), {"username": "login_test", "password": "x"})
     assert response.status_code == 302
     assert response["Location"] == "/"

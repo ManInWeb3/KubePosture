@@ -44,7 +44,6 @@ from core.models import (
     WorkloadSignal,
 )
 
-
 _RUNTIME_TABLES = [
     Finding,
     FindingAction,

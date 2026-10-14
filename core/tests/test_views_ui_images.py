@@ -1,6 +1,7 @@
 """Quick integration test for the /images/ view rendering."""
-import pytest
 from datetime import timedelta
+
+import pytest
 from django.contrib.auth.models import User
 from django.urls import reverse
 from django.utils import timezone

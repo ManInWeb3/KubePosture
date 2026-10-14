@@ -14,9 +14,6 @@ import importlib
 import pytest
 from django.apps import apps as django_apps
 
-from core.constants import Environment
-
-
 # Load the migration module so we can call _forwards directly.
 migration = importlib.import_module("core.migrations.0006_normalize_stored_purls")
 

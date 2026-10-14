@@ -52,8 +52,10 @@ def test_every_importer_pod_template_gets_the_shared_env_and_tmp_volume():
 
 def test_central_chart_carries_the_bundle_settings():
     env = _values(CENTRAL)["app"]["env"]
-    for key in ("IMPORT_BUNDLE_MAX_COMPRESSED_BYTES", "IMPORT_BUNDLE_MAX_UNCOMPRESSED_BYTES",
-                "IMPORT_COVERAGE_ALERT_RATIO", "IMPORT_KEEP_FAILED_PAYLOADS", "DATA_UPLOAD_MAX_MEMORY_SIZE"):
+    for key in (
+        "IMPORT_BUNDLE_MAX_COMPRESSED_BYTES", "IMPORT_BUNDLE_MAX_UNCOMPRESSED_BYTES",
+        "IMPORT_COVERAGE_ALERT_RATIO", "IMPORT_KEEP_FAILED_PAYLOADS", "DATA_UPLOAD_MAX_MEMORY_SIZE",
+    ):
         assert key in env, key
     assert "INGEST_QUEUE_MAX_ATTEMPTS" not in env, "dead setting"
     assert env["IMPORT_KEEP_FAILED_PAYLOADS"] == "false", "debug flag must default off"

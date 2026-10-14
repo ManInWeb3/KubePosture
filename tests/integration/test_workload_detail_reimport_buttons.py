@@ -23,7 +23,6 @@ from core.models import (
     WorkloadImageObservation,
 )
 
-
 # ── Fixtures ──────────────────────────────────────────────────────
 
 

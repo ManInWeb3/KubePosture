@@ -26,7 +26,6 @@ from core.models import (
     Workload,
 )
 
-
 # ── Cluster ──────────────────────────────────────────────────────
 
 

@@ -21,7 +21,6 @@ from core.models import (
 )
 from core.purl import normalize_purl
 
-
 # ── List view (grouped by purl) -----------------------------------
 
 _LIST_SORTS = {

@@ -9,7 +9,7 @@ import pytest
 from django.contrib.auth.models import User
 from django.urls import reverse
 
-from core.constants import Environment, PriorityBand
+from core.constants import Environment
 from core.models import Cluster, Namespace, Workload
 from core.services import hardening_preview
 

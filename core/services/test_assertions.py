@@ -16,8 +16,8 @@ from core.models import (
     Cluster,
     EpssScore,
     Finding,
-    ImportMark,
     Image,
+    ImportMark,
     IngestQueue,
     KevEntry,
     Namespace,
@@ -28,7 +28,6 @@ from core.models import (
     WorkloadImageObservation,
     WorkloadSignal,
 )
-
 
 # ── Label normalisers --------------------------------------------
 

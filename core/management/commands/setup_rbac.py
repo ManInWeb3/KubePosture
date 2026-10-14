@@ -17,7 +17,6 @@ Idempotent. Re-run after migrations or whenever you reset the DB.
 from django.contrib.auth.models import Group
 from django.core.management.base import BaseCommand
 
-
 _ROLES = ["viewer", "SecEngineer", "admin"]
 
 

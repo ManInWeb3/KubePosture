@@ -23,7 +23,6 @@ from core.models import (
 from core.services.dedup import compute_hash
 from core.services.supply_chain_matcher import match_iocs_to_components
 
-
 # ── Fixtures ────────────────────────────────────────────────────
 
 

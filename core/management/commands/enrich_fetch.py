@@ -14,7 +14,6 @@ from core.services.enrichment import (
     fetch_osv_supply_chain,
 )
 
-
 _FETCHERS = {
     "epss": fetch_epss,
     "kev": fetch_kev,

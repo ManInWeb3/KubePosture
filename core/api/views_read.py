@@ -40,7 +40,6 @@ from core.api.serializers import (
 from core.models import Cluster, Finding, Image, Namespace, Workload
 from core.services.components import search_by_purls
 
-
 # ── Cluster ──────────────────────────────────────────────────────
 
 

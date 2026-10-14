@@ -21,7 +21,6 @@ from core.services.pruning import (
     prune_stale_sbom_components,
 )
 
-
 # (option_name, fetcher, days_kwarg, days_default)
 _TARGETS = [
     ("ingest_queue",        prune_ingest_queue,           "ingest_queue_days",         14),

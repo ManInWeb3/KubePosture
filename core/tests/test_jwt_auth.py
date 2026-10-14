@@ -12,7 +12,6 @@ from django.test import override_settings
 
 from core.middleware import jwt_auth
 
-
 # ── Test keypair + fake JWKS client ─────────────────────────────
 
 

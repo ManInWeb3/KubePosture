@@ -70,7 +70,7 @@ def test_vuln_claimable_once_inventory_is_done(cluster):
 def test_processing_inventory_blocks_vuln(cluster):
     """An inventory item mid-flight (status='processing') still blocks
     non-inventory items in the same import."""
-    inv = _seed_mark_and_queue(
+    _seed_mark_and_queue(
         cluster, "inventory", "imp-3", status=IngestQueueStatus.PROCESSING.value
     )
     vul = _seed_mark_and_queue(cluster, "trivy.VulnerabilityReport", "imp-3")
@@ -88,7 +88,7 @@ def test_failed_inventory_keeps_gate_closed(cluster):
     inv = _seed_mark_and_queue(cluster, "inventory", "imp-4")
     inv.status = IngestQueueStatus.FAILED.value
     inv.save(update_fields=["status"])
-    vul = _seed_mark_and_queue(cluster, "trivy.VulnerabilityReport", "imp-4")
+    _seed_mark_and_queue(cluster, "trivy.VulnerabilityReport", "imp-4")
 
     claimed = claim_batch(limit=10)
     assert claimed == [], "failed inventory must not unblock the gate"

@@ -26,7 +26,6 @@ from core.constants import (
 )
 from core.models import Cluster, Namespace, Snapshot, Workload
 
-
 _SEVERITY_KEYS = [s.value for s in Severity]
 _PRIORITY_KEYS = [p.value for p in PriorityBand]
 
