@@ -161,10 +161,8 @@ app:
     # stops gating new ones before it is discarded.
     IMPORT_LOCK_TIMEOUT_SECONDS: "1200"
 
-# Compliance framework loading is not implemented in this milestone.
-# The fixtures/ directory holds sample YAMLs but no `load_frameworks`
-# command exists yet; the setup job will only seed RBAC + the default
-# admin user.
+# Compliance framework loading is not implemented; the setup job only
+# seeds RBAC + the default admin user.
 
 # ── Web Deployment ──────────────────────────────────────────────
 
@@ -277,18 +275,23 @@ worker:
   # -- Pods per job. claim_batch's SKIP LOCKED partitions work safely across
   # them (the k8s "work queue" Job pattern — no `completions` is set, so
   # the Job just runs `parallelism` pods to completion against the shared
-  # queue). Raised from 1 -> 4: cluster-wide capacity is not the
-  # constraint (namespace requests ~5 cores against ~315 free). Raising
+  # queue). Held at 1 for now — one worker at a time until the
+  # non-blocking reap claim has proven itself in prod; 4 was fine
+  # capacity-wise (namespace requests ~5 cores against ~315 free). Raising
   # this alone didn't fix throughput because claim_batch's abandon-sweep
   # was missing SKIP LOCKED (fixed in core/services/queue.py) — that one
   # unprotected statement, run first on every drain_once iteration, could
   # block an entire pod on a lock held by an unrelated in-flight worker.
-  parallelism: 4
+  parallelism: 1
   # @schema
   # type: integer
   # minimum: 1
   # @schema
-  activeDeadlineSeconds: 300
+  # -- Raised from 300: a large cluster's inventory item plus its reap can
+  # take tens of minutes; a run killed mid-reap rolled the reap back and
+  # re-did it on the next tick. Must stay below queue.STALE_PROCESSING_SECONDS
+  # (2100) so a still-running item is never reclaimed by another pod.
+  activeDeadlineSeconds: 1800
   # @schema
   # $ref: "#/definitions/command"
   # @schema
@@ -298,7 +301,12 @@ worker:
   # be working on). The run ends when the queue is empty or everything
   # left is held by another pod, gated behind its import's inventory, or
   # not committed yet; the next tick picks those up. --max-iterations
-  # caps the passes per run (0 = no cap). Each item commits
+  # caps the passes per run (0 = no cap); --max-seconds stops starting
+  # new passes (and skips the final reap sweep) once that much wall time
+  # is spent — keep it below activeDeadlineSeconds with headroom for one
+  # slow item + its reap (1500 under 1800 here), so a run exits instead of being killed mid-reap
+  # (which rolls the reap transaction back; the post-commit priority
+  # recompute keeps the chunks it committed). Each item commits
   # independently (see worker._process_one), so a pod hitting
   # activeDeadlineSeconds or its memory limit keeps what it finished and
   # holds at most --limit rows, reclaimed after STALE_PROCESSING_SECONDS.
@@ -310,6 +318,8 @@ worker:
     - "1"
     - --max-iterations
     - "0"
+    - --max-seconds
+    - "1500"
   # @schema
   # $ref: "#/definitions/resources"
   # @schema

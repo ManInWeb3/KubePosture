@@ -18,6 +18,11 @@ class Command(KubePostureCommand):
             help="Cap on passes per run; 0 = run until nothing is claimable.",
         )
         parser.add_argument(
+            "--max-seconds", type=float, default=0,
+            help="Wall-clock budget; no new pass starts (and the final reap sweep is "
+                 "skipped) once spent. 0 = no budget. Keep below activeDeadlineSeconds.",
+        )
+        parser.add_argument(
             "--once", action="store_true",
             help="Run a single drain_once batch (default: loop until empty).",
         )
@@ -28,5 +33,6 @@ class Command(KubePostureCommand):
         else:
             totals = worker.drain_until_empty(
                 limit=options["limit"], max_iterations=options["max_iterations"],
+                max_seconds=options["max_seconds"],
             )
         self.stdout.write(self.style.SUCCESS(str(totals)))

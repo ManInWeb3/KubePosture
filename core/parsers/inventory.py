@@ -35,7 +35,6 @@ log = logging.getLogger("core.inventory_parser")
 # in. persist() is one @transaction.atomic for the whole snapshot; for a
 # large/busy cluster this is the only trace of how far it got if a pod
 # dies mid-loop with nothing else logged until the call returns.
-_PROGRESS_LOG_EVERY = 250
 
 CONTROLLER_KINDS_TO_WORKLOAD = {
     "Deployment": WorkloadKind.DEPLOYMENT.value,
@@ -66,6 +65,17 @@ class _InventoryStaging:
     workloads: dict[tuple[str, str, str], Workload] = field(default_factory=dict)
     # (namespace, alias_kind, alias_name) → (target_kind, target_name)
     aliases: dict[tuple[str, str, str], tuple[str, str]] = field(default_factory=dict)
+
+    # Previous cycle's WorkloadAlias rows, preloaded once by persist():
+    # (namespace, alias_kind, alias_name) → (target_ns, target_kind, target_name).
+    # The fallback for `_resolve_alias` when an owner aged out mid-cycle.
+    db_aliases: dict[tuple[str, str, str], tuple[str, str, str]] = field(default_factory=dict)
+
+    # Owned Pods, keyed by (namespace, owner_kind, owner_name) — resolved
+    # to their top-level workload in the persist pass, once the alias
+    # chain is complete.
+    _pending_pod_observations: dict[tuple[str, str, str], list] = field(default_factory=dict)
+    _pending_pod_signals: dict[tuple[str, str, str], set[str]] = field(default_factory=dict)
 
     # Service / Ingress data for exposure derivation.
     services: list[dict] = field(default_factory=list)
@@ -200,16 +210,23 @@ def _pod_security_signals(pod_spec: dict | None) -> set[str]:
         return found
     if pod_spec.get("hostNetwork") or pod_spec.get("hostPID") or pod_spec.get("hostIPC"):
         found.add("kyverno:disallow-host-namespaces")
+    # Kyverno semantics (and the registry text): the three "require"
+    # checks fail when the field is false OR unset — a container with no
+    # securityContext at all is the common case and must still signal.
+    # `runAsNonRoot` may be set at pod level and inherited.
+    pod_ctx = pod_spec.get("securityContext") or {}
     for c, _init_container in _containers(pod_spec):
         ctx = c.get("securityContext") or {}
         if ctx.get("privileged") is True:
             found.add("kyverno:disallow-privileged-containers")
-        if ctx.get("allowPrivilegeEscalation") is True:
+        if ctx.get("allowPrivilegeEscalation") is not False:
             found.add("kyverno:disallow-privilege-escalation")
         run_as_non_root = ctx.get("runAsNonRoot")
-        if run_as_non_root is False:
+        if run_as_non_root is None:
+            run_as_non_root = pod_ctx.get("runAsNonRoot")
+        if run_as_non_root is not True:
             found.add("kyverno:require-run-as-nonroot")
-        if ctx.get("readOnlyRootFilesystem") is False:
+        if ctx.get("readOnlyRootFilesystem") is not True:
             found.add("kyverno:require-ro-rootfs")
     for v in pod_spec.get("volumes") or []:
         if v.get("hostPath"):
@@ -221,7 +238,10 @@ def _pod_security_signals(pod_spec: dict | None) -> set[str]:
 # ── Service / Ingress → publicly_exposed derivation ---------------
 
 _INTERNAL_LB_ANNOTATIONS = {
+    # Legacy in-tree AWS controller.
     "service.beta.kubernetes.io/aws-load-balancer-internal": "true",
+    # AWS Load Balancer Controller (the current EKS default).
+    "service.beta.kubernetes.io/aws-load-balancer-scheme": "internal",
     "networking.gke.io/load-balancer-type": "Internal",
     "service.beta.kubernetes.io/azure-load-balancer-internal": "true",
 }
@@ -318,16 +338,9 @@ def _ingest_namespace(item: dict, st: _InventoryStaging) -> None:
 def _ingest_controller(item: dict, st: _InventoryStaging) -> None:
     """Upsert a top-level Workload from a controller manifest."""
     api_kind = item.get("kind") or ""
+    # `_DISPATCH` routes ReplicaSets, Pods and owned Jobs elsewhere; only
+    # top-level controllers reach this point.
     if api_kind not in CONTROLLER_KINDS_TO_WORKLOAD:
-        return
-    if api_kind == "ReplicaSet":
-        # ReplicaSets are alias targets, not workloads.
-        return
-    if api_kind == "Pod":
-        # Pod handling is gated on ownerReferences — done in _ingest_pod.
-        return
-    if api_kind == "Job" and _controller_owner(item) is not None:
-        # Owned Jobs (CronJob children) are aliases, not workloads.
         return
 
     name = _name(item)
@@ -356,7 +369,6 @@ def _ingest_controller(item: dict, st: _InventoryStaging) -> None:
         labels=labels,
     )
     # Stash the namespace string for the persist-pass.
-    workload._namespace_name = namespace  # type: ignore[attr-defined]
     st.workloads[key] = workload
 
     sigs = _pod_security_signals(pod_spec)
@@ -410,7 +422,6 @@ def _ingest_pod(item: dict, st: _InventoryStaging) -> None:
             replicas=None,
             labels=labels,
         )
-        workload._namespace_name = namespace  # type: ignore[attr-defined]
         key = (namespace, WorkloadKind.POD.value, name)
         st.workloads[key] = workload
 
@@ -432,7 +443,7 @@ def _ingest_pod(item: dict, st: _InventoryStaging) -> None:
     # not be fully built yet).
     spec_signals = _pod_security_signals(spec)
 
-    pending = st._pending_pod_observations.setdefault(  # type: ignore[attr-defined]
+    pending = st._pending_pod_observations.setdefault(
         (namespace, owner_ref.get("kind"), owner_ref.get("name")),
         [],
     )
@@ -446,7 +457,7 @@ def _ingest_pod(item: dict, st: _InventoryStaging) -> None:
 
     # PodSpec-level signals attach to the owning workload too.
     if spec_signals:
-        st._pending_pod_signals.setdefault(  # type: ignore[attr-defined]
+        st._pending_pod_signals.setdefault(
             (namespace, owner_ref.get("kind"), owner_ref.get("name")),
             set(),
         ).update(spec_signals)
@@ -520,8 +531,6 @@ _DISPATCH = {
 def parse_envelope(payload: dict, cluster: Cluster) -> _InventoryStaging:
     """Parse one inventory payload (envelope) into a staging object."""
     st = _InventoryStaging(cluster=cluster)
-    st._pending_pod_observations = {}  # type: ignore[attr-defined]
-    st._pending_pod_signals = {}  # type: ignore[attr-defined]
     st.cluster_meta = dict(payload.get("cluster_meta") or {})
 
     items = payload.get("items") or []
@@ -547,14 +556,14 @@ def parse_envelope(payload: dict, cluster: Cluster) -> _InventoryStaging:
 def _resolve_alias(
     st: _InventoryStaging, namespace: str, kind: str, name: str
 ) -> tuple[str, str] | None:
-    """Walk the alias chain (in-memory + DB) to a top-level Workload.
+    """Walk the alias chain (this cycle's staging, then the previous
+    cycle's rows in `st.db_aliases`) to a top-level Workload.
 
-    The DB fallback handles the case where a Pod's owning Job has aged
-    out of the inventory mid-cycle but the alias row from the previous
-    cycle still resolves to the parent CronJob.
+    The previous-cycle fallback handles the case where a Pod's owning
+    Job has aged out of the inventory mid-cycle but the alias row from
+    the previous cycle still resolves to the parent CronJob.
     """
-    cluster = st.cluster
-    ns_obj = st.namespaces.get(namespace)
+    known_namespace = namespace in st.namespaces
     seen: set[tuple[str, str, str]] = set()
     cur_ns, cur_kind, cur_name = namespace, kind, name
     while True:
@@ -567,24 +576,14 @@ def _resolve_alias(
         if wk_self and (cur_ns, wk_self, cur_name) in st.workloads:
             return wk_self, cur_name
 
-        target = st.aliases.get((cur_ns, cur_kind, cur_name))
-        if target is None and ns_obj is not None:
-            row = (
-                WorkloadAlias.objects
-                .filter(
-                    cluster=cluster,
-                    namespace=ns_obj,
-                    alias_kind=cur_kind,
-                    alias_name=cur_name,
-                )
-                .select_related("target_workload")
-                .first()
-            )
-            if row is not None:
-                tw = row.target_workload
-                if tw and (tw.namespace.name, tw.kind, tw.name) in st.workloads:
-                    return tw.kind, tw.name
-                target = (tw.kind, tw.name) if tw else None
+        target = st.aliases.get(cur)
+        if target is None and known_namespace:
+            previous = st.db_aliases.get(cur)
+            if previous is not None:
+                target_ns, target_kind, target_name = previous
+                if (target_ns, target_kind, target_name) in st.workloads:
+                    return target_kind, target_name
+                target = (target_kind, target_name)
 
         if target is None:
             return None
@@ -651,6 +650,12 @@ def _compute_nodeport(
     return False
 
 
+_SENSITIVE_KEY = "posture.io/contains-sensitive-data"
+_MISSING_NETPOL = "kp:missing-networkpolicy"
+# Rows per bulk INSERT / UPDATE statement.
+_BULK_BATCH = 500
+
+
 @transaction.atomic
 def persist(st: _InventoryStaging, mark_started_at) -> dict:
     """Write the staged inventory to the DB, return summary counters.
@@ -658,317 +663,32 @@ def persist(st: _InventoryStaging, mark_started_at) -> dict:
     `mark_started_at` is the ImportMark.started_at for this cycle's
     inventory kind. Used to bump `Workload.last_inventory_at` so the
     reap's diff fires correctly.
+
+    One transaction, one pass per model: each phase loads the cluster's
+    existing rows for its model in a single query, diffs them against
+    the staging in memory, then writes with `bulk_create` /
+    `bulk_update` — so the cost is a fixed ~20 statements rather than
+    one lookup plus one save per namespace, workload, alias, image,
+    observation and signal (core/tests/parsers/test_inventory_persist_bulk.py
+    pins that). The row-level contract of the old per-row saves is kept:
+    `last_seen_at` is bumped on every row the snapshot touched (and only
+    those), `first_seen_at` never changes, manual admin flags win.
+
+    The cluster row is written first, as the reaper does, so the two
+    never take the `core_cluster` / `core_workload` locks in opposite
+    orders; with `update_fields` it only ever writes the columns the
+    inventory owns.
     """
-    # 1. Cluster metadata --------------------------------------------------
-    meta = st.cluster_meta or {}
     cluster = st.cluster
-    if (v := meta.get("k8s_version")) and cluster.k8s_version != v:
-        cluster.k8s_version = v
-    if (p := meta.get("provider")) and not cluster.provider_is_manual and cluster.provider != p:
-        cluster.provider = p
-    if (r := meta.get("region")) is not None and not cluster.region_is_manual and cluster.region != r:
-        cluster.region = r
-    if not cluster.environment_is_manual:
-        env = _detect_environment_from_name(cluster.name)
-        if env and cluster.environment != env:
-            cluster.environment = env
-    cluster.last_seen_at = timezone.now()
-    cluster.save()
-
-    # 2. Namespaces -------------------------------------------------------
-    seen_namespaces: set[str] = set()
-    for ns_name, labels in st.namespace_labels.items():
-        seen_namespaces.add(ns_name)
-        annotations = st.namespace_annotations.get(ns_name, {})
-        defaults = {
-            "labels": labels,
-            "annotations": annotations,
-            "active": True,
-            "deactivated_at": None,
-        }
-        # Auto-derive contains_sensitive_data from a label, but skip
-        # when the admin has manually set the flag on an existing row.
-        existing = Namespace.objects.filter(cluster=cluster, name=ns_name).first()
-        sens_label = (
-            labels.get("posture.io/contains-sensitive-data")
-            or annotations.get("posture.io/contains-sensitive-data")
-        )
-        if sens_label is not None and not (existing and existing.sensitive_is_manual):
-            defaults["contains_sensitive_data"] = str(sens_label).lower() == "true"
-        ns, _ = Namespace.objects.update_or_create(
-            cluster=cluster,
-            name=ns_name,
-            defaults=defaults,
-        )
-        st.namespaces[ns_name] = ns
-
-    # Deactivate any namespace not seen in this snapshot. Every committed
-    # inventory is a complete snapshot (the bundle protocol guarantees it),
-    # so "absent" means "gone".
-    for ns in Namespace.objects.filter(cluster=cluster, active=True).exclude(name__in=seen_namespaces):
-        ns.active = False
-        ns.deactivated_at = timezone.now()
-        ns.save(update_fields=["active", "deactivated_at"])
-
-    # 3. Implicit Namespaces (referenced by workloads but no Namespace item).
-    for (ns_name, _, _) in list(st.workloads.keys()):
-        if ns_name not in st.namespaces:
-            ns, _ = Namespace.objects.get_or_create(cluster=cluster, name=ns_name)
-            st.namespaces[ns_name] = ns
-
-    # 4. Workloads -------------------------------------------------------
-    persisted_workloads: dict[tuple[str, str, str], Workload] = {}
-    _workloads_done = 0
-    for key, w in st.workloads.items():
-        ns_name, wkind, wname = key
-        ns = st.namespaces.get(ns_name)
-        if ns is None:
-            continue
-
-        # Derive publicly_exposed from Services/Ingresses.
-        labels = w.labels or {}
-        has_lb, has_ing = _compute_exposure_breakdown(labels, ns_name, st)
-        publicly_exposed = has_lb or has_ing
-        if has_lb:
-            st.derived_signals.setdefault(key, set()).add("kp:has-external-lb")
-        if has_ing:
-            st.derived_signals.setdefault(key, set()).add("kp:has-external-ingress")
-        nodeport = _compute_nodeport(labels, ns_name, st)
-        if nodeport:
-            st.derived_signals.setdefault(key, set()).add("kp:has-nodeport-service")
-
-        existing = Workload.objects.filter(
-            cluster=cluster, namespace=ns, kind=wkind, name=wname
-        ).first()
-        defaults = {
-            "service_account": w.service_account or "default",
-            "replicas": w.replicas,
-            "labels": labels,
-            # A workload scaled to zero (Deployment/StatefulSet with
-            # replicas==0) is in inventory but runs no pods — not
-            # deployed. replicas is None for DaemonSets/Pods/CronJobs/
-            # Jobs (no replica count) and None != 0, so those stay
-            # deployed. The reap re-applies the same rule as the final
-            # authority (reap_inventory_diff).
-            "deployed": w.replicas != 0,
-            "last_inventory_at": mark_started_at,
-        }
-        # Honour manual override.
-        if existing and existing.publicly_exposed_is_manual:
-            pass
-        else:
-            defaults["publicly_exposed"] = publicly_exposed
-
-        if existing:
-            # Reuses the row even if it had gone deployed=False for a
-            # while (e.g. deleted then redeployed later) — `first_seen_at`
-            # is deliberately absent from `defaults` above so it survives
-            # the gap. Intentional: see Workload.first_seen_at's help_text.
-            for k, v in defaults.items():
-                setattr(existing, k, v)
-            existing.save()
-            persisted_workloads[key] = existing
-        else:
-            new = Workload.objects.create(
-                cluster=cluster,
-                namespace=ns,
-                kind=wkind,
-                name=wname,
-                **defaults,
-            )
-            persisted_workloads[key] = new
-
-        _workloads_done += 1
-        if _workloads_done % _PROGRESS_LOG_EVERY == 0:
-            log.debug(
-                "inventory.persist.workloads_progress",
-                extra={
-                    "cluster": cluster.name,
-                    "processed": _workloads_done,
-                    "total": len(st.workloads),
-                },
-            )
-    st.workloads = persisted_workloads
-
-    # 5. WorkloadAlias — persist a DIRECT (alias_kind, alias_name) -> final
-    # top-level-workload mapping, resolving the full ownership chain now
-    # (Pod->ReplicaSet->Deployment, Pod->Job->CronJob) via the same
-    # `_resolve_alias` walker used for pending pod observations below —
-    # rather than only ever recording the immediate owner. Recording only
-    # the immediate owner (e.g. Pod -> ReplicaSet) is useless for
-    # `ingest.py`'s `_resolve_workload`, which does a single DB lookup
-    # with no chain-walking of its own: a Pod-scoped Kyverno PolicyReport
-    # result would never resolve to its Deployment/CronJob for the two
-    # most common ownership topologies otherwise.
-    seen_alias_keys: set[tuple[int, int, str, str]] = set()
-    for (ns_name, alias_kind, alias_name) in list(st.aliases.keys()):
-        ns = st.namespaces.get(ns_name)
-        if ns is None:
-            continue
-        resolved = _resolve_alias(st, ns_name, alias_kind, alias_name)
-        if resolved is None:
-            continue
-        wk, wname = resolved
-        target = persisted_workloads.get((ns_name, wk, wname))
-        if target is None:
-            continue
-        WorkloadAlias.objects.update_or_create(
-            cluster=cluster,
-            namespace=ns,
-            alias_kind=alias_kind,
-            alias_name=alias_name,
-            defaults={"target_workload": target},
-        )
-        seen_alias_keys.add((cluster.id, ns.id, alias_kind, alias_name))
-
-    # 6. Pending pod observations / signals — resolve via alias chain.
-    # Done BEFORE alias deletion so resolution can use both the
-    # current-cycle staging dict AND the previous-cycle alias rows
-    # still in the DB (real clusters can have a Pod whose owning
-    # ReplicaSet/Job ages out of `kubectl get` mid-cycle).
-    pending_obs = getattr(st, "_pending_pod_observations", {})
-    for (ns_name, owner_kind, owner_name), obs in pending_obs.items():
-        resolved = _resolve_alias(st, ns_name, owner_kind, owner_name)
-        if resolved is None:
-            continue
-        wk, wname = resolved
-        target_key = (ns_name, wk, wname)
-        st.image_observations.setdefault(target_key, []).extend(obs)
-
-    pending_sigs = getattr(st, "_pending_pod_signals", {})
-    for (ns_name, owner_kind, owner_name), sigs in pending_sigs.items():
-        resolved = _resolve_alias(st, ns_name, owner_kind, owner_name)
-        if resolved is None:
-            continue
-        wk, wname = resolved
-        st.derived_signals.setdefault((ns_name, wk, wname), set()).update(sigs)
-
-    # Now that pod-obs resolution is done, prune stale aliases.
-    existing = WorkloadAlias.objects.filter(cluster=cluster).values_list(
-        "id", "namespace_id", "alias_kind", "alias_name"
-    )
-    to_delete = [
-        row_id for (row_id, ns_id, ak, an) in existing
-        if (cluster.id, ns_id, ak, an) not in seen_alias_keys
-    ]
-    if to_delete:
-        WorkloadAlias.objects.filter(id__in=to_delete).delete()
-
-    # 7. Images + WorkloadImageObservation -------------------------------
-    image_cache: dict[str, Image] = {}
-
-    def _get_or_make_image(ref: str, digest: str) -> Image | None:
-        if not digest:
-            # No digest — we can still build an Image keyed by ref if
-            # absolutely necessary, but the schema requires a digest.
-            # Skip unanchored observations.
-            return None
-        cached = image_cache.get(digest)
-        if cached:
-            cached.ref = ref or cached.ref
-            return cached
-        registry, repo = _registry_repo(ref) if ref else ("", "")
-        img, _ = Image.objects.update_or_create(
-            digest=digest,
-            defaults={
-                "ref": ref or "",
-                "registry": registry,
-                "repository": repo,
-            },
-        )
-        image_cache[digest] = img
-        return img
-
-    for key, obs_list in st.image_observations.items():
-        wl = persisted_workloads.get(key)
-        if wl is None:
-            continue
-        for ref, digest, cname, init_container in obs_list:
-            img = _get_or_make_image(ref, digest)
-            if img is None:
-                continue
-            # update_or_create refreshes init_container + last_seen_at
-            # on every cycle. currently_deployed is intentionally NOT
-            # in defaults — only the inventory reaper has authority to
-            # flip it at end of a complete cycle (mirrors Workload.deployed).
-            WorkloadImageObservation.objects.update_or_create(
-                workload=wl,
-                image=img,
-                container_name=cname,
-                defaults={
-                    "init_container": init_container,
-                    "last_seen_at": timezone.now(),
-                },
-            )
-
-    # 8. WorkloadSignal upserts -----------------------------------------
-    for key, signal_ids in st.derived_signals.items():
-        wl = persisted_workloads.get(key)
-        if wl is None:
-            continue
-        for sig in signal_ids:
-            if sig not in SIGNALS:
-                continue
-            existing = WorkloadSignal.objects.filter(
-                workload=wl, signal_id=sig
-            ).first()
-            if existing:
-                existing.currently_active = True
-                existing.save(update_fields=["currently_active", "last_seen_at"])
-            else:
-                WorkloadSignal.objects.create(
-                    workload=wl,
-                    signal_id=sig,
-                    currently_active=True,
-                )
-
-    # 9. `kp:missing-networkpolicy` per namespace.
-    # Fired by the inventory parser when a namespace has zero
-    # NetworkPolicy resources observed this cycle. The spec
-    # (dev_docs/06-signals.md) lists this under Kyverno but for v1 we
-    # also derive it from inventory so the signal fires regardless of
-    # whether a Kyverno custom policy is installed.
-    for ns_name, ns in st.namespaces.items():
-        has_netpol = ns_name in st.namespaces_with_netpol
-        for key, wl in persisted_workloads.items():
-            if key[0] != ns_name:
-                continue
-            existing = WorkloadSignal.objects.filter(
-                workload=wl, signal_id="kp:missing-networkpolicy"
-            ).first()
-            if not has_netpol:
-                if existing:
-                    existing.currently_active = True
-                    existing.save(update_fields=["currently_active", "last_seen_at"])
-                else:
-                    WorkloadSignal.objects.create(
-                        workload=wl,
-                        signal_id="kp:missing-networkpolicy",
-                        currently_active=True,
-                    )
-            else:
-                if existing and existing.currently_active:
-                    existing.currently_active = False
-                    existing.save(update_fields=["currently_active", "last_seen_at"])
-
-    # 10. Namespace internet_exposed rollup ------------------------------
-    for ns_name, ns in st.namespaces.items():
-        if ns.exposure_is_manual:
-            continue
-        # Scaled-to-zero workloads (deployed=False) have no endpoints
-        # behind their LB/Ingress, so they don't make the namespace
-        # internet-exposed.
-        rollup = any(
-            wl.publicly_exposed
-            for key, wl in persisted_workloads.items()
-            if key[0] == ns_name and wl.deployed
-        )
-        if ns.internet_exposed != rollup:
-            ns.internet_exposed = rollup
-            ns.save(update_fields=["internet_exposed"])
+    _persist_cluster_meta(st)
+    seen_namespaces = _persist_namespaces(st)
+    st.workloads = _persist_workloads(st, mark_started_at)
+    _persist_aliases(st)
+    _persist_images_and_observations(st)
+    _persist_signals(st)
+    _rollup_namespace_exposure(st)
 
     if st.unknown_kind_skipped > 0:
-        import logging
         logging.getLogger("core.inventory").warning(
             "inventory.unknown_kind_skipped count=%d cluster=%s — items "
             "had no `kind` field; likely an importer bug "
@@ -978,10 +698,346 @@ def persist(st: _InventoryStaging, mark_started_at) -> dict:
 
     return {
         "namespaces": len(seen_namespaces),
-        "workloads": len(persisted_workloads),
+        "workloads": len(st.workloads),
         "aliases": len(st.aliases),
         "unknown_kind_skipped": st.unknown_kind_skipped,
     }
+
+
+def _persist_cluster_meta(st: _InventoryStaging) -> None:
+    """Cluster columns the inventory owns, written with `update_fields`:
+    the worker loaded this Cluster before parsing, and a reap
+    (`last_complete_inventory_at`) or an admin (re-import request, manual
+    flags) may have committed to the row since — a full-row save would
+    silently roll those back."""
+    meta = st.cluster_meta or {}
+    cluster = st.cluster
+    fields = ["last_seen_at"]
+    if (v := meta.get("k8s_version")) and cluster.k8s_version != v:
+        cluster.k8s_version = v
+        fields.append("k8s_version")
+    if (p := meta.get("provider")) and not cluster.provider_is_manual and cluster.provider != p:
+        cluster.provider = p
+        fields.append("provider")
+    if (r := meta.get("region")) is not None and not cluster.region_is_manual and cluster.region != r:
+        cluster.region = r
+        fields.append("region")
+    if not cluster.environment_is_manual:
+        env = _detect_environment_from_name(cluster.name)
+        if env and cluster.environment != env:
+            cluster.environment = env
+            fields.append("environment")
+    cluster.last_seen_at = timezone.now()
+    cluster.save(update_fields=fields)
+
+
+def _persist_namespaces(st: _InventoryStaging) -> set[str]:
+    """Upsert the listed namespaces, create implicit ones (referenced by a
+    workload but not listed), deactivate the rest. Every committed
+    inventory is a complete snapshot (the bundle protocol guarantees it),
+    so "absent" means "gone". Fills `st.namespaces`; returns the listed
+    names."""
+    cluster = st.cluster
+    now = timezone.now()
+    existing = {ns.name: ns for ns in Namespace.objects.filter(cluster=cluster)}
+    seen = set(st.namespace_labels)
+    to_create: list[Namespace] = []
+    to_update: list[Namespace] = []
+    for ns_name, labels in st.namespace_labels.items():
+        annotations = st.namespace_annotations.get(ns_name, {})
+        sens_label = labels.get(_SENSITIVE_KEY) or annotations.get(_SENSITIVE_KEY)
+        ns = existing.get(ns_name)
+        if ns is None:
+            ns = Namespace(cluster=cluster, name=ns_name, labels=labels, annotations=annotations)
+            if sens_label is not None:
+                ns.contains_sensitive_data = str(sens_label).lower() == "true"
+            to_create.append(ns)
+        else:
+            ns.labels = labels
+            ns.annotations = annotations
+            ns.active = True
+            ns.deactivated_at = None
+            # Auto-derive contains_sensitive_data from the label, unless
+            # the admin has manually set the flag on the existing row.
+            if sens_label is not None and not ns.sensitive_is_manual:
+                ns.contains_sensitive_data = str(sens_label).lower() == "true"
+            ns.last_seen_at = now
+            to_update.append(ns)
+        st.namespaces[ns_name] = ns
+
+    for (ns_name, _, _) in st.workloads:
+        if ns_name in st.namespaces:
+            continue
+        ns = existing.get(ns_name)
+        if ns is None:
+            ns = Namespace(cluster=cluster, name=ns_name)
+            to_create.append(ns)
+        st.namespaces[ns_name] = ns
+
+    # A deactivation is not a sighting: `last_seen_at` stays put.
+    to_deactivate = [ns for name, ns in existing.items() if ns.active and name not in seen]
+    for ns in to_deactivate:
+        ns.active = False
+        ns.deactivated_at = now
+
+    Namespace.objects.bulk_create(to_create, batch_size=_BULK_BATCH)
+    Namespace.objects.bulk_update(
+        to_update,
+        ["labels", "annotations", "active", "deactivated_at", "contains_sensitive_data", "last_seen_at"],
+        batch_size=_BULK_BATCH,
+    )
+    Namespace.objects.bulk_update(to_deactivate, ["active", "deactivated_at"], batch_size=_BULK_BATCH)
+    return seen
+
+
+def _persist_workloads(st: _InventoryStaging, mark_started_at) -> dict[tuple[str, str, str], Workload]:
+    """Upsert one row per staged workload and derive its exposure from
+    the staged Services / Ingresses (recording the per-source signals in
+    `st.derived_signals`). Returns identity → persisted row."""
+    cluster = st.cluster
+    now = timezone.now()
+    existing = {(w.namespace_id, w.kind, w.name): w for w in Workload.objects.filter(cluster=cluster)}
+    out: dict[tuple[str, str, str], Workload] = {}
+    to_create: list[Workload] = []
+    to_update: list[Workload] = []
+    for key, staged in st.workloads.items():
+        ns_name, wkind, wname = key
+        ns = st.namespaces.get(ns_name)
+        if ns is None:
+            continue
+
+        labels = staged.labels or {}
+        has_lb, has_ing = _compute_exposure_breakdown(labels, ns_name, st)
+        if has_lb:
+            st.derived_signals.setdefault(key, set()).add("kp:has-external-lb")
+        if has_ing:
+            st.derived_signals.setdefault(key, set()).add("kp:has-external-ingress")
+        if _compute_nodeport(labels, ns_name, st):
+            st.derived_signals.setdefault(key, set()).add("kp:has-nodeport-service")
+        publicly_exposed = has_lb or has_ing
+
+        fields = {
+            "service_account": staged.service_account or "default",
+            "replicas": staged.replicas,
+            "labels": labels,
+            # A workload scaled to zero (Deployment/StatefulSet with
+            # replicas==0) is in inventory but runs no pods — not
+            # deployed. replicas is None for DaemonSets/Pods/CronJobs/
+            # Jobs (no replica count) and None != 0, so those stay
+            # deployed. The reap re-applies the same rule as the final
+            # authority (reap_inventory_diff).
+            "deployed": staged.replicas != 0,
+            "last_inventory_at": mark_started_at,
+        }
+        row = existing.get((ns.id, wkind, wname))
+        if row is None:
+            row = Workload(cluster=cluster, namespace=ns, kind=wkind, name=wname,
+                           publicly_exposed=publicly_exposed, **fields)
+            to_create.append(row)
+        else:
+            # Reuses the row even if it had gone deployed=False for a
+            # while (deleted then redeployed later) — `first_seen_at` is
+            # untouched so it survives the gap. Intentional: see
+            # Workload.first_seen_at's help_text.
+            for k, v in fields.items():
+                setattr(row, k, v)
+            if not row.publicly_exposed_is_manual:
+                row.publicly_exposed = publicly_exposed
+            row.last_seen_at = now
+            to_update.append(row)
+        out[key] = row
+
+    Workload.objects.bulk_create(to_create, batch_size=_BULK_BATCH)
+    Workload.objects.bulk_update(
+        to_update,
+        ["service_account", "replicas", "labels", "deployed", "last_inventory_at", "publicly_exposed",
+         "last_seen_at"],
+        batch_size=_BULK_BATCH,
+    )
+    return out
+
+
+def _persist_aliases(st: _InventoryStaging) -> None:
+    """Persist a DIRECT (alias_kind, alias_name) → top-level-workload
+    mapping, resolving the full ownership chain (Pod→ReplicaSet→Deployment,
+    Pod→Job→CronJob) via `_resolve_alias`. Recording only the immediate
+    owner would be useless for `ingest._resolve_workload`, which does one
+    lookup with no chain-walking of its own.
+
+    Pending pod observations / signals are resolved here too, BEFORE the
+    stale-alias prune, so resolution can use both this cycle's staging and
+    the previous cycle's rows (a Pod whose owning ReplicaSet/Job aged out
+    of `kubectl get` mid-cycle).
+    """
+    cluster = st.cluster
+    now = timezone.now()
+    existing: dict[tuple[int, str, str], tuple[int, int]] = {}   # (ns_id, kind, name) → (row id, target id)
+    st.db_aliases = {}
+    for row_id, ns_id, ns_name, ak, an, tw_id, t_ns, t_kind, t_name in (
+        WorkloadAlias.objects.filter(cluster=cluster).values_list(
+            "id", "namespace_id", "namespace__name", "alias_kind", "alias_name",
+            "target_workload_id", "target_workload__namespace__name", "target_workload__kind",
+            "target_workload__name",
+        )
+    ):
+        existing[(ns_id, ak, an)] = (row_id, tw_id)
+        st.db_aliases[(ns_name, ak, an)] = (t_ns, t_kind, t_name)
+
+    to_create: list[WorkloadAlias] = []
+    to_update: list[WorkloadAlias] = []
+    kept: set[int] = set()
+    for (ns_name, alias_kind, alias_name) in list(st.aliases):
+        ns = st.namespaces.get(ns_name)
+        if ns is None:
+            continue
+        resolved = _resolve_alias(st, ns_name, alias_kind, alias_name)
+        if resolved is None:
+            continue
+        target = st.workloads.get((ns_name, *resolved))
+        if target is None:
+            continue
+        found = existing.get((ns.id, alias_kind, alias_name))
+        if found is None:
+            to_create.append(WorkloadAlias(cluster=cluster, namespace=ns, alias_kind=alias_kind,
+                                           alias_name=alias_name, target_workload=target))
+        else:
+            row_id, _ = found
+            to_update.append(WorkloadAlias(id=row_id, target_workload=target, last_seen_at=now))
+            kept.add(row_id)
+
+    for (ns_name, owner_kind, owner_name), obs in st._pending_pod_observations.items():
+        resolved = _resolve_alias(st, ns_name, owner_kind, owner_name)
+        if resolved is not None:
+            st.image_observations.setdefault((ns_name, *resolved), []).extend(obs)
+    for (ns_name, owner_kind, owner_name), sigs in st._pending_pod_signals.items():
+        resolved = _resolve_alias(st, ns_name, owner_kind, owner_name)
+        if resolved is not None:
+            st.derived_signals.setdefault((ns_name, *resolved), set()).update(sigs)
+
+    WorkloadAlias.objects.bulk_create(to_create, batch_size=_BULK_BATCH)
+    WorkloadAlias.objects.bulk_update(to_update, ["target_workload", "last_seen_at"], batch_size=_BULK_BATCH)
+    stale = [row_id for row_id, _ in existing.values() if row_id not in kept]
+    if stale:
+        WorkloadAlias.objects.filter(id__in=stale).delete()
+
+
+def _persist_images_and_observations(st: _InventoryStaging) -> None:
+    """Images by digest (the first ref seen for a digest this cycle wins)
+    and one WorkloadImageObservation per (workload, image, container).
+    `init_container` and `last_seen_at` refresh every cycle;
+    `currently_deployed` is deliberately not written — only the inventory
+    reaper flips it, at the end of a complete cycle."""
+    now = timezone.now()
+    refs: dict[str, str] = {}                               # digest → ref
+    wanted: dict[tuple[int, str, str], bool] = {}           # (workload id, digest, container) → init
+    for key, obs_list in st.image_observations.items():
+        wl = st.workloads.get(key)
+        if wl is None:
+            continue
+        for ref, digest, cname, init_container in obs_list:
+            if not digest:
+                continue   # the schema requires a digest; skip unanchored observations
+            refs.setdefault(digest, ref)
+            wanted[(wl.id, digest, cname)] = init_container
+    if not refs:
+        return
+
+    images = {img.digest: img for img in Image.objects.filter(digest__in=list(refs))}
+    to_create: list[Image] = []
+    to_update: list[Image] = []
+    for digest, ref in refs.items():
+        registry, repo = _registry_repo(ref) if ref else ("", "")
+        img = images.get(digest)
+        if img is None:
+            img = Image(digest=digest, ref=ref or "", registry=registry, repository=repo)
+            images[digest] = img
+            to_create.append(img)
+        else:
+            img.ref = ref or ""
+            img.registry = registry
+            img.repository = repo
+            img.last_seen_at = now
+            to_update.append(img)
+    Image.objects.bulk_create(to_create, batch_size=_BULK_BATCH)
+    Image.objects.bulk_update(to_update, ["ref", "registry", "repository", "last_seen_at"], batch_size=_BULK_BATCH)
+
+    existing = {
+        (o.workload_id, o.image_id, o.container_name): o
+        for o in WorkloadImageObservation.objects.filter(workload__cluster=st.cluster)
+    }
+    new_obs: list[WorkloadImageObservation] = []
+    seen_obs: list[WorkloadImageObservation] = []
+    for (wl_id, digest, cname), init_container in wanted.items():
+        img = images[digest]
+        obs = existing.get((wl_id, img.id, cname))
+        if obs is None:
+            new_obs.append(WorkloadImageObservation(workload_id=wl_id, image=img, container_name=cname,
+                                                    init_container=init_container))
+        else:
+            obs.init_container = init_container
+            obs.last_seen_at = now
+            seen_obs.append(obs)
+    WorkloadImageObservation.objects.bulk_create(new_obs, batch_size=_BULK_BATCH)
+    WorkloadImageObservation.objects.bulk_update(seen_obs, ["init_container", "last_seen_at"], batch_size=_BULK_BATCH)
+
+
+def _persist_signals(st: _InventoryStaging) -> None:
+    """Manifest-derived signals (active) plus `kp:missing-networkpolicy`
+    on every workload of a namespace with no NetworkPolicy this cycle
+    (cleared where one exists). Same contract as
+    `WorkloadSignal.objects.upsert`: an active sighting creates or bumps
+    the row, a clearing one writes only when it flips the flag, a signal
+    never seen active has no row."""
+    now = timezone.now()
+    desired: dict[tuple[int, str], bool] = {}
+    for key, signal_ids in st.derived_signals.items():
+        wl = st.workloads.get(key)
+        if wl is None:
+            continue
+        for sig in signal_ids:
+            if sig in SIGNALS:
+                desired[(wl.id, sig)] = True
+    for (ns_name, _, _), wl in st.workloads.items():
+        desired[(wl.id, _MISSING_NETPOL)] = ns_name not in st.namespaces_with_netpol
+    if not desired:
+        return
+
+    existing = {
+        (s.workload_id, s.signal_id): s
+        for s in WorkloadSignal.objects.filter(
+            workload__cluster=st.cluster, signal_id__in={sig for _, sig in desired},
+        )
+    }
+    to_create: list[WorkloadSignal] = []
+    to_update: list[WorkloadSignal] = []
+    for (wl_id, sig), active in desired.items():
+        row = existing.get((wl_id, sig))
+        if row is None:
+            if active:
+                to_create.append(WorkloadSignal(workload_id=wl_id, signal_id=sig, currently_active=True))
+        elif active or row.currently_active:
+            row.currently_active = active
+            row.last_seen_at = now
+            to_update.append(row)
+    WorkloadSignal.objects.bulk_create(to_create, batch_size=_BULK_BATCH)
+    WorkloadSignal.objects.bulk_update(to_update, ["currently_active", "last_seen_at"], batch_size=_BULK_BATCH)
+
+
+def _rollup_namespace_exposure(st: _InventoryStaging) -> None:
+    """`Namespace.internet_exposed` = any deployed workload in it is
+    publicly exposed. Scaled-to-zero workloads (deployed=False) have no
+    endpoints behind their LB/Ingress, so they don't count. Manual
+    overrides win."""
+    exposed = {ns_name for (ns_name, _, _), wl in st.workloads.items() if wl.deployed and wl.publicly_exposed}
+    changed = []
+    for ns_name, ns in st.namespaces.items():
+        if ns.exposure_is_manual:
+            continue
+        rollup = ns_name in exposed
+        if ns.internet_exposed != rollup:
+            ns.internet_exposed = rollup
+            changed.append(ns)
+    Namespace.objects.bulk_update(changed, ["internet_exposed"], batch_size=_BULK_BATCH)
 
 
 # ── Inventory reap diff (deployed-flag) ---------------------------

@@ -51,6 +51,32 @@ def _cutoff(days: int):
     return timezone.now() - timedelta(days=days)
 
 
+#: Rows per DELETE for tables Django cannot fast-delete. `Finding` has an
+#: incoming CASCADE FK (`FindingAction.finding`), so `qs.delete()` collects
+#: every matching Finding instance (incl. its `details` JSON) in Python
+#: before issuing the deletes — a whole-cluster delete in a web request.
+DELETE_CHUNK_SIZE = 5000
+
+
+def delete_in_chunks(qs, *, chunk_size: int | None = None) -> dict[str, int]:
+    """Delete `qs` by primary-key slices so memory stays flat however many
+    rows match. Returns the per-model counts summed over every chunk, in
+    the same `{"app.Model": n}` shape as `QuerySet.delete()`. Safe only
+    because no `pre_delete` / `post_delete` receivers exist for these
+    models — the cascade collector is still used per chunk."""
+    chunk_size = chunk_size or DELETE_CHUNK_SIZE  # read at call time (tests patch it)
+    totals: dict[str, int] = {}
+    model = qs.model
+    base = qs.order_by()
+    while True:
+        pks = list(base.values_list("pk", flat=True)[:chunk_size])
+        if not pks:
+            return totals
+        _n, per_model = model._base_manager.filter(pk__in=pks).delete()
+        for label, n in per_model.items():
+            totals[label] = totals.get(label, 0) + n
+
+
 def prune_ingest_queue(*, days: int = 14, dry_run: bool = False) -> PruneResult:
     """DONE/FAILED queue items older than `days` are safe to delete —
     the worker never re-reads them, and the audit value beyond two
@@ -133,7 +159,7 @@ def prune_stale_findings(*, days: int = 180, dry_run: bool = False) -> PruneResu
     )
     n = qs.count()
     if not dry_run and n:
-        qs.delete()
+        delete_in_chunks(qs)
     return PruneResult("findings", n, 0 if dry_run else n)
 
 

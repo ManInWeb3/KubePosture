@@ -11,12 +11,6 @@
 {% endblock %}
 
 {% block content %}
-{% if messages %}
-{% for msg in messages %}
-<div class="alert alert-{{ msg.tags }}">{{ msg }}</div>
-{% endfor %}
-{% endif %}
-
 {% help "User" %}
   <p><strong>What it is:</strong> create or edit a Django user and assign them
   to RBAC groups (<code>viewer</code> / <code>SecEngineer</code> / <code>admin</code>).

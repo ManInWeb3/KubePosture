@@ -24,15 +24,11 @@ SCAN_KINDS: tuple[tuple[str, str], ...] = (
     ("ClusterPolicyReport", "kyverno.ClusterPolicyReport"),
     ("SbomReport", "trivy.SbomReport"),
 )
-ENVELOPE_KIND_FOR_CRD: dict[str, str] = dict(SCAN_KINDS)
 INVENTORY_KIND = "inventory"
 
 # Relevance-filter classes (see relevance.py).
 IMAGE_KINDS: frozenset[str] = frozenset({
     "trivy.VulnerabilityReport", "trivy.SbomReport", "trivy.ExposedSecretReport",
-})
-SUBJECT_KINDS: frozenset[str] = frozenset({
-    "trivy.ConfigAuditReport", "kyverno.PolicyReport",
 })
 CLUSTER_LEVEL_KINDS: frozenset[str] = frozenset({
     "trivy.RbacAssessmentReport", "trivy.ClusterRbacAssessmentReport",
@@ -59,7 +55,6 @@ CRD_SOURCES: tuple[tuple[str, str, str, str, bool], ...] = (
     ("wgpolicyk8s.io", "v1alpha2", "policyreports", "PolicyReport", False),
     ("wgpolicyk8s.io", "v1alpha2", "clusterpolicyreports", "ClusterPolicyReport", True),
 )
-KIND_FOR_PLURAL: dict[str, str] = {plural: kind for _, _, plural, kind, _ in CRD_SOURCES}
 
 # Captured-folder layout (`kubectl get <plural> -A -o json` per file).
 FROM_FOLDER_KUBEAPI: dict[str, str] = {

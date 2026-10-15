@@ -11,36 +11,46 @@ Covers:
 - `_reap_scan` signal clearing — stale Kyverno/Trivy signals flip
   `currently_active=False` when their `last_seen_at` is older than the
   reap's `started_at`.
-- `transition_mark_to_reaped` idempotence under double-call.
+- `transition_mark_to_reaped` idempotence under double-call, and the
+  non-blocking claim: a mark held by an in-flight reap on another
+  connection is skipped at once instead of waited on.
+- Commit-before-recompute: the reap transaction (claim, body, row
+  deletion) commits before the priority recompute runs; a recompute
+  failure is recorded on the counters, never rolls the reap back.
 - `reap_all_drainable` safety-net sweep over leftover draining marks.
 - Discards: `reap_stuck_open` (never committed) and the inventory-failed
   paths never apply data and never advance the cluster anchor.
 
-Inventory reap (`_reap_inventory`) is covered indirectly via
-`test_inventory_parser.py` — its `reap_inventory_diff` body is the
-non-trivial part and lives in the parser, not the reaper.
+The inventory reap's diff body (`reap_inventory_diff`) lives in the
+parser and is covered there; its event-path snapshots and the heartbeat
+are covered in test_reaper_snapshots.py.
 """
 from __future__ import annotations
 
 import io
 import threading
+import time
 from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
 from django.core.management import call_command
-from django.db import connection
+from django.db import connection, transaction
 from django.test import override_settings
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
+from core import urgency
 from core.constants import (
     Environment,
     ImportDiscardReason,
     ImportMarkState,
     IngestQueueStatus,
+    Severity,
 )
 from core.models import (
     Cluster,
+    Finding,
     Image,
     ImportMark,
     IngestQueue,
@@ -53,7 +63,9 @@ from core.models import (
 from core.services.queue import transition_mark_to_reaped
 from core.services.reaper import (
     STUCK_OPEN_TIMEOUT_SECONDS,
+    _reap_inventory,
     _reap_scan,
+    _write_scan_inconsistencies_for_outage,
     discard_import_for_failed_inventory,
     discard_inventory_failed_imports,
     maybe_reap,
@@ -391,6 +403,87 @@ def test_reap_scan_zero_input_increments_existing_inconsistency():
     rows = list(ScanInconsistency.objects.all())
     assert len(rows) == 1, "second outage must update, not duplicate"
     assert rows[0].consecutive_cycles == 2
+
+
+@pytest.mark.django_db
+def test_outage_writes_one_row_per_workload_image_pair_even_with_two_containers():
+    """Two containers of one workload running the same image are two
+    observation rows but ONE (cluster, kind, workload, digest) key. A single
+    outage must leave consecutive_cycles at 1 — the row-by-row writer used
+    to create on the first observation and increment on the second."""
+    c = _cluster()
+    w = _workload(c)
+    img = Image.objects.create(digest="sha256:" + "a" * 64, ref="img:v1")
+    for container in ("app", "sidecar"):
+        WorkloadImageObservation.objects.create(
+            workload=w, image=img, container_name=container, currently_deployed=True,
+        )
+    mark = _mark(c, kind="trivy.VulnerabilityReport", observed_count=0)
+
+    _write_scan_inconsistencies_for_outage(c, mark)
+
+    rows = list(ScanInconsistency.objects.all())
+    assert len(rows) == 1 and rows[0].consecutive_cycles == 1
+
+
+@pytest.mark.django_db
+def test_outage_increments_known_pairs_and_creates_new_ones_in_one_pass():
+    c = _cluster()
+    w = _workload(c)
+    old_img = Image.objects.create(digest="sha256:" + "a" * 64, ref="img:v1")
+    new_img = Image.objects.create(digest="sha256:" + "b" * 64, ref="img:v2")
+    for img, name in ((old_img, "app"), (new_img, "sidecar")):
+        WorkloadImageObservation.objects.create(workload=w, image=img, container_name=name, currently_deployed=True)
+    # An unrelated kind's row for the same pair must be left alone.
+    ScanInconsistency.objects.create(cluster=c, kind="trivy.ExposedSecretReport", workload=w,
+                                     image_digest=old_img.digest, seen_in_scans=False)
+    known = ScanInconsistency.objects.create(cluster=c, kind="trivy.VulnerabilityReport", workload=w,
+                                             image_digest=old_img.digest, seen_in_inventory=False,
+                                             seen_in_scans=True, consecutive_cycles=3)
+    stale = timezone.now() - timedelta(days=2)
+    ScanInconsistency.objects.filter(pk=known.pk).update(last_observed_at=stale)
+    mark = _mark(c, kind="trivy.VulnerabilityReport", observed_count=0)
+
+    _write_scan_inconsistencies_for_outage(c, mark)
+
+    known.refresh_from_db()
+    assert known.consecutive_cycles == 4
+    assert (known.seen_in_inventory, known.seen_in_scans) == (True, False)
+    assert known.last_observed_at > stale, "existing row is re-stamped as observed now"
+    created = ScanInconsistency.objects.get(kind="trivy.VulnerabilityReport", image_digest=new_img.digest)
+    assert (created.workload_id, created.consecutive_cycles, created.seen_in_inventory, created.seen_in_scans) == (
+        w.id, 1, True, False,
+    )
+    other = ScanInconsistency.objects.get(kind="trivy.ExposedSecretReport")
+    assert other.consecutive_cycles == 1
+    assert ScanInconsistency.objects.count() == 3
+
+
+@pytest.mark.django_db
+def test_outage_query_count_does_not_grow_with_observation_count():
+    def scene(name, n):
+        c = _cluster(name)
+        w = _workload(c)
+        for i in range(n):
+            img = Image.objects.create(digest="sha256:" + f"{name}{i}".ljust(64, "0"), ref=f"img:{i}")
+            WorkloadImageObservation.objects.create(workload=w, image=img, container_name=f"c{i}",
+                                                    currently_deployed=True)
+            if i % 2:
+                ScanInconsistency.objects.create(cluster=c, kind="trivy.VulnerabilityReport", workload=w,
+                                                 image_digest=img.digest)
+        return c, _mark(c, kind="trivy.VulnerabilityReport", observed_count=0)
+
+    small = scene("c-small", 2)
+    large = scene("c-large", 7)
+
+    def count(args):
+        with CaptureQueriesContext(connection) as ctx:
+            _write_scan_inconsistencies_for_outage(*args)
+        return len(ctx.captured_queries)
+
+    n_small, n_large = count(small), count(large)
+    assert ScanInconsistency.objects.filter(cluster=large[0]).count() == 7
+    assert n_large == n_small, (n_small, n_large)
 
 
 @pytest.mark.django_db
@@ -874,3 +967,315 @@ def test_inventory_reap_scaled_to_zero_image_not_currently_deployed():
     assert img.digest not in set(
         Image.objects.currently_running(cluster=c).values_list("digest", flat=True)
     )
+
+
+# ── Non-blocking claim + commit-before-recompute ───────────────────
+#
+# Regression tests for the production stall where every worker pod sat
+# at 0 CPU behind one pod's inventory reap: the claim UPDATE blocked on
+# the winner's row lock, which was held for the whole reap including the
+# whole-cluster priority recompute (minutes), until the holder was killed
+# at activeDeadlineSeconds and the next waiter inherited the lock.
+
+
+def _finding(workload: Workload, *, vuln_id: str) -> Finding:
+    return Finding.objects.create(
+        cluster=workload.cluster, workload=workload, source="trivy",
+        category="vulnerability", vuln_id=vuln_id, title="t",
+        severity=Severity.HIGH.value, hash_code=vuln_id,
+    )
+
+
+def _claim_holder(mark: ImportMark, *, lock_acquired: threading.Event,
+                  release_lock: threading.Event, fail: bool = False) -> threading.Thread:
+    """Thread that wins the claim on `mark` on its own connection and keeps
+    that transaction open until `release_lock` is set (then commits, or
+    rolls back when `fail`)."""
+    def run():
+        try:
+            with transaction.atomic():
+                m = ImportMark.objects.select_related("cluster").get(pk=mark.pk)
+                assert transition_mark_to_reaped(m) is True
+                lock_acquired.set()
+                release_lock.wait(timeout=5)
+                if fail:
+                    raise RuntimeError("holder rolled back")
+        except RuntimeError:
+            pass
+        finally:
+            connection.close()
+    return threading.Thread(target=run)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_transition_mark_to_reaped_returns_false_fast_while_another_reaper_holds_the_mark():
+    c = _cluster()
+    mark = _mark(c, kind="inventory")
+    lock_acquired, release_lock = threading.Event(), threading.Event()
+    holder = _claim_holder(mark, lock_acquired=lock_acquired, release_lock=release_lock)
+    holder.start()
+    assert lock_acquired.wait(timeout=5), "holder never won its claim"
+
+    try:
+        started = time.monotonic()
+        won = transition_mark_to_reaped(mark)
+        elapsed = time.monotonic() - started
+        assert won is False
+        assert elapsed < 2.0, f"claim took {elapsed:.2f}s — it waited on the holder's lock"
+        assert ImportMark.objects.get(pk=mark.pk).state == ImportMarkState.DRAINING.value, (
+            "the holder has not committed yet; the loser must not have flipped anything"
+        )
+    finally:
+        release_lock.set()
+        holder.join(timeout=5)
+        connection.close()
+
+    assert ImportMark.objects.get(pk=mark.pk).state == ImportMarkState.REAPED.value, (
+        "exactly one winner: the holder's commit"
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_lost_claim_whose_winner_rolls_back_leaves_the_mark_for_a_later_sweep():
+    c = _cluster()
+    mark = _mark(c, kind="inventory")
+    lock_acquired, release_lock = threading.Event(), threading.Event()
+    holder = _claim_holder(
+        mark, lock_acquired=lock_acquired, release_lock=release_lock, fail=True,
+    )
+    holder.start()
+    assert lock_acquired.wait(timeout=5)
+    try:
+        assert transition_mark_to_reaped(mark) is False
+    finally:
+        release_lock.set()
+        holder.join(timeout=5)
+        connection.close()
+
+    assert ImportMark.objects.get(pk=mark.pk).state == ImportMarkState.DRAINING.value
+    assert transition_mark_to_reaped(mark) is True, "the next sweep claims it"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_maybe_reap_does_not_block_behind_an_in_flight_inventory_reap():
+    """The production scenario: pod A is inside the inventory reap body;
+    pod B's drain finds the same tuple drained and calls maybe_reap. B
+    must get None at once, and A's reap must still complete."""
+    c = _cluster()
+    mark = _mark(c, kind="inventory")
+    _row(mark)
+    body_entered, release_body = threading.Event(), threading.Event()
+    holder_result: list = []
+
+    def slow_body(m):
+        body_entered.set()
+        release_body.wait(timeout=5)
+        return {}
+
+    def hold():
+        try:
+            m = ImportMark.objects.select_related("cluster").get(pk=mark.pk)
+            holder_result.append(_reap_inventory(m))
+        finally:
+            connection.close()
+
+    with patch("core.services.reaper._reap_inventory_body", side_effect=slow_body):
+        holder = threading.Thread(target=hold)
+        holder.start()
+        assert body_entered.wait(timeout=5), "holder never entered the reap body"
+        try:
+            started = time.monotonic()
+            result = maybe_reap(mark)
+            elapsed = time.monotonic() - started
+        finally:
+            release_body.set()
+            holder.join(timeout=5)
+            connection.close()
+
+    assert result is None
+    assert elapsed < 2.0, f"maybe_reap took {elapsed:.2f}s — it blocked on the holder's lock"
+    assert holder_result and holder_result[0] is not None, "the holder's reap completed"
+    assert ImportMark.objects.get(pk=mark.pk).state == ImportMarkState.REAPED.value
+    assert _rows(mark) == 0
+
+
+@pytest.mark.django_db
+def test_inventory_reap_commits_even_when_the_priority_recompute_fails():
+    c = _cluster()
+    mark = _mark(c, kind="inventory")
+    _row(mark)
+    with patch("core.services.reaper.recompute_ids", side_effect=RuntimeError("recompute exploded")), \
+         patch("core.services.reaper._maybe_capture_heartbeat"):
+        result = maybe_reap(mark)
+
+    assert result is not None and result.get("recompute_failed") is True
+    mark.refresh_from_db()
+    c.refresh_from_db()
+    assert mark.state == ImportMarkState.REAPED.value
+    assert c.last_complete_inventory_at == mark.started_at
+    assert _rows(mark) == 0
+
+
+@pytest.mark.django_db(transaction=True)
+def test_inventory_reap_recomputes_after_its_transaction_committed():
+    c = _cluster()
+    w = _workload(c)
+    findings = [_finding(w, vuln_id=f"CVE-2024-{i}") for i in range(3)]
+    mark = _mark(c, kind="inventory")
+    _row(mark)
+    seen: list[list[int]] = []
+
+    def spy(ids):
+        assert connection.in_atomic_block is False, "recompute ran inside the reap transaction"
+        assert ImportMark.objects.get(pk=mark.pk).state == ImportMarkState.REAPED.value, (
+            "the reap must be committed before the recompute starts"
+        )
+        ids = list(ids)
+        seen.append(ids)
+        return urgency.recompute_ids(ids)
+
+    with patch("core.services.reaper.recompute_ids", side_effect=spy), \
+         patch("core.services.reaper._maybe_capture_heartbeat"):
+        result = maybe_reap(mark)
+
+    assert len(seen) == 1 and sorted(seen[0]) == sorted(f.pk for f in findings)
+    assert isinstance(result.get("priorities_recomputed"), int)
+
+
+@pytest.mark.django_db
+def test_superseded_inventory_reap_does_not_recompute():
+    c = _cluster()
+    newer_reap_time = timezone.now()
+    c.last_complete_inventory_at = newer_reap_time
+    c.save(update_fields=["last_complete_inventory_at"])
+    stale_mark = _mark(
+        c, kind="inventory", import_id="imp-stale",
+        started_at=newer_reap_time - timedelta(minutes=10),
+    )
+    _row(stale_mark)
+
+    with patch("core.services.reaper.recompute_ids") as recompute, \
+         patch("core.services.reaper._maybe_capture_heartbeat"):
+        result = maybe_reap(stale_mark)
+
+    recompute.assert_not_called()
+    assert result.get("superseded") is True
+    assert "priorities_recomputed" not in result
+
+
+@pytest.mark.django_db
+def test_scan_reap_commits_signal_clear_even_when_the_recompute_fails():
+    c = _cluster()
+    w = _workload(c)
+    started_at = timezone.now()
+    stale_signal = WorkloadSignal.objects.create(
+        workload=w, signal_id="kyverno:disallow-privileged-containers", currently_active=True,
+    )
+    _bump(stale_signal, last_seen_at=started_at - timedelta(minutes=10))
+    mark = _mark(c, kind="kyverno.PolicyReport", observed_count=5, started_at=started_at)
+
+    with patch("core.services.reaper.recompute_ids", side_effect=RuntimeError("recompute exploded")):
+        result = _reap_scan(mark)
+
+    assert result.get("signals_cleared") == 1
+    assert result.get("recompute_failed") is True
+    stale_signal.refresh_from_db()
+    assert stale_signal.currently_active is False
+    mark.refresh_from_db()
+    assert mark.state == ImportMarkState.REAPED.value
+
+
+@pytest.mark.django_db(transaction=True)
+def test_scan_reap_recomputes_only_the_affected_workloads_after_commit():
+    c = _cluster()
+    w1 = _workload(c)
+    w2 = Workload.objects.create(
+        cluster=c, namespace=w1.namespace, kind="Deployment", name="other", deployed=True,
+    )
+    f1 = _finding(w1, vuln_id="CVE-2024-1")
+    _finding(w2, vuln_id="CVE-2024-2")
+    started_at = timezone.now()
+    stale_signal = WorkloadSignal.objects.create(
+        workload=w1, signal_id="kyverno:disallow-privileged-containers", currently_active=True,
+    )
+    _bump(stale_signal, last_seen_at=started_at - timedelta(minutes=10))
+    mark = _mark(c, kind="kyverno.PolicyReport", observed_count=5, started_at=started_at)
+    seen: list[list[int]] = []
+
+    def spy(ids):
+        assert connection.in_atomic_block is False
+        ids = list(ids)
+        seen.append(ids)
+        return urgency.recompute_ids(ids)
+
+    with patch("core.services.reaper.recompute_ids", side_effect=spy):
+        _reap_scan(mark)
+
+    assert seen == [[f1.pk]]
+
+
+@pytest.mark.django_db
+def test_scan_reap_skips_the_recompute_when_nothing_was_cleared():
+    c = _cluster()
+    w = _workload(c)
+    started_at = timezone.now()
+    stale_signal = WorkloadSignal.objects.create(
+        workload=w, signal_id="kyverno:disallow-privileged-containers", currently_active=True,
+    )
+    _bump(stale_signal, last_seen_at=started_at - timedelta(minutes=10))
+    mark = _mark(c, kind="kyverno.PolicyReport", observed_count=5, started_at=started_at)
+    _row(mark, status=IngestQueueStatus.FAILED.value, error="parser blew up")
+
+    with patch("core.services.reaper.recompute_ids") as recompute:
+        result = _reap_scan(mark)
+
+    recompute.assert_not_called()
+    assert result.get("skipped_partial_failure") is True
+
+
+# ── discard, don't promote: a failed inventory row reaching the sweep ──
+
+
+@pytest.mark.django_db
+def test_inventory_reap_with_failed_row_discards_instead_of_advancing_anchor():
+    """`drain_check` only counts pending/processing rows, so an inventory
+    whose single row ended `failed` looks drained. The worker discards the
+    import when it fails the row itself, but the abandon-exhausted SQL
+    flips a poison row to `failed` with no discard — the sweep used to reap
+    it as a complete cycle (anchor advanced, every workload retired)."""
+    c = _cluster()
+    w = _workload(c)
+    mark = _mark(c, kind="inventory", import_id="imp-poison")
+    sibling = _mark(c, kind="trivy.ConfigAuditReport", import_id="imp-poison")
+    _row(mark, status=IngestQueueStatus.FAILED.value, error="abandoned: poison")
+    _row(sibling, status=IngestQueueStatus.PENDING.value)
+
+    with patch("core.services.reaper._maybe_capture_heartbeat") as hb:
+        fired = reap_all_drainable()
+
+    assert fired == 0
+    hb.assert_not_called()
+    c.refresh_from_db()
+    w.refresh_from_db()
+    assert c.last_complete_inventory_at is None, "a cycle that never landed must not become the anchor"
+    assert w.deployed is True, "nothing was retired"
+    for m in (mark, sibling):
+        m.refresh_from_db()
+        assert m.state == ImportMarkState.REAPED.value
+        assert m.discard_reason == ImportDiscardReason.INVENTORY_FAILED.value
+    assert mark.last_error == "abandoned: poison"
+    assert _rows(mark) == 0 and _rows(sibling) == 0, "the whole import's rows are gone"
+
+
+@pytest.mark.django_db
+def test_maybe_reap_discards_failed_inventory_without_a_heartbeat():
+    c = _cluster()
+    mark = _mark(c, kind="inventory", import_id="imp-poison")
+    _row(mark, status=IngestQueueStatus.FAILED.value, error="x")
+
+    with patch("core.services.reaper._maybe_capture_heartbeat") as hb:
+        assert maybe_reap(mark) is None
+
+    hb.assert_not_called()
+    mark.refresh_from_db()
+    assert mark.discard_reason == ImportDiscardReason.INVENTORY_FAILED.value

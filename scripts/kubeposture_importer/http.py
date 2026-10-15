@@ -67,13 +67,18 @@ class HttpClient:
 
     # ── public ─────────────────────────────────────────────────────
 
-    def post_json(self, path: str, body: dict) -> HttpResult:
+    def post_json(self, path: str, body: dict, *, ignore_deadline: bool = False) -> HttpResult:
+        """`ignore_deadline=True` is for the abort call: it is the one
+        request that must still go out *because* the deadline tripped."""
         data = json.dumps(body).encode("utf-8")
         req = Request(
             self.base_url + path, data=data, method="POST",
             headers={**self._auth(), "Content-Type": "application/json"},
         )
-        return self._request(req, max_attempts=self.max_attempts, base_delay=self.base_delay)
+        return self._request(
+            req, max_attempts=self.max_attempts, base_delay=self.base_delay,
+            ignore_deadline=ignore_deadline,
+        )
 
     def post_file(self, path: str, fileobj: BinaryIO, *, content_length: int,
                   headers: dict[str, str]) -> HttpResult:
@@ -103,10 +108,11 @@ class HttpClient:
         return self.deadline_at is not None and self._clock() >= self.deadline_at
 
     def _request(self, req: Request, *, max_attempts: int, base_delay: float,
-                 rewind: Callable[[], object] | None = None) -> HttpResult:
+                 rewind: Callable[[], object] | None = None,
+                 ignore_deadline: bool = False) -> HttpResult:
         last = HttpResult(False, 0, "no attempt made", retryable=True)
         for attempt in range(1, max_attempts + 1):
-            if self._past_deadline():
+            if not ignore_deadline and self._past_deadline():
                 return HttpResult(False, 0, "upload deadline exceeded", retryable=False)
             if rewind is not None:
                 rewind()

@@ -10,14 +10,6 @@
 {% endblock %}
 
 {% block content %}
-{% if messages %}
-{% for msg in messages %}
-<div class="alert alert-{{ msg.tags }} alert-dismissible">{{ msg }}
-  <a class="btn-close" data-bs-dismiss="alert"></a>
-</div>
-{% endfor %}
-{% endif %}
-
 <div class="row">
   <div class="col-lg-8">
 
@@ -115,6 +107,113 @@
             <div class="datagrid-title">K8s Version</div>
             <div class="datagrid-content">{{ cluster.k8s_version|default:"—" }}</div>
           </div>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Imports -->
+    <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title">Imports</h3></div>
+      <div class="card-body">
+        {% help "Imports" %}
+          <p><strong>Last complete inventory</strong> is the start time of the most recent
+          inventory cycle that was fully processed — the anchor every "currently deployed"
+          decision on this cluster is made against. <strong>Last import</strong> is the most
+          recent import the in-cluster CronJob started, whatever its outcome: one row per
+          report kind it uploaded, with the state each reached.</p>
+          <p class="mb-0">An import is <em>uploading</em> while the importer is still sending
+          bundles, <em>processing</em> once committed and being worked through, and
+          <em>complete</em> when every kind has been reaped. <em>Discarded</em> imports were
+          never applied (the importer never committed, or the inventory payload failed);
+          <em>failed</em> means some payloads of an otherwise complete import could not be
+          processed — the error is shown on the kind.</p>
+        {% endhelp %}
+
+        <div class="datagrid mb-3">
+          <div class="datagrid-item">
+            <div class="datagrid-title">Last complete inventory</div>
+            <div class="datagrid-content">
+              {% if cluster.last_complete_inventory_at %}
+                {{ cluster.last_complete_inventory_at|date:"Y-m-d H:i" }}
+                <span class="text-muted">({{ cluster.last_complete_inventory_at|timesince }} ago)</span>
+              {% else %}
+                <span class="badge bg-secondary-lt text-secondary">never</span>
+              {% endif %}
+            </div>
+          </div>
+          <div class="datagrid-item">
+            <div class="datagrid-title">Last import started</div>
+            <div class="datagrid-content">
+              {% if latest_import %}
+                {{ latest_import.started_at|date:"Y-m-d H:i" }}
+                <span class="text-muted">({{ latest_import.started_at|timesince }} ago)</span>
+              {% else %}
+                <span class="badge bg-secondary-lt text-secondary">never</span>
+              {% endif %}
+            </div>
+          </div>
+          <div class="datagrid-item">
+            <div class="datagrid-title">Last import status</div>
+            <div class="datagrid-content">
+              {% if not latest_import %}
+                <span class="text-muted">—</span>
+              {% elif latest_import.status == "complete" %}
+                <span class="badge bg-success-lt text-success">complete</span>
+              {% elif latest_import.status == "failed" %}
+                <span class="badge bg-danger-lt text-danger">failed</span>
+                <small class="text-muted">{{ latest_import.failed_count }} payload{{ latest_import.failed_count|pluralize }} failed</small>
+              {% elif latest_import.status == "discarded" %}
+                <span class="badge bg-danger-lt text-danger">discarded</span>
+                <small class="text-muted">{{ latest_import.kinds.0.get_discard_reason_display }}</small>
+              {% else %}
+                <span class="badge bg-azure-lt text-azure">{{ latest_import.status }}</span>
+                <small class="text-muted">{{ latest_import.reaped }}/{{ latest_import.kinds|length }} kinds done</small>
+              {% endif %}
+            </div>
+          </div>
+          {% if latest_import %}
+          <div class="datagrid-item">
+            <div class="datagrid-title">Import id</div>
+            <div class="datagrid-content"><code>{{ latest_import.import_id }}</code></div>
+          </div>
+          {% endif %}
+        </div>
+
+        {% if latest_import %}
+        <div class="table-responsive">
+          <table class="table table-sm table-vcenter mb-0">
+            <thead>
+              <tr>
+                <th>Kind</th>
+                <th>State</th>
+                <th title="Payloads the importer delivered for this kind">Items</th>
+                <th>Failed</th>
+                <th>Last error</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for m in latest_import.kinds %}
+              <tr>
+                <td><code>{{ m.kind }}</code></td>
+                <td>
+                  {% if m.discard_reason %}
+                    <span class="badge bg-danger-lt text-danger" title="{{ m.get_discard_reason_display }}">discarded</span>
+                  {% elif m.state == "reaped" %}
+                    <span class="badge bg-success-lt text-success">reaped</span>
+                  {% elif m.state == "draining" %}
+                    <span class="badge bg-azure-lt text-azure">processing</span>
+                  {% else %}
+                    <span class="badge bg-secondary-lt text-secondary">{{ m.state }}</span>
+                  {% endif %}
+                </td>
+                <td class="text-muted">{{ m.observed_count|default_if_none:"—" }}</td>
+                <td class="{% if m.failed_count %}text-danger{% else %}text-muted{% endif %}">{{ m.failed_count }}</td>
+                <td class="text-muted font-monospace small">{{ m.last_error|truncatechars:120 }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
         </div>
         {% endif %}
       </div>
@@ -218,7 +317,7 @@
           <div class="datagrid-item">
             <div class="datagrid-title">Has public exposure</div>
             <div class="datagrid-content">
-              {% if cluster.has_public_exposure %}
+              {% if has_public_exposure %}
                 <span class="badge bg-success-lt text-success">yes</span>
               {% else %}
                 <span class="badge bg-secondary-lt text-secondary">no</span>
@@ -228,7 +327,7 @@
           <div class="datagrid-item">
             <div class="datagrid-title">Has sensitive data</div>
             <div class="datagrid-content">
-              {% if cluster.has_sensitive_data %}
+              {% if has_sensitive_data %}
                 <span class="badge bg-warning-lt text-warning">yes</span>
               {% else %}
                 <span class="badge bg-secondary-lt text-secondary">no</span>
@@ -237,7 +336,7 @@
           </div>
         </div>
         <small class="d-block text-muted mt-2">
-          Derived from active namespaces. Cluster-scoped findings (ClusterRole, etc.) use these for priority.
+          Rolled up from active namespaces. Namespace exposure and sensitivity feed the priority of findings on workloads in that namespace; cluster-scoped findings (ClusterRole, etc.) use only the cluster environment.
         </small>
       </div>
     </div>

@@ -174,7 +174,10 @@ class SnapshotSeriesView(APIView):
                 f"scope must be one of {SnapshotScope.values}"
             )
 
-        days = int(request.query_params.get("days") or 90)
+        try:
+            days = int(request.query_params.get("days") or 90)
+        except ValueError:
+            raise ValidationError("days must be an integer")
         days = max(1, min(days, settings.SNAPSHOT_RETENTION_DAYS))
         cutoff = timezone.now() - timedelta(days=days)
         name_substr = (request.query_params.get("name") or "").strip()
@@ -215,7 +218,7 @@ class SnapshotSeriesView(APIView):
 
         elif scope == SnapshotScope.WORKLOAD:
             wl_id = request.query_params.get("workload_id")
-            if not wl_id:
+            if not wl_id or not wl_id.isdigit():
                 raise ValidationError("workload scope requires ?workload_id=<pk>")
             workload = Workload.objects.filter(pk=wl_id).first()
             if workload is None:

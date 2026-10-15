@@ -255,3 +255,28 @@ def test_sigterm_during_upload_aborts(tmp_path):
     assert rc == 1
     assert net.paths()[-1] == "api/v1/imports/imp-1/abort/"
     assert any("SIGTERM" in e for e in errs)
+
+
+def test_run_plan_still_aborts_after_the_upload_deadline_tripped(tmp_path):
+    """The deadline exists so a slow central can't push the importer past
+    activeDeadlineSeconds without a clean abort — so the abort itself
+    must not be refused by that same deadline, or the import sits `open`
+    for the server's 30-minute stuck-open TTL."""
+    bundles = [_bundle(tmp_path, kind="inventory", n=1)]
+    clock = {"t": 0.0}
+    net = FakeNet([_http_error(500), _Resp(200, {"status": "aborted"})])
+
+    def sleep(s):
+        clock["t"] += 100  # the retry back-off pushes us past the deadline
+
+    client = HttpClient("https://central", "tok", deadline_at=50.0, clock=lambda: clock["t"],
+                        sleep=sleep, urlopen_fn=net.urlopen)
+    errs = []
+    rc = run_upload_plan(client, import_id="imp-1", cluster="c", bundles=bundles,
+                         out=lambda _: None, err=errs.append)
+    assert rc == 1
+    assert net.paths() == [
+        "api/v1/imports/imp-1/bundles/inventory/",
+        "api/v1/imports/imp-1/abort/",
+    ], "the abort POST must go out even though the upload deadline has passed"
+    assert any("ABORTED" in e for e in errs)

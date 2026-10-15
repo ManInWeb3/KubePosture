@@ -78,3 +78,26 @@ def test_detail_view_invalid_digest_404(authed, scene):
 def test_detail_view_unknown_digest_404(authed, scene):
     resp = authed.get(reverse("images-detail", kwargs={"digest": "sha256:" + "0" * 64}))
     assert resp.status_code == 404
+
+
+def test_detail_view_htmx_partial_returns_finding_rows_only(authed, scene):
+    resp = authed.get(reverse("images-detail", kwargs={"digest": scene["image"].digest}),
+                      HTTP_HX_REQUEST="true", HTTP_HX_TARGET="finding-rows")
+    body = resp.content.decode()
+    assert resp.status_code == 200
+    assert "<html" not in body.lower() and "CVE-1" in body
+    assert resp.context["findings"][0].vuln_id == "CVE-1"
+
+
+def test_list_view_namespace_selector_follows_the_cluster_filter(authed, scene):
+    other = Cluster.objects.create(name="cw", environment=Environment.PROD.value)
+    ns = Namespace.objects.create(cluster=other, name="elsewhere")
+    Workload.objects.create(cluster=other, namespace=ns, kind="Deployment", name="x", deployed=True)
+    Namespace.objects.create(cluster=other, name="empty")
+
+    ctx = authed.get(reverse("images-list")).context
+    assert [c.name for c in ctx["clusters"]] == ["cv", "cw"]
+    assert ctx["namespace_names"] == ["elsewhere", "n"], "only namespaces with a deployed workload"
+
+    ctx = authed.get(reverse("images-list") + "?cluster=cv").context
+    assert ctx["namespace_names"] == ["n"]

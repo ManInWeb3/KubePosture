@@ -160,3 +160,19 @@ def test_importer_can_delete_jobs_only_in_its_own_namespace():
     assert "kind: Role\n" in role and "kind: RoleBinding" in role
     assert 'resources: ["jobs"]' in role and 'verbs: ["delete"]' in role
     assert "if .Values.cleanupFailedJobsOnSuccess" in role
+
+
+def test_worker_time_budget_sits_under_the_job_deadline_and_the_stale_reclaim():
+    """--max-seconds must leave headroom under activeDeadlineSeconds (the pass
+    in flight still finishes, incl. its reap), and the Job deadline must be
+    below STALE_PROCESSING_SECONDS or another pod reclaims an item that a
+    still-running worker legitimately holds."""
+    from core.services.queue import STALE_PROCESSING_SECONDS
+
+    worker = _values(CENTRAL)["worker"]
+    cmd = worker["command"]
+    max_seconds = int(cmd[cmd.index("--max-seconds") + 1])
+    deadline = int(worker["activeDeadlineSeconds"])
+
+    assert max_seconds + 120 <= deadline, "no headroom for the in-flight item + reap"
+    assert deadline < STALE_PROCESSING_SECONDS

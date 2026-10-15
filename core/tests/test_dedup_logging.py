@@ -11,11 +11,13 @@ from __future__ import annotations
 import ast
 import logging
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
+from django.utils import timezone
 
 from core.constants import Category, Severity, Source
-from core.models import Cluster, Finding
+from core.models import Cluster, Finding, Namespace, Workload
 from core.services import dedup
 
 CORE_DIR = Path(__file__).resolve().parents[1]
@@ -62,7 +64,7 @@ def test_upsert_findings_progress_log_does_not_break_at_debug(caplog):
 
     assert (created, updated) == (n, 0)
     assert Finding.objects.filter(cluster=cluster).count() == n
-    progress = [r for r in caplog.records if r.msg == "dedup.upsert_findings.progress"]
+    progress = list({id(r): r for r in caplog.records if r.msg == "dedup.upsert_findings.progress"}.values())
     assert len(progress) == 2
     assert progress[-1].findings_created == dedup._PROGRESS_LOG_EVERY * 2
 
@@ -91,3 +93,72 @@ def test_no_log_extra_key_shadows_a_logrecord_attribute():
                             f"{sorted(keys & _RESERVED)}"
                         )
     assert not offenders, f"log extra= keys shadow LogRecord attributes: {offenders}"
+
+
+# ── create/create race, deterministically ─────────────────────────
+
+
+def _scene():
+    c = Cluster.objects.create(name="c-race", environment="prod")
+    ns = Namespace.objects.create(cluster=c, name="ns")
+    w = Workload.objects.create(cluster=c, namespace=ns, kind="Deployment", name="api", deployed=True)
+    return c, w
+
+
+@pytest.mark.django_db
+def test_upsert_retries_once_when_a_concurrent_insert_wins_the_race(monkeypatch):
+    """The 8-thread race in test_concurrency.py reaches this branch only by
+    luck. Simulate the loser: the first SELECT FOR UPDATE sees nothing, the
+    INSERT then collides with a row another transaction committed, and the
+    retry must update that row instead of failing the whole queue item."""
+
+    from core.services import dedup
+
+    c, w = _scene()
+    f = {"source": "trivy", "category": "vulnerability", "vuln_id": "CVE-1", "pkg_name": "p",
+         "installed_version": "1", "fixed_version": "", "title": "t", "severity": "high",
+         "cvss_score": None, "cvss_vector": "", "details": {}}
+    hc = dedup.compute_hash(source="trivy", category="vulnerability", vuln_id="CVE-1", workload_id=w.id,
+                            cluster_name=c.name, image_digest="", pkg_name="p", installed_version="1")
+    real_sfu = dedup.Finding.objects.select_for_update
+    calls = {"n": 0}
+
+    def flaky_select_for_update(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Attempt 1: nothing visible yet; the other transaction then wins the INSERT.
+            qs = MagicMock()
+            qs.filter.return_value.first.side_effect = lambda: (
+                dedup.Finding.objects.create(cluster=c, workload=w, source="trivy", hash_code=hc,
+                                             category="vulnerability", vuln_id="CVE-1", title="other",
+                                             severity="high", first_seen=timezone.now(), last_seen=timezone.now())
+                and None)
+            return qs
+        return real_sfu(*a, **kw)
+
+    monkeypatch.setattr(dedup.Finding.objects, "select_for_update", flaky_select_for_update)
+    created, updated = dedup.upsert_findings(cluster=c, workload=w, image=None, findings=[f],
+                                             observation_time=timezone.now())
+
+    assert (created, updated) == (0, 1)
+    assert dedup.Finding.objects.filter(hash_code=hc).count() == 1
+    assert dedup.Finding.objects.get(hash_code=hc).title == "t", "the retry updated the winner's row"
+
+
+@pytest.mark.django_db
+def test_upsert_propagates_a_second_consecutive_integrity_error(monkeypatch):
+    from django.db import IntegrityError
+
+    from core.services import dedup
+
+    c, w = _scene()
+    f = {"source": "trivy", "category": "vulnerability", "vuln_id": "CVE-2", "pkg_name": "p",
+         "installed_version": "1", "fixed_version": "", "title": "t", "severity": "high",
+         "cvss_score": None, "cvss_vector": "", "details": {}}
+    never = MagicMock()
+    never.filter.return_value.first.return_value = None
+    monkeypatch.setattr(dedup.Finding.objects, "select_for_update", lambda *a, **kw: never)
+    monkeypatch.setattr(dedup.Finding, "save", lambda self, *a, **kw: (_ for _ in ()).throw(IntegrityError("dup")))
+
+    with pytest.raises(IntegrityError):
+        dedup.upsert_findings(cluster=c, workload=w, image=None, findings=[f], observation_time=timezone.now())

@@ -1,13 +1,11 @@
 """Seed the three RBAC Groups: viewer, SecEngineer, admin.
 
-The role hierarchy is admin ⊃ SecEngineer ⊃ viewer (any user with
-role X can do anything X-or-below requires). Enforcement is via
-`core.api.permissions.require_role` and `IsViewer`/`IsSecEngineer`/
-`IsAdmin` DRF permission classes — both check group membership
-on the user, not Django's per-action Permission objects. Keeping
-RBAC at the group level matches the v1 three-tier model in
-dev_docs/02-architecture.md and dodges the ceremony of seeding
-Permission objects.
+The role hierarchy is admin ⊃ SecEngineer ⊃ viewer. Enforcement is a
+group-membership check on the user (`core.templatetags.access_tags.
+is_admin`, used by the UI views' `AdminRequiredMixin` / `_is_admin`),
+not Django's per-action Permission objects. Keeping RBAC at the group
+level matches the v1 three-tier model and dodges the ceremony of
+seeding Permission objects.
 
 Usage:
     python manage.py setup_rbac

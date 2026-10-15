@@ -23,7 +23,6 @@ from enum import Enum
 class SignalSource(str, Enum):
     KYVERNO = "kyverno"
     TRIVY = "trivy"
-    KUBE_API = "kube-api"
     DERIVED = "derived"
 
 
@@ -315,4 +314,3 @@ def signals_in_category(category: SignalCategory) -> set[str]:
 HOST_ESCAPE_SIGNALS = signals_in_category(SignalCategory.HOST_ESCAPE)
 PRIV_ESCALATION_SIGNALS = signals_in_category(SignalCategory.PRIV_ESCALATION)
 RBAC_ELEVATION_SIGNALS = signals_in_category(SignalCategory.RBAC_ELEVATION)
-NETWORK_EXPOSURE_SIGNALS = signals_in_category(SignalCategory.NETWORK_EXPOSURE)

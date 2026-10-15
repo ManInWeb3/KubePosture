@@ -60,11 +60,12 @@ from core.models import ImportMark, IngestQueue
 
 log = logging.getLogger("core.queue")
 
-# Comfortably larger than the worker Job's activeDeadlineSeconds (300s at
-# the time of writing) so a still-legitimately-running item is never
-# mistaken for abandoned — only reclaim rows no currently-running worker
-# could still hold.
-STALE_PROCESSING_SECONDS = 900
+# Larger than the worker Job's activeDeadlineSeconds (1800s in
+# deploy/charts/kubeposture/values.yaml) so a still-legitimately-running
+# item is never mistaken for abandoned — only reclaim rows no
+# currently-running worker could still hold. tests/test_chart_invariants.py
+# pins the relation.
+STALE_PROCESSING_SECONDS = 2100
 
 # After this many reclaims, stop bouncing the item back to pending and
 # mark it failed instead — protects against a poison item that reliably
@@ -249,15 +250,31 @@ def drain_check(*, cluster_name: str, kind: str, import_id: str) -> bool:
 
 @transaction.atomic
 def transition_mark_to_reaped(mark: ImportMark) -> bool:
-    """Idempotent state-machine flip from `draining` → `reaped`. Returns
-    True if this caller won the race.
+    """Non-blocking state-machine flip from `draining` → `reaped`. Returns
+    True iff this caller won the claim.
 
     This is the reap's claim: callers run it FIRST and return without
-    doing anything when it returns False. The conditional UPDATE takes
-    the row lock, so a concurrent reaper blocks on it, re-evaluates
-    `WHERE state='draining'` after the winner commits, and matches
-    nothing.
+    doing anything when it returns False. `FOR UPDATE SKIP LOCKED` is
+    tried first: a mark whose row another transaction holds (a reap in
+    flight on another pod) is skipped and we return False at once instead
+    of queueing behind it — a plain conditional UPDATE used to block every
+    other worker, at 0 CPU, for the whole duration of that reap. The lock
+    taken here is held until the CALLER's transaction ends (this atomic is
+    a savepoint inside the reap's), so the winner's claim is exclusive for
+    the whole reap body; if the winner rolls back, the mark is `draining`
+    again for a later sweep or the safety net.
+
+    The query must stay join-free (no `select_related`) — `FOR UPDATE`
+    would otherwise lock the cluster row too.
     """
+    claimable = list(
+        ImportMark.objects
+        .select_for_update(skip_locked=True)
+        .filter(id=mark.id, state=ImportMarkState.DRAINING.value)
+        .values_list("id", flat=True)
+    )
+    if not claimable:
+        return False
     affected = ImportMark.objects.filter(
         id=mark.id, state=ImportMarkState.DRAINING.value,
     ).update(state=ImportMarkState.REAPED.value)

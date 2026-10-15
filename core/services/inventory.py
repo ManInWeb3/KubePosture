@@ -14,7 +14,7 @@ from collections import defaultdict
 from datetime import timedelta
 from typing import Iterable
 
-from django.db.models import Case, Exists, F, IntegerField, OuterRef, Q, Value, When
+from django.db.models import Case, Count, Exists, F, IntegerField, OuterRef, Q, Value, When
 from django.utils import timezone
 
 from core.constants import (
@@ -174,10 +174,19 @@ def _band_counts_by(qs, *key_fields: str):
     Single key field → keys are scalars; multiple → keys are tuples.
     """
     counts: dict = defaultdict(_empty_band_counts)
-    for row in qs.values_list(*key_fields, "effective_priority"):
-        *key_parts, priority = row
+    # GROUP BY in SQL: ≤ 4 rows per key instead of one row per Finding
+    # streamed into Python (the workloads / images pages call this over
+    # every visible finding on each render).
+    rows = (
+        qs.order_by()
+        .values(*key_fields, "effective_priority")
+        .annotate(n=Count("id"))
+    )
+    for row in rows:
+        key_parts = [row[k] for k in key_fields]
         key = key_parts[0] if len(key_parts) == 1 else tuple(key_parts)
-        counts[key][priority] = counts[key].get(priority, 0) + 1
+        priority = row["effective_priority"]
+        counts[key][priority] = counts[key].get(priority, 0) + row["n"]
     return counts
 
 
@@ -265,8 +274,10 @@ def list_workloads(
 # ── Findings list ordered by priority → severity → EPSS ──────────
 
 
-_PRIORITY_ORDER = {b.value: i for i, b in enumerate(_BANDS)}
-_SEVERITY_ORDER = {
+# Canonical urgency order (0 = most urgent); the hardening preview and the
+# template sort-rank filters derive from these.
+PRIORITY_ORDER = {b.value: i for i, b in enumerate(_BANDS)}
+SEVERITY_ORDER = {
     Severity.CRITICAL.value: 0,
     Severity.HIGH.value: 1,
     Severity.MEDIUM.value: 2,
@@ -280,8 +291,8 @@ def order_findings(findings: Iterable[Finding]) -> list[Finding]:
     return sorted(
         findings,
         key=lambda f: (
-            _PRIORITY_ORDER.get(f.effective_priority, 99),
-            _SEVERITY_ORDER.get(f.severity, 99),
+            PRIORITY_ORDER.get(f.effective_priority, 99),
+            SEVERITY_ORDER.get(f.severity, 99),
             -(f.epss_score or 0.0),
         ),
     )
@@ -385,7 +396,6 @@ def list_workload_images(workloads, *, include_history: bool = False):
 # ── /findings/ list-page query helpers ──────────────────────────
 
 
-_EXPOSURE_VALUES = {"internet", "sensitive", "either"}
 _FINDING_LIST_SORTS = {
     "last_seen": "last_seen",
     "first_seen": "first_seen",

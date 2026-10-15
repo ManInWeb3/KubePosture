@@ -18,28 +18,12 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 
-from core.constants import PriorityBand, Severity, Source
-from core.models import EpssScore, Finding, KevEntry, Workload
+from core.constants import PriorityBand, Source
+from core.models import Finding, Workload
 from core.parsers.trivy import parse_trivy_cli_vulnerabilities
+from core.services.dedup import batch_enrichment
+from core.services.inventory import PRIORITY_ORDER, SEVERITY_ORDER
 from core.urgency import apply_score
-
-# Matches inventory.order_findings — preview rows are sorted the same way the
-# real findings panel does it, so users don't have to scroll past low-priority
-# CLI-order rows to find the IMMEDIATE ones.
-_PRIORITY_RANK = {
-    PriorityBand.IMMEDIATE.value: 0,
-    PriorityBand.OUT_OF_BAND.value: 1,
-    PriorityBand.SCHEDULED.value: 2,
-    PriorityBand.DEFER.value: 3,
-}
-_SEVERITY_RANK = {
-    Severity.CRITICAL.value: 0,
-    Severity.HIGH.value: 1,
-    Severity.MEDIUM.value: 2,
-    Severity.LOW.value: 3,
-    Severity.INFO.value: 4,
-    Severity.UNKNOWN.value: 5,
-}
 
 SESSION_PREFIX = "hardening_preview"
 SESSION_TTL_SECONDS = 30 * 60
@@ -65,29 +49,6 @@ def is_trivy_cli_json(obj: object) -> bool:
 
 
 # ── Batch enrichment ─────────────────────────────────────────────
-
-
-def batch_enrichment(vuln_ids):
-    """One query each against EpssScore + KevEntry for a list of CVE ids.
-
-    Returns:
-        (epss_map, kev_set)
-        epss_map: {vuln_id: (score, percentile)}
-        kev_set: {vuln_id, ...}
-    """
-    cve_ids = [v for v in set(vuln_ids) if v and v.startswith("CVE-")]
-    if not cve_ids:
-        return {}, set()
-    epss_rows = EpssScore.objects.filter(vuln_id__in=cve_ids).values_list(
-        "vuln_id", "score", "percentile",
-    )
-    epss_map = {v: (s, p) for v, s, p in epss_rows}
-    kev_set = set(
-        KevEntry.objects.filter(vuln_id__in=cve_ids).values_list(
-            "vuln_id", flat=True,
-        )
-    )
-    return epss_map, kev_set
 
 
 # ── Core ─────────────────────────────────────────────────────────
@@ -139,9 +100,11 @@ def preview_trivy_cli_scan(workload: Workload, cli_json: dict) -> PreviewResult:
 
     counts = {b.value: int(bands.get(b.value, 0)) for b in PriorityBand}
 
+    # Same order as inventory.order_findings, so users don't have to scroll
+    # past low-priority CLI-order rows to find the IMMEDIATE ones.
     rendered.sort(key=lambda r: (
-        _PRIORITY_RANK.get(r["effective_priority"], 99),
-        _SEVERITY_RANK.get(r["severity"], 99),
+        PRIORITY_ORDER.get(r["effective_priority"], 99),
+        SEVERITY_ORDER.get(r["severity"], 99),
         -(r["epss_score"] or 0.0),
     ))
 

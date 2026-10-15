@@ -12,7 +12,9 @@ Usage:
 What gets TRUNCATEd:
   Finding, FindingAction
   Workload, WorkloadAlias, WorkloadImageObservation, WorkloadSignal
-  Image
+  Image, SbomComponent (the SBOM inventory hangs off Image — the
+    TRUNCATE … CASCADE always took it; it is listed so the counts and
+    this docstring say so)
   Namespace
   ImportMark, IngestQueue
   ScanInconsistency
@@ -21,7 +23,7 @@ What gets TRUNCATEd:
 What is PRESERVED:
   Cluster (incl. manual flags)
   IngestToken
-  EpssScore, KevEntry
+  EpssScore, KevEntry, SupplyChainIoc
   auth_user, django_session, …
 """
 from django.db import connection, transaction
@@ -35,6 +37,7 @@ from core.models import (
     ImportMark,
     IngestQueue,
     Namespace,
+    SbomComponent,
     ScanInconsistency,
     Snapshot,
     Workload,
@@ -54,6 +57,7 @@ _RUNTIME_TABLES = [
     IngestQueue,
     ImportMark,
     Workload,
+    SbomComponent,
     Image,
     Namespace,
 ]

@@ -115,8 +115,6 @@ def parse_args(argv: list[str] | None = None, env=None) -> argparse.Namespace:
     parser.add_argument("--upload-deadline-seconds", type=int, default=None,
                         help=f"Wall-clock budget for uploads+commit (default {UPLOAD_DEADLINE_DEFAULT}; "
                              "env KUBEPOSTURE_UPLOAD_DEADLINE_SECONDS). Past it, abort instead of retrying.")
-    parser.add_argument("--summary-json", action="store_true",
-                        help="(default on) print a final `SUMMARY {json}` line.")
     args = parser.parse_args(argv)
 
     args.base_url = env.get("KUBEPOSTURE_URL", "http://localhost:8000")
@@ -314,7 +312,7 @@ def _run(args: argparse.Namespace) -> tuple[int, object | None]:
         print(f"Reading captured cluster from {root}")
         by_kind = collect_from_folder(root)
     else:
-        from .sources.kube import collect_from_kube_api, load_kube_config
+        from .sources.kube import InventoryListError, collect_from_kube_api, load_kube_config
         print("Loading kube-api config...")
         try:
             client_module = load_kube_config(args.kubeconfig, args.in_cluster)
@@ -322,7 +320,13 @@ def _run(args: argparse.Namespace) -> tuple[int, object | None]:
             _err(f"error: failed to load kube config: {e}")
             return 2, None
         print("Listing from kube-api...")
-        by_kind = collect_from_kube_api(client_module)
+        try:
+            by_kind = collect_from_kube_api(client_module)
+        except InventoryListError as e:
+            # A partial inventory must never be sent (the server treats a
+            # committed inventory as complete); fail before any upload.
+            _err(f"error: inventory list failed, nothing was sent: {e}")
+            return 2, client_module
 
     rc, summary = run_cycle(args=args, by_kind=by_kind)
     print("SUMMARY " + json.dumps(summary, sort_keys=True))

@@ -100,13 +100,10 @@ class WorkloadDetailView(generics.RetrieveAPIView):
 class FindingListView(generics.ListAPIView):
     serializer_class = FindingSerializer
     filterset_class = FindingFilter
-    ordering_fields = [
-        "severity",
-        "effective_priority",
-        "epss_score",
-        "last_seen",
-        "first_seen",
-    ]
+    # `severity` / `effective_priority` are deliberately absent: they are
+    # CharFields, so `?ordering=severity` would sort alphabetically
+    # (critical, high, low, medium) — not by urgency.
+    ordering_fields = ["epss_score", "last_seen", "first_seen"]
     ordering = ["-last_seen"]
 
     def get_queryset(self):
@@ -132,6 +129,18 @@ class FindingDetailView(generics.RetrieveAPIView):
 
 # ── Image ────────────────────────────────────────────────────────
 
+_UNKNOWN_CLUSTER = object()
+
+
+def _cluster_scope(request):
+    """`?cluster=` → Cluster, None when absent, or `_UNKNOWN_CLUSTER` for a
+    name that doesn't exist. An unknown name used to resolve to None and
+    silently widen the query to the whole fleet."""
+    name = request.query_params.get("cluster")
+    if not name:
+        return None
+    return Cluster.objects.filter(name=name).first() or _UNKNOWN_CLUSTER
+
 
 class ImageListView(generics.ListAPIView):
     """`?cluster=NAME` scopes the `currently_deployed` annotation
@@ -145,10 +154,9 @@ class ImageListView(generics.ListAPIView):
     ordering = ["ref"]
 
     def get_queryset(self):
-        cluster_name = self.request.query_params.get("cluster")
-        cluster = None
-        if cluster_name:
-            cluster = Cluster.objects.filter(name=cluster_name).first()
+        cluster = _cluster_scope(self.request)
+        if cluster is _UNKNOWN_CLUSTER:
+            return Image.objects.none()
         qs = Image.objects.with_currently_deployed(cluster=cluster)
         cd = self.request.query_params.get("currently_deployed")
         if cd is not None:
@@ -162,10 +170,9 @@ class ImageDetailView(generics.RetrieveAPIView):
     lookup_field = "digest"
 
     def get_queryset(self):
-        cluster_name = self.request.query_params.get("cluster")
-        cluster = None
-        if cluster_name:
-            cluster = Cluster.objects.filter(name=cluster_name).first()
+        cluster = _cluster_scope(self.request)
+        if cluster is _UNKNOWN_CLUSTER:
+            return Image.objects.none()
         return Image.objects.with_currently_deployed(cluster=cluster)
 
 

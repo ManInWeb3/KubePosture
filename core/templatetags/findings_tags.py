@@ -9,6 +9,8 @@ from __future__ import annotations
 from django import template
 from django.utils.safestring import mark_safe
 
+from core.services.inventory import PRIORITY_ORDER, SEVERITY_ORDER
+
 register = template.Library()
 
 
@@ -46,8 +48,9 @@ def severity_badge(severity):
 
 # Numeric ranks so kubeposture.js sortable tables order by urgency,
 # not alphabetic textContent. Higher = more urgent — pair with sort-desc.
-_PRIORITY_RANK = {"immediate": 3, "out_of_band": 2, "scheduled": 1, "defer": 0}
-_SEVERITY_RANK = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1, "unknown": 0}
+# Derived from the canonical order in services.inventory (0 = most urgent).
+_PRIORITY_RANK = {k: len(PRIORITY_ORDER) - 1 - i for k, i in PRIORITY_ORDER.items()}
+_SEVERITY_RANK = {k: len(SEVERITY_ORDER) - 1 - i for k, i in SEVERITY_ORDER.items()}
 
 
 @register.filter

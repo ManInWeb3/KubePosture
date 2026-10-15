@@ -476,3 +476,75 @@ def test_current_image_counts_unchanged_with_include_history(authed, scene_with_
     # Same expectations as test_workloads_priority_counts_match for cluster-a/api.
     assert shared["n_immediate"] == 1
     assert shared["n_out_of_band"] == 0
+
+
+def test_workloads_list_is_paginated(authed, cluster_a):
+    """The table used to render every deployed workload on each HTMX
+    keystroke; it is now 50 per page with the shared pagination widget."""
+    ns = Namespace.objects.create(cluster=cluster_a, name="bulk")
+    for i in range(55):
+        Workload.objects.create(cluster=cluster_a, namespace=ns, kind="Deployment",
+                                name=f"wl-{i:03d}", deployed=True)
+
+    resp = authed.get(reverse("workloads-list") + "?cluster=cluster-a&sort=name&dir=asc")
+    body = resp.content.decode()
+    assert resp.status_code == 200
+    assert resp.context["page_obj"].paginator.count == 55
+    assert len(resp.context["rows"]) == 50
+    assert "page=2" in body and "cluster=cluster-a" in body
+
+    page2 = authed.get(reverse("workloads-list") + "?cluster=cluster-a&sort=name&dir=asc&page=2",
+                       HTTP_HX_REQUEST="true", HTTP_HX_TARGET="workload-rows")
+    assert len(page2.context["rows"]) == 5
+    assert "<html" not in page2.content.decode().lower()
+
+
+# ── Workload detail: scope resolution, import rows, preview targets ──
+
+
+@pytest.fixture
+def multi_ns(scene):
+    """`Deployment/api` in a second namespace of cluster-a, seen later
+    than the payments copy."""
+    billing = _ns(scene["cluster_a"], "billing")
+    w = _workload(scene["cluster_a"], billing, "Deployment", "api")
+    Workload.objects.filter(pk=w.pk).update(last_seen_at=timezone.now() + timedelta(hours=1))
+    WorkloadSignal.objects.create(workload=w, signal_id="kp:has-external-lb", currently_active=False)
+    return w
+
+
+def test_workload_detail_namespace_scopes_within_the_selected_cluster(authed, scene, multi_ns):
+    url = reverse("workloads-detail", kwargs={"kind": "Deployment", "name": "api"})
+
+    ctx = authed.get(url).context
+    assert ctx["namespaces_with_workload"] == ["billing", "payments"]
+    assert len(ctx["scoped_workloads"]) == 3
+
+    ctx = authed.get(url + "?cluster=cluster-b").context
+    assert ctx["namespaces_with_workload"] == ["payments"], "namespace list follows the cluster"
+
+    ctx = authed.get(url + "?namespace=billing").context
+    assert [w.pk for w in ctx["scoped_workloads"]] == [multi_ns.pk]
+    assert ctx["selected_namespace"] == "billing" and ctx["selected_cluster"] is None
+
+    assert authed.get(url + "?namespace=ghost").status_code == 404
+    assert authed.get(url + "?cluster=cluster-b&namespace=billing").status_code == 404
+
+
+def test_workload_detail_import_rows_take_the_latest_sighting_per_cluster(authed, scene, multi_ns):
+    url = reverse("workloads-detail", kwargs={"kind": "Deployment", "name": "api"})
+    rows = authed.get(url).context["cluster_imports"]
+    assert [r["cluster"].name for r in rows] == ["cluster-a", "cluster-b"]
+    multi_ns.refresh_from_db()
+    assert rows[0]["last_seen_at"] == multi_ns.last_seen_at, "billing copy was seen last"
+
+
+def test_workload_detail_preview_targets_and_signal_chips(authed, scene, multi_ns):
+    url = reverse("workloads-detail", kwargs={"kind": "Deployment", "name": "api"})
+    ctx = authed.get(url).context
+    assert [c["label"] for c in ctx["preview_target_choices"]] == [
+        "cluster-a / billing", "cluster-a / payments", "cluster-b / payments"]
+    assert ctx["preview_target_choices"][0]["pk"] == multi_ns.pk
+    assert ctx["signal_chips"] == [{"signal_id": "kp:has-nodeport-service", "cluster": "cluster-a"}], (
+        "inactive signals are not chips")
+    assert ctx["is_preview"] is False and ctx["preview"] is None

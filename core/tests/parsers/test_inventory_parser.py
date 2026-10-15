@@ -1,8 +1,9 @@
 """Unit tests for core.parsers.inventory.
 
 Focus: alias resolution and standalone-Pod detection — the densest
-logic in the parser. These run on `parse_envelope` only (no DB
-writes) so they're fast.
+logic in the parser. Most tests run on `parse_envelope` only (no DB
+writes); the `persist()` semantics live in
+test_inventory_persist_semantics.py.
 """
 from __future__ import annotations
 
@@ -246,21 +247,23 @@ def test_unknown_kind_silently_skipped():
     st = inv.parse_envelope(payload, _cluster())
     # ConfigMap silently skipped; Deployment still parsed
     assert ("ns", WorkloadKind.DEPLOYMENT.value, "api") in st.workloads
+    assert st.unknown_kind_skipped == 1, "counted, so persist() can warn about it"
 
 
 def test_pod_security_signals_detected_from_pod_spec():
-    """Pod with hostNetwork=true emits a kp:has-host-network signal."""
+    """hostNetwork / hostPID on a standalone Pod land on its own Workload
+    as the host-namespaces signal; a hardened container adds nothing."""
     pod = _pod("naked", "ns")
     pod["spec"]["hostNetwork"] = True
     pod["spec"]["hostPID"] = True
+    pod["spec"]["containers"][0]["securityContext"] = {
+        "allowPrivilegeEscalation": False, "runAsNonRoot": True, "readOnlyRootFilesystem": True,
+    }
     payload = _envelope(_ns("ns"), pod)
     st = inv.parse_envelope(payload, _cluster())
 
     key = ("ns", WorkloadKind.POD.value, "naked")
-    sigs = st.derived_signals.get(key, set())
-    # Signal IDs are namespaced kp:* — exact ID pattern verified by signals tests;
-    # for parser test we just confirm signals are present
-    assert sigs, "hostNetwork/hostPID should produce derived signals"
+    assert st.derived_signals.get(key) == {"kyverno:disallow-host-namespaces"}
 
 
 @pytest.mark.django_db
@@ -645,3 +648,64 @@ def test_resolve_workload_finds_deployment_via_persisted_pod_alias():
     assert resolved is not None
     assert resolved.kind == WorkloadKind.DEPLOYMENT.value
     assert resolved.name == "api"
+
+
+# ── pod-security signals: "false OR unset" semantics ────────────────
+
+
+def _signals_for_pod(spec_overrides: dict) -> set[str]:
+    pod = _pod("naked", "ns")
+    pod["spec"]["containers"][0].update(spec_overrides)
+    st = inv.parse_envelope(_envelope(_ns("ns"), pod), _cluster())
+    return st.derived_signals.get(("ns", WorkloadKind.POD.value, "naked"), set())
+
+
+def test_container_without_security_context_signals_the_three_require_checks():
+    """Kyverno (and the registry text) fail these checks when the field
+    is unset, not only when it is explicitly false — the common no
+    securityContext case used to produce no signal at all."""
+    sigs = _signals_for_pod({})
+    assert {
+        "kyverno:disallow-privilege-escalation",
+        "kyverno:require-run-as-nonroot",
+        "kyverno:require-ro-rootfs",
+    } <= sigs
+    assert "kyverno:disallow-privileged-containers" not in sigs, "privileged stays explicit-only"
+
+
+def test_hardened_container_produces_no_require_signals():
+    sigs = _signals_for_pod({"securityContext": {
+        "allowPrivilegeEscalation": False, "runAsNonRoot": True, "readOnlyRootFilesystem": True,
+    }})
+    assert not sigs & {
+        "kyverno:disallow-privilege-escalation",
+        "kyverno:require-run-as-nonroot",
+        "kyverno:require-ro-rootfs",
+    }
+
+
+def test_pod_level_run_as_non_root_is_inherited():
+    pod = _pod("naked", "ns")
+    pod["spec"]["securityContext"] = {"runAsNonRoot": True}
+    st = inv.parse_envelope(_envelope(_ns("ns"), pod), _cluster())
+    sigs = st.derived_signals.get(("ns", WorkloadKind.POD.value, "naked"), set())
+    assert "kyverno:require-run-as-nonroot" not in sigs
+
+
+# ── internal load balancer annotations ──────────────────────────────
+
+
+@pytest.mark.parametrize("annotations", [
+    {"service.beta.kubernetes.io/aws-load-balancer-internal": "true"},
+    {"service.beta.kubernetes.io/aws-load-balancer-scheme": "internal"},  # AWS LB Controller
+    {"networking.gke.io/load-balancer-type": "Internal"},
+    {"service.beta.kubernetes.io/azure-load-balancer-internal": "true"},
+])
+def test_internal_lb_annotations_are_recognised(annotations):
+    assert inv._is_internal_lb({"annotations": annotations}) is True
+
+
+def test_internet_facing_aws_lbc_scheme_is_not_internal():
+    assert inv._is_internal_lb(
+        {"annotations": {"service.beta.kubernetes.io/aws-load-balancer-scheme": "internet-facing"}}
+    ) is False

@@ -128,9 +128,10 @@ def imports_pending_clear(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
     satisfied_at = parse_datetime(raw) if isinstance(raw, str) else None
-    if satisfied_at is None:
+    if satisfied_at is None or timezone.is_naive(satisfied_at):
+        # Naive input would TypeError against the stored aware timestamp.
         return Response(
-            {"error": "satisfied_at must be an ISO-8601 datetime string"},
+            {"error": "satisfied_at must be an ISO-8601 datetime string with a timezone"},
             status=status.HTTP_400_BAD_REQUEST,
         )
     cleared = False

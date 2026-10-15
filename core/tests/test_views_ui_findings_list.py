@@ -132,6 +132,7 @@ def test_invalid_filter_values_are_dropped(client, viewer, workload):
     })
     assert resp.status_code == 200
     assert "CVE-Z" in resp.content.decode()
+    assert (resp.context["filters"]["epss"], resp.context["filters"]["age"]) == ("", "")
 
 
 def test_internet_checkbox_filters_to_exposed_namespace(client, viewer, cluster):

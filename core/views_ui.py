@@ -8,14 +8,16 @@ slice.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import timedelta
 from types import SimpleNamespace
 
 from django.contrib import messages
+from django.contrib.auth import update_session_auth_hash
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.contrib.auth.models import Group, User
 from django.core.paginator import Paginator
-from django.db import transaction
 from django.db.models import Count, Q
 from django.http import Http404, HttpResponse, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
@@ -25,8 +27,17 @@ from django.views import View
 from django.views.generic import RedirectView
 
 from core.api.auth import generate_token
-from core.constants import PriorityBand, Source, WorkloadKind
-from core.models import Cluster, Finding, Image, IngestToken, Namespace, UserPreference, Workload
+from core.constants import Environment, ImportMarkState, PriorityBand, Source, WorkloadKind
+from core.models import (
+    Cluster,
+    Finding,
+    Image,
+    ImportMark,
+    IngestToken,
+    Namespace,
+    UserPreference,
+    Workload,
+)
 from core.services import hardening_preview
 from core.services.cluster_removal import remove_cluster
 from core.services.components import (
@@ -41,54 +52,111 @@ from core.services.images import (
     list_images,
 )
 from core.services.inventory import (
+    default_finding_qs,
     findings_for_workload_image,
     list_findings,
     list_workload_images,
     list_workloads,
+    restrict_to_currently_deployed_images,
     workloads_for_kind_name,
 )
-from core.services.snapshot import (
-    capture_cluster_snapshot,
-    capture_namespace_snapshot,
-)
-from core.urgency import recompute_batch
+from core.services.snapshot import bracketed_recompute
+from core.templatetags.access_tags import is_admin
 
 
 def _is_admin(user) -> bool:
-    """Admin if superuser or in the seeded `admin` group."""
-    if not getattr(user, "is_authenticated", False):
-        return False
-    if user.is_superuser:
-        return True
-    return user.groups.filter(name="admin").exists()
+    """Admin if superuser or in the seeded `admin` group. Delegates to the
+    templatetag filter so the view and the navbar share one cached query."""
+    return is_admin(user)
 
 
-def _recompute_cluster(cluster: Cluster) -> int:
-    """Recompute effective_priority for every Finding in `cluster`.
+def _active_findings_by_namespace(cluster: Cluster) -> dict[int, int]:
+    """Namespace id → active-finding count, using the same definition as
+    the workloads / findings pages (default filter + currently deployed
+    image). A raw `Count("workloads__findings")` counted stale, muted and
+    rolled-out findings, so the cluster page disagreed with every other
+    page for the same namespace."""
+    rows = (
+        restrict_to_currently_deployed_images(default_finding_qs(cluster=cluster))
+        .order_by()
+        .values("workload__namespace_id")
+        .annotate(n=Count("id"))
+    )
+    return {r["workload__namespace_id"]: r["n"] for r in rows if r["workload__namespace_id"]}
 
-    Wraps the same `recompute_batch` the management command uses.
-    """
-    findings = list(Finding.objects.filter(cluster=cluster).only("id"))
-    return recompute_batch(findings)
+
+def _latest_import(cluster: Cluster) -> dict | None:
+    """The cluster's most recent import (by `started_at`), one row per
+    kind, rolled up into a status for the cluster page:
+    `uploading` (a kind still open), `processing` (committed, draining),
+    `discarded` (never applied — reason on the row), `failed` (every kind
+    reaped but some payloads failed), else `complete`. None when the
+    cluster has never imported."""
+    latest = (
+        ImportMark.objects.filter(cluster=cluster)
+        .order_by("-started_at", "-id")
+        .values_list("import_id", flat=True)
+        .first()
+    )
+    if latest is None:
+        return None
+    kinds = list(ImportMark.objects.filter(cluster=cluster, import_id=latest).order_by("kind"))
+    states = {m.state for m in kinds}
+    discard = next((m.discard_reason for m in kinds if m.discard_reason), "")
+    failed = sum(m.failed_count for m in kinds)
+    if discard:
+        status = "discarded"
+    elif ImportMarkState.OPEN.value in states:
+        status = "uploading"
+    elif ImportMarkState.DRAINING.value in states:
+        status = "processing"
+    elif failed:
+        status = "failed"
+    else:
+        status = "complete"
+    return {
+        "import_id": latest,
+        "started_at": kinds[0].started_at,
+        "completed_at": max((m.completed_at for m in kinds if m.completed_at), default=None),
+        "status": status,
+        "discard_reason": discard,
+        "failed_count": failed,
+        "reaped": sum(m.state == ImportMarkState.REAPED.value for m in kinds),
+        "kinds": kinds,
+    }
 
 
-@transaction.atomic
 def _bracketed_namespace_mutation(ns: Namespace, mutate) -> None:
-    """Wrap a namespace-flag mutation in pre/post cluster + namespace
-    Snapshot rows around a priority recompute, so trend charts show a
-    clean before/after step at the moment of the edit instead of waiting
-    for the next 06:30 daily heartbeat.
-    """
-    capture_cluster_snapshot(ns.cluster)
-    capture_namespace_snapshot(ns)
-    mutate()
-    _recompute_cluster(ns.cluster)
-    capture_cluster_snapshot(ns.cluster)
-    capture_namespace_snapshot(ns)
+    """Namespace-flag edit bracketed by pre/post snapshots — see
+    `core.services.snapshot.bracketed_recompute`."""
+    bracketed_recompute(ns.cluster, mutate, namespace=ns)
 
 
 def _is_htmx(request) -> bool:
     return request.headers.get("HX-Request") == "true"
+
+
+def _render_list(request, *, target: str, partial: str, page: str, context: dict,
+                 page_context: Callable[[], dict]):
+    """The fork every list / detail page has: an HTMX request whose
+    `HX-Target` is the rows container gets the `partial` with `context`;
+    anything else gets the full `page` with `context` plus
+    `page_context()` — a callable so the dropdown / tile queries only
+    run when the chrome is actually rendered."""
+    if _is_htmx(request) and request.headers.get("HX-Target") == target:
+        return render(request, partial, context)
+    return render(request, page, {**context, **page_context()})
+
+
+def _cluster_and_namespace_choices(cluster_name: str | None) -> tuple:
+    """`(clusters, namespace_names)` for the list-page filter dropdowns:
+    every cluster, and the names of namespaces with at least one deployed
+    workload — in the selected cluster when one is."""
+    ns_qs = Namespace.objects.filter(workloads__deployed=True)
+    if cluster_name:
+        ns_qs = ns_qs.filter(cluster__name=cluster_name)
+    namespace_names = list(ns_qs.values_list("name", flat=True).distinct().order_by("name"))
+    return Cluster.objects.order_by("name"), namespace_names
 
 
 # ── Root redirect ────────────────────────────────────────────────
@@ -126,31 +194,31 @@ class WorkloadsListView(LoginRequiredMixin, View):
             sort=sort,
             sort_dir=sort_dir,
         )
+        # Rows are cheap dicts (band counts are one GROUP BY), but the
+        # table itself was unbounded — a fleet-wide list rendered every
+        # deployed workload on each HTMX keystroke.
+        page = Paginator(rows, 50).get_page(params.get("page") or 1)
 
-        if _is_htmx(request) and (request.headers.get("HX-Target") == "workload-rows"):
-            return render(request, "workloads/_rows.html", {"rows": rows})
+        def page_context():
+            clusters, namespace_names = _cluster_and_namespace_choices(cluster)
+            return {
+                "nav": "workloads",
+                "clusters": clusters,
+                "namespace_names": namespace_names,
+                "filters": {
+                    "cluster": cluster or "",
+                    "namespace": namespace or "",
+                    "name": name_contains or "",
+                    "sort": sort or "",
+                    "dir": sort_dir,
+                },
+            }
 
-        clusters = Cluster.objects.order_by("name")
-        ns_qs = Namespace.objects.filter(workloads__deployed=True)
-        if cluster:
-            ns_qs = ns_qs.filter(cluster__name=cluster)
-        namespace_names = list(
-            ns_qs.values_list("name", flat=True).distinct().order_by("name")
+        return _render_list(
+            request, target="workload-rows", partial="workloads/_rows.html", page=self.template_name,
+            context={"page_obj": page, "rows": page.object_list, "request_qs": _qs_without_page(request.GET)},
+            page_context=page_context,
         )
-
-        return render(request, self.template_name, {
-            "nav": "workloads",
-            "rows": rows,
-            "clusters": clusters,
-            "namespace_names": namespace_names,
-            "filters": {
-                "cluster": cluster or "",
-                "namespace": namespace or "",
-                "name": name_contains or "",
-                "sort": sort or "",
-                "dir": sort_dir,
-            },
-        })
 
 
 # ── Workload detail ──────────────────────────────────────────────
@@ -192,6 +260,121 @@ def _candidate_image_row(workload, preview) -> dict:
     }
 
 
+@dataclass(frozen=True)
+class _WorkloadScope:
+    """What `/workloads/<kind>/<name>/?cluster=&namespace=` resolves to."""
+
+    cluster_name: str | None
+    namespace_name: str | None
+    clusters_with_workload: list[str]
+    namespaces_with_workload: list[str]
+    scoped: list[Workload]
+
+
+def _resolve_workload_scope(request, kind: str, name: str) -> _WorkloadScope:
+    """Deployed `(kind, name)` instances across the fleet, narrowed by
+    `?cluster=` and `?namespace=`. 404 when nothing is deployed under
+    that identity, or when a selector names a cluster / namespace it
+    isn't deployed in. The namespace list is scoped to the selected
+    cluster so users only see namespaces that hold the workload there."""
+    if kind not in WorkloadKind.values:
+        raise Http404("unknown workload kind")
+    cluster_name = request.GET.get("cluster") or None
+    namespace_name = request.GET.get("namespace") or None
+    all_workloads = [w for w in workloads_for_kind_name(kind, name) if w.deployed]
+    if not all_workloads:
+        raise Http404("workload not found")
+
+    clusters_with_workload = sorted({w.cluster.name for w in all_workloads})
+    if cluster_name and cluster_name not in clusters_with_workload:
+        raise Http404("workload not deployed in that cluster")
+    namespaces_with_workload = sorted({
+        w.namespace.name for w in all_workloads
+        if cluster_name is None or w.cluster.name == cluster_name
+    })
+    if namespace_name and namespace_name not in namespaces_with_workload:
+        raise Http404("workload not deployed in that namespace")
+
+    scoped = [w for w in all_workloads if (
+        (cluster_name is None or w.cluster.name == cluster_name)
+        and (namespace_name is None or w.namespace.name == namespace_name)
+    )]
+    return _WorkloadScope(cluster_name, namespace_name, clusters_with_workload, namespaces_with_workload, scoped)
+
+
+def _image_rows_with_preview(request, scoped: list[Workload], *, include_history: bool):
+    """`(image_rows, preview)`: the per-(workload, image) rows for the
+    scope, with a stashed hardening-preview candidate row prepended when
+    `?image=` names one. The candidate only renders when the URL has
+    narrowed to a single (cluster, namespace) — the preview is scored
+    against one workload, not an aggregate, so showing it under a
+    multi-cluster header would be misleading."""
+    image_rows = list_workload_images(scoped, include_history=include_history)
+    selected_digest = request.GET.get("image") or None
+    preview = None
+    if len(scoped) == 1 and hardening_preview.is_candidate_digest(selected_digest):
+        cid = hardening_preview.candidate_id_from_digest(selected_digest)
+        preview = hardening_preview.load(request, scoped[0].pk, cid)
+    if preview is not None:
+        image_rows = [_candidate_image_row(scoped[0], preview)] + image_rows
+    return image_rows, preview
+
+
+def _active_row_and_findings(request, image_rows: list[dict], preview) -> tuple[dict | None, list, bool]:
+    """`(active_row, findings, is_preview)`. The active row is the
+    `?image=<digest>` match if it is in scope, else the first row of the
+    urgency-sorted list; its findings come from the preview stash when
+    the candidate row is active, from the DB otherwise."""
+    selected_digest = request.GET.get("image") or None
+    active_row = None
+    if selected_digest:
+        active_row = next((r for r in image_rows if r["image"].digest == selected_digest), None)
+    if active_row is None and image_rows:
+        active_row = image_rows[0]
+
+    is_preview = bool(active_row and active_row.get("is_candidate"))
+    if is_preview and preview is not None:
+        findings = preview.findings
+    elif active_row:
+        findings = findings_for_workload_image(active_row["workload"], active_row["image"])
+    else:
+        findings = []
+    return active_row, findings, is_preview
+
+
+def _signal_chips(scoped: list[Workload]) -> list[dict]:
+    return [
+        {"signal_id": s.signal_id, "cluster": w.cluster.name}
+        for w in scoped for s in w.signals.all() if s.currently_active
+    ]
+
+
+def _cluster_import_rows(scoped: list[Workload]) -> list[dict]:
+    """One entry per cluster in scope, with the most recent
+    `last_seen_at` across that cluster's workloads in scope (a workload
+    can sit in multiple namespaces). The template renders one Re-import
+    button per row."""
+    seen: dict[int, dict] = {}
+    for w in scoped:
+        row = seen.get(w.cluster_id)
+        if row is None:
+            seen[w.cluster_id] = {"cluster": w.cluster, "last_seen_at": w.last_seen_at}
+        elif w.last_seen_at and (row["last_seen_at"] is None or w.last_seen_at > row["last_seen_at"]):
+            row["last_seen_at"] = w.last_seen_at
+    return sorted(seen.values(), key=lambda r: r["cluster"].name)
+
+
+def _preview_target_choices(scoped: list[Workload]) -> list[dict]:
+    """The hardening form renders whenever there's at least one workload
+    in scope. With a single workload it binds via a hidden input; with
+    multiple (multi-cluster / multi-namespace aggregate) it adds a picker
+    so the user can choose which workload's context to score against."""
+    return [
+        {"pk": w.pk, "label": f"{w.cluster.name} / {w.namespace.name}"}
+        for w in sorted(scoped, key=lambda w: (w.cluster.name, w.namespace.name))
+    ]
+
+
 class WorkloadDetailView(LoginRequiredMixin, View):
     """`/workloads/<kind>/<name>/` — multi-cluster aggregate; cluster
     selector narrows via `?cluster=<name>`.
@@ -200,148 +383,35 @@ class WorkloadDetailView(LoginRequiredMixin, View):
     template_name = "workloads/detail.html"
 
     def get(self, request, kind, name):
-        if kind not in WorkloadKind.values:
-            raise Http404("unknown workload kind")
-        cluster_name = request.GET.get("cluster") or None
-        namespace_name = request.GET.get("namespace") or None
-        all_workloads = [
-            w for w in workloads_for_kind_name(kind, name) if w.deployed
-        ]
-        if not all_workloads:
-            raise Http404("workload not found")
-
-        clusters_with_workload = sorted(
-            {w.cluster.name for w in all_workloads}
-        )
-        if cluster_name and cluster_name not in clusters_with_workload:
-            raise Http404("workload not deployed in that cluster")
-
-        # Namespace list is scoped to the selected cluster (if any) so users
-        # only see namespaces that actually contain this workload there.
-        namespaces_with_workload = sorted({
-            w.namespace.name for w in all_workloads
-            if cluster_name is None or w.cluster.name == cluster_name
-        })
-        if namespace_name and namespace_name not in namespaces_with_workload:
-            raise Http404("workload not deployed in that namespace")
-
-        scoped = [w for w in all_workloads if (
-            (cluster_name is None or w.cluster.name == cluster_name)
-            and (namespace_name is None or w.namespace.name == namespace_name)
-        )]
-
+        scope = _resolve_workload_scope(request, kind, name)
         include_history = request.GET.get("include_history") == "1"
-        image_rows = list_workload_images(scoped, include_history=include_history)
+        image_rows, preview = _image_rows_with_preview(request, scope.scoped, include_history=include_history)
+        active_row, findings, is_preview = _active_row_and_findings(request, image_rows, preview)
 
-        # Hardening preview: candidate row only renders when the URL has
-        # narrowed to a single (cluster, namespace) — the preview is scored
-        # against one workload, not an aggregate, so showing it under a
-        # multi-cluster header would be misleading.
-        selected_digest = request.GET.get("image") or None
-        preview = None
-        if len(scoped) == 1 and hardening_preview.is_candidate_digest(selected_digest):
-            cid = hardening_preview.candidate_id_from_digest(selected_digest)
-            preview = hardening_preview.load(request, scoped[0].pk, cid)
-        if preview is not None:
-            image_rows = [_candidate_image_row(scoped[0], preview)] + image_rows
-
-        # Active-row pick: ?image=<digest> if it matches a row in scope,
-        # else first row in the urgency-sorted list.
-        active_row = None
-        if selected_digest:
-            active_row = next(
-                (r for r in image_rows if r["image"].digest == selected_digest),
-                None,
-            )
-        if active_row is None and image_rows:
-            active_row = image_rows[0]
-
-        is_candidate_active = bool(
-            active_row and active_row.get("is_candidate")
-        )
-        if is_candidate_active and preview is not None:
-            findings = preview.findings
-        elif active_row:
-            findings = findings_for_workload_image(
-                active_row["workload"], active_row["image"],
-            )
-        else:
-            findings = []
-
-        if _is_htmx(request) and request.headers.get("HX-Target") == "findings-panel":
-            return render(request, "workloads/_findings_panel.html", {
-                "active_row": active_row,
-                "findings": findings,
-                "is_preview": is_candidate_active,
-                "preview": preview,
-            })
-
-        signal_chips = []
-        for w in scoped:
-            for s in w.signals.all():
-                if s.currently_active:
-                    signal_chips.append({
-                        "signal_id": s.signal_id,
-                        "cluster": w.cluster.name,
-                    })
-
-        # Per-cluster import rows: one entry per cluster in scope, with
-        # the most-recent last_seen_at across that cluster's workloads
-        # in scope (a workload can sit in multiple namespaces). The
-        # template renders one Re-import button per row.
-        seen: dict[int, dict] = {}
-        for w in scoped:
-            row = seen.get(w.cluster_id)
-            if row is None:
-                seen[w.cluster_id] = {
-                    "cluster": w.cluster,
-                    "last_seen_at": w.last_seen_at,
-                }
-            elif w.last_seen_at and (
-                row["last_seen_at"] is None
-                or w.last_seen_at > row["last_seen_at"]
-            ):
-                row["last_seen_at"] = w.last_seen_at
-        cluster_imports = sorted(
-            seen.values(), key=lambda r: r["cluster"].name,
-        )
-
-        # Hardening form renders whenever there's at least one workload in
-        # scope. With a single workload it binds via a hidden input; with
-        # multiple (multi-cluster / multi-namespace aggregate) it adds a
-        # picker so the user can pick which workload's context to score
-        # against without leaving the form.
-        preview_target_choices = [
-            {
-                "pk": w.pk,
-                "label": f"{w.cluster.name} / {w.namespace.name}",
+        def page_context():
+            return {
+                "nav": "workloads",
+                "kind": kind,
+                "name": name,
+                "selected_cluster": scope.cluster_name,
+                "clusters_with_workload": scope.clusters_with_workload,
+                "selected_namespace": scope.namespace_name,
+                "namespaces_with_workload": scope.namespaces_with_workload,
+                "scoped_workloads": scope.scoped,
+                "signal_chips": _signal_chips(scope.scoped),
+                "image_rows": image_rows,
+                "include_history": include_history,
+                "cluster_imports": _cluster_import_rows(scope.scoped),
+                "is_admin": _is_admin(request.user),
+                "preview_target_choices": _preview_target_choices(scope.scoped),
             }
-            for w in sorted(
-                scoped, key=lambda w: (w.cluster.name, w.namespace.name)
-            )
-        ]
 
-        return render(request, self.template_name, {
-            "nav": "workloads",
-            "kind": kind,
-            "name": name,
-            "selected_cluster": cluster_name,
-            "clusters_with_workload": clusters_with_workload,
-            "selected_namespace": namespace_name,
-            "namespaces_with_workload": namespaces_with_workload,
-            "scoped_workloads": scoped,
-            "all_workloads": all_workloads,
-            "signal_chips": signal_chips,
-            "image_rows": image_rows,
-            "active_row": active_row,
-            "findings": findings,
-            "include_history": include_history,
-            "cluster_imports": cluster_imports,
-            "is_admin": _is_admin(request.user),
-            "preview": preview,
-            "is_preview": is_candidate_active,
-            "preview_target_choices": preview_target_choices,
-        })
+        return _render_list(
+            request, target="findings-panel", partial="workloads/_findings_panel.html",
+            page=self.template_name,
+            context={"active_row": active_row, "findings": findings, "is_preview": is_preview, "preview": preview},
+            page_context=page_context,
+        )
 
     def post(self, request, kind, name):
         """Hardening-preview upload + clear actions.
@@ -440,31 +510,20 @@ class ImagesListView(LoginRequiredMixin, View):
 
         page = Paginator(rows, 50).get_page(params.get("page") or 1)
 
-        if _is_htmx(request) and request.headers.get("HX-Target") == "image-rows":
-            return render(request, "images/_rows.html", {
+        def page_context():
+            clusters, namespace_names = _cluster_and_namespace_choices(filters["cluster"])
+            return {"nav": "images", "clusters": clusters, "namespace_names": namespace_names}
+
+        return _render_list(
+            request, target="image-rows", partial="images/_rows.html", page=self.template_name,
+            context={
                 "page_obj": page,
                 "rows": page.object_list,
                 "filters": filters,
                 "request_qs": _qs_without_page(request.GET),
-            })
-
-        clusters = Cluster.objects.order_by("name")
-        ns_qs = Namespace.objects.filter(workloads__deployed=True)
-        if filters["cluster"]:
-            ns_qs = ns_qs.filter(cluster__name=filters["cluster"])
-        namespace_names = list(
-            ns_qs.values_list("name", flat=True).distinct().order_by("name")
+            },
+            page_context=page_context,
         )
-
-        return render(request, self.template_name, {
-            "nav": "images",
-            "page_obj": page,
-            "rows": page.object_list,
-            "filters": filters,
-            "clusters": clusters,
-            "namespace_names": namespace_names,
-            "request_qs": _qs_without_page(request.GET),
-        })
 
 
 class ImageDetailView(LoginRequiredMixin, View):
@@ -486,24 +545,21 @@ class ImageDetailView(LoginRequiredMixin, View):
         page = Paginator(detail["findings_qs"], 50).get_page(
             request.GET.get("page") or 1,
         )
-
-        if _is_htmx(request) and request.headers.get("HX-Target") == "finding-rows":
-            return render(request, "findings/_rows.html", {
+        return _render_list(
+            request, target="finding-rows", partial="findings/_rows.html", page=self.template_name,
+            context={
                 "page_obj": page,
                 "findings": page.object_list,
                 "filters": {},
                 "request_qs": _qs_without_page(request.GET),
-            })
-
-        return render(request, self.template_name, {
-            "nav": "images",
-            "image": detail["image"],
-            "workload_rows": detail["workload_rows"],
-            "page_obj": page,
-            "findings": page.object_list,
-            "sbom_count": detail["sbom_count"],
-            "request_qs": _qs_without_page(request.GET),
-        })
+            },
+            page_context=lambda: {
+                "nav": "images",
+                "image": detail["image"],
+                "workload_rows": detail["workload_rows"],
+                "sbom_count": detail["sbom_count"],
+            },
+        )
 
 
 # ── Findings list (fleet-wide triage) ────────────────────────────
@@ -590,52 +646,56 @@ class FindingsListView(LoginRequiredMixin, View):
         qs = list_findings(**common)
         page = Paginator(qs, 50).get_page(params.get("page") or 1)
 
-        if _is_htmx(request) and request.headers.get("HX-Target") == "finding-rows":
-            return render(request, "findings/_rows.html", {
+        def page_context():
+            # Tile counts respect the current filter scope MINUS the
+            # dimension each tile reflects, so they update as you narrow
+            # but don't zero themselves out.
+            tiles = {
+                "immediate": list_findings(**{**common, "priority": None}).filter(
+                    effective_priority=PriorityBand.IMMEDIATE).count(),
+                "kev": list_findings(**{**common, "kev": False}).filter(
+                    kev_listed=True).count(),
+                # Tile drops the two exposure checkboxes from the count so
+                # ?priority=defer still shows non-zero exposed-namespace findings.
+                "exposed": list_findings(
+                    **{**common, "exposure": None}
+                ).filter(
+                    Q(workload__namespace__internet_exposed=True)
+                    | Q(workload__namespace__contains_sensitive_data=True)
+                ).count(),
+                "new_week": list_findings(**{**common, "age_days": None}).filter(
+                    first_seen__gte=timezone.now() - timedelta(days=7)).count(),
+            }
+            return {
+                "nav": "findings",
+                "tiles": tiles,
+                "active_preset": _active_preset(filters),
+                "priority_choices": PriorityBand.choices,
+                "source_choices": Source.choices,
+            }
+
+        return _render_list(
+            request, target="finding-rows", partial="findings/_rows.html", page=self.template_name,
+            context={
                 "page_obj": page,
                 "findings": page.object_list,
                 "filters": filters,
                 "request_qs": _qs_without_page(request.GET),
-            })
-
-        # Tile counts respect the current filter scope MINUS the dimension
-        # each tile reflects, so they update as you narrow but don't
-        # zero themselves out.
-        tiles = {
-            "immediate": list_findings(**{**common, "priority": None}).filter(
-                effective_priority=PriorityBand.IMMEDIATE).count(),
-            "kev": list_findings(**{**common, "kev": False}).filter(
-                kev_listed=True).count(),
-            # Tile drops the two exposure checkboxes from the count so
-            # ?priority=defer still shows non-zero exposed-namespace findings.
-            "exposed": list_findings(
-                **{**common, "exposure": None}
-            ).filter(
-                Q(workload__namespace__internet_exposed=True)
-                | Q(workload__namespace__contains_sensitive_data=True)
-            ).count(),
-            "new_week": list_findings(**{**common, "age_days": None}).filter(
-                first_seen__gte=timezone.now() - timedelta(days=7)).count(),
-        }
-
-        return render(request, self.template_name, {
-            "nav": "findings",
-            "page_obj": page,
-            "findings": page.object_list,
-            "filters": filters,
-            "tiles": tiles,
-            "active_preset": _active_preset(filters),
-            "priority_choices": PriorityBand.choices,
-            "source_choices": Source.choices,
-            "request_qs": _qs_without_page(request.GET),
-        })
+            },
+            page_context=page_context,
+        )
 
 
 def _qs_without_page(get_params) -> str:
     """Return URL-encoded querystring excluding the `page` key — used
-    so pagination links can append `?<other_filters>&page=N`."""
-    pairs = [(k, v) for k, v in get_params.items() if k != "page"]
-    return "&".join(f"{k}={v}" for k, v in pairs if v != "")
+    so pagination links can append `?<other_filters>&page=N`. Values are
+    re-encoded: a filter containing `+ & = # %` must survive the round
+    trip into the page-2 link."""
+    qd = get_params.copy()
+    qd.pop("page", None)
+    for key in [k for k, v in qd.items() if v == ""]:
+        qd.pop(key)
+    return qd.urlencode()
 
 
 # ── Finding detail (HTMX fragment for workload-page offcanvas) ────
@@ -762,26 +822,22 @@ class ComponentsListView(LoginRequiredMixin, View):
         )
 
         page = Paginator(rows, 50).get_page(params.get("page") or 1)
-
-        if _is_htmx(request) and request.headers.get("HX-Target") == "component-rows":
-            return render(request, "components/_rows.html", {
+        return _render_list(
+            request, target="component-rows", partial="components/_rows.html", page=self.template_name,
+            context={
                 "page_obj": page,
                 "components": page.object_list,
                 "filters": filters,
                 "request_qs": _qs_without_page(request.GET),
-            })
-
-        return render(request, self.template_name, {
-            "nav": "components",
-            "page_obj": page,
-            "components": page.object_list,
-            "filters": filters,
-            "image": image,
-            "ecosystems": list_ecosystems(cluster=cluster),
-            "clusters": list(Cluster.objects.order_by("name").values_list("name", flat=True)),
-            "summary": summary_counts(cluster=cluster),
-            "request_qs": _qs_without_page(request.GET),
-        })
+            },
+            page_context=lambda: {
+                "nav": "components",
+                "image": image,
+                "ecosystems": list_ecosystems(cluster=cluster),
+                "clusters": list(Cluster.objects.order_by("name").values_list("name", flat=True)),
+                "summary": summary_counts(cluster=cluster),
+            },
+        )
 
 
 class ComponentDetailPanelView(LoginRequiredMixin, View):
@@ -799,10 +855,11 @@ class ComponentDetailPanelView(LoginRequiredMixin, View):
             raise Http404("purl is required")
 
         cluster_name = request.GET.get("cluster") or ""
-        cluster = (
-            Cluster.objects.filter(name=cluster_name).first()
-            if cluster_name else None
-        )
+        cluster = None
+        if cluster_name:
+            cluster = Cluster.objects.filter(name=cluster_name).first()
+            if cluster is None:
+                raise Http404("unknown cluster")  # not a silent fleet-wide view
         include_inactive = request.GET.get("include_inactive") == "1"
 
         detail = component_detail(
@@ -863,24 +920,20 @@ class ClusterDetailView(LoginRequiredMixin, View):
     template_name = "clusters/detail.html"
 
     def _context(self, request, cluster):
-        # Active namespaces first, then inactive; both alphabetical.
-        # Annotate with finding counts so the row shows useful info.
-        namespaces = (
-            Namespace.objects
-            .filter(cluster=cluster)
-            .annotate(
-                finding_count=Count(
-                    "workloads__findings",
-                    filter=Q(workloads__deployed=True),
-                    distinct=True,
-                ),
-            )
-            .order_by("-active", "name")
-        )
+        # Active namespaces first, then inactive; both alphabetical, each
+        # carrying its active-finding count for the row.
+        namespaces = list(Namespace.objects.filter(cluster=cluster).order_by("-active", "name"))
+        counts = _active_findings_by_namespace(cluster)
+        for ns in namespaces:
+            ns.finding_count = counts.get(ns.pk, 0)
+        active = Namespace.objects.filter(cluster=cluster, active=True)
         return {
             "nav": "clusters",
             "cluster": cluster,
             "namespaces": namespaces,
+            "has_public_exposure": active.filter(internet_exposed=True).exists(),
+            "has_sensitive_data": active.filter(contains_sensitive_data=True).exists(),
+            "latest_import": _latest_import(cluster),
             "is_admin": _is_admin(request.user),
         }
 
@@ -895,6 +948,9 @@ class ClusterDetailView(LoginRequiredMixin, View):
 
         changed = []
         env = (request.POST.get("environment") or "").strip()
+        if env and env not in Environment.values:
+            messages.error(request, f"Unknown environment '{env}'.")
+            return redirect("cluster-detail", pk=cluster.pk)
         if env and env != cluster.environment:
             cluster.environment = env
             cluster.environment_is_manual = True
@@ -913,8 +969,11 @@ class ClusterDetailView(LoginRequiredMixin, View):
             changed += ["region", "region_is_manual"]
 
         if changed:
-            cluster.save(update_fields=changed)
-            updated = _recompute_cluster(cluster)
+            # Same snapshot bracketing as the admin's ClusterAdmin.save_model,
+            # so a UI environment flip shows as a step on the trend chart.
+            updated = bracketed_recompute(
+                cluster, lambda: cluster.save(update_fields=changed),
+            )
             messages.success(
                 request,
                 f"Saved {', '.join(c for c in changed if not c.endswith('_is_manual'))}; "
@@ -982,17 +1041,18 @@ class ClusterDeleteView(LoginRequiredMixin, View):
         return redirect("cluster-list")
 
 
-class NamespaceToggleView(LoginRequiredMixin, View):
-    """HTMX endpoint that flips `internet_exposed` or
-    `contains_sensitive_data` on a namespace and returns the re-rendered
-    row partial. Admin only.
-    """
+class _NamespaceRowMutationView(LoginRequiredMixin, View):
+    """Base for the admin-only HTMX endpoints on the cluster page's
+    namespace rows: run a flag edit bracketed by pre/post snapshots
+    (`bracketed_recompute`) and return the re-rendered row partial with
+    a fresh active-finding count. Subclasses implement `mutation`."""
 
-    ALLOWED_FIELDS = {
-        "internet_exposed": "exposure_is_manual",
-        "contains_sensitive_data": "sensitive_is_manual",
-    }
     template_name = "clusters/_namespace_row.html"
+
+    def mutation(self, request, ns: Namespace) -> HttpResponse | Callable[[], None]:
+        """Either an error response, or the zero-arg callable that
+        performs the edit (run inside the snapshot bracket)."""
+        raise NotImplementedError
 
     def post(self, request, cluster_pk, ns_pk):
         if not _is_admin(request.user):
@@ -1002,9 +1062,31 @@ class NamespaceToggleView(LoginRequiredMixin, View):
             pk=ns_pk,
             cluster_id=cluster_pk,
         )
+        mutate = self.mutation(request, ns)
+        if isinstance(mutate, HttpResponse):
+            return mutate
+        _bracketed_namespace_mutation(ns, mutate)
+        # Re-annotate finding_count so the row's count cell stays accurate.
+        ns.finding_count = _active_findings_by_namespace(ns.cluster).get(ns.pk, 0)
+        return render(request, self.template_name, {
+            "ns": ns,
+            "cluster": ns.cluster,
+            "is_admin": True,
+        })
+
+
+class NamespaceToggleView(_NamespaceRowMutationView):
+    """Flips `internet_exposed` or `contains_sensitive_data` on a
+    namespace and pins the matching `*_is_manual` flag."""
+
+    ALLOWED_FIELDS = {
+        "internet_exposed": "exposure_is_manual",
+        "contains_sensitive_data": "sensitive_is_manual",
+    }
+
+    def mutation(self, request, ns):
         if not ns.active:
             return HttpResponse("namespace inactive", status=409)
-
         field = (request.POST.get("field") or "").strip()
         manual_field = self.ALLOWED_FIELDS.get(field)
         if manual_field is None:
@@ -1014,67 +1096,22 @@ class NamespaceToggleView(LoginRequiredMixin, View):
             setattr(ns, field, not getattr(ns, field))
             setattr(ns, manual_field, True)
             ns.save(update_fields=[field, manual_field])
-
-        _bracketed_namespace_mutation(ns, _flip)
-
-        # Re-annotate finding_count so the row's count cell stays accurate.
-        ns.finding_count = (
-            ns.workloads.filter(deployed=True)
-            .aggregate(n=Count("findings", distinct=True))["n"] or 0
-        )
-        return render(request, self.template_name, {
-            "ns": ns,
-            "cluster": ns.cluster,
-            "is_admin": True,
-        })
+        return _flip
 
 
-class NamespaceResetAutoView(LoginRequiredMixin, View):
-    """HTMX endpoint that clears the `*_is_manual` flags on a namespace
-    so the next inventory sync re-applies auto-detection. Admin only.
-    """
+class NamespaceResetAutoView(_NamespaceRowMutationView):
+    """Clears the `*_is_manual` flags on a namespace so the next
+    inventory sync re-applies auto-detection."""
 
-    template_name = "clusters/_namespace_row.html"
-
-    def post(self, request, cluster_pk, ns_pk):
-        if not _is_admin(request.user):
-            return HttpResponseForbidden("admin only")
-        ns = get_object_or_404(
-            Namespace.objects.select_related("cluster"),
-            pk=ns_pk,
-            cluster_id=cluster_pk,
-        )
+    def mutation(self, request, ns):
         def _reset():
             ns.exposure_is_manual = False
             ns.sensitive_is_manual = False
             ns.save(update_fields=["exposure_is_manual", "sensitive_is_manual"])
-
-        _bracketed_namespace_mutation(ns, _reset)
-
-        ns.finding_count = (
-            ns.workloads.filter(deployed=True)
-            .aggregate(n=Count("findings", distinct=True))["n"] or 0
-        )
-        return render(request, self.template_name, {
-            "ns": ns,
-            "cluster": ns.cluster,
-            "is_admin": True,
-        })
+        return _reset
 
 
 # ── Profile (per-user UI preferences) ────────────────────────────
-
-
-class _PrefView:
-    """Lightweight wrapper exposing `show_help` for the template, since the
-    storage side uses inverted `hide_help` semantics."""
-
-    def __init__(self, pref):
-        self._pref = pref
-
-    @property
-    def show_help(self) -> bool:
-        return not self._pref.hide_help
 
 
 class ProfileView(LoginRequiredMixin, View):
@@ -1094,7 +1131,8 @@ class ProfileView(LoginRequiredMixin, View):
         return {
             "nav": "profile",
             "groups": list(request.user.groups.values_list("name", flat=True)),
-            "preference": _PrefView(pref),
+            # Storage uses inverted `hide_help` semantics.
+            "show_help": not pref.hide_help,
         }
 
     def get(self, request):
@@ -1240,22 +1278,33 @@ class UserEditView(AdminRequiredMixin, View):
 
     def post(self, request, pk):
         user_obj = get_object_or_404(User, pk=pk)
+        # A group-`admin` (non-superuser) must not be able to take over a
+        # superuser — resetting its password is a path into the Django
+        # admin — nor lock themselves out by demoting / deactivating
+        # their own account (mirrors UserToggleActiveView's self guard).
+        if user_obj.is_superuser and not request.user.is_superuser:
+            return HttpResponseForbidden("Only a superuser can edit a superuser")
+        is_self = user_obj == request.user
+
         user_obj.first_name = (request.POST.get("first_name") or "").strip()
         user_obj.last_name = (request.POST.get("last_name") or "").strip()
         user_obj.email = (request.POST.get("email") or "").strip()
-        user_obj.is_active = request.POST.get("is_active") == "on"
-        user_obj.save(update_fields=[
-            "first_name", "last_name", "email", "is_active",
-        ])
+        update_fields = ["first_name", "last_name", "email"]
+        if not is_self:
+            user_obj.is_active = request.POST.get("is_active") == "on"
+            update_fields.append("is_active")
+        user_obj.save(update_fields=update_fields)
 
         role = (request.POST.get("role") or "").strip()
-        if role in ROLE_GROUPS:
+        if role in ROLE_GROUPS and not is_self:
             user_obj.groups.set(Group.objects.filter(name=role))
 
         new_password = request.POST.get("new_password") or ""
         if new_password:
             user_obj.set_password(new_password)
             user_obj.save(update_fields=["password"])
+            if is_self:
+                update_session_auth_hash(request, user_obj)
 
         messages.success(request, f"User '{user_obj.username}' updated.")
         return redirect("user-list")

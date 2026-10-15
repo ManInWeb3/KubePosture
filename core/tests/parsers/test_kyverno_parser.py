@@ -69,6 +69,8 @@ def test_fail_result_creates_finding_and_signal():
     assert out["finding"]["source"] == Source.KYVERNO.value
     assert out["finding"]["category"] == Category.POLICY.value
     assert out["finding"]["vuln_id"] == "disallow-host-namespaces"
+    # ingest consumes only subject / namespace_for_subject / signal_id
+    assert out["signal_id"] == "kyverno:disallow-host-namespaces"
 
 
 def test_error_and_warn_results_treated_as_failures():

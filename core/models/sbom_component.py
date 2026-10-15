@@ -18,6 +18,20 @@ from __future__ import annotations
 
 from django.contrib.postgres.indexes import GinIndex
 from django.db import models
+from django.db.models import F, Func, Value
+
+
+def name_purl_expr():
+    """SQL expression: the purl without its trailing `@<version>`, i.e.
+    `pkg:npm/%40scope/foo@1.2.3` → `pkg:npm/%40scope/foo`. The pattern only
+    strips an `@` segment that contains no `/`, so a literal `@` in a
+    scoped name (`pkg:npm/@types/node@20`) is left alone. Used by the
+    functional index `sbomcomp_name_purl` and by the supply-chain
+    matcher's name-only (every-version) IoC match — keep the two in sync."""
+    return Func(
+        F("purl"), Value("@[^@/]*$"), Value(""),
+        function="regexp_replace", output_field=models.CharField(),
+    )
 
 
 class SbomComponentQuerySet(models.QuerySet):
@@ -88,6 +102,9 @@ class SbomComponent(models.Model):
         indexes = [
             GinIndex(fields=["raw"], name="sbomcomp_raw_gin"),
             models.Index(fields=["name", "version"], name="sbomcomp_name_ver"),
+            # Functional index behind the supply-chain matcher's name-only
+            # (every-version) IoC match — see `name_purl_expr`.
+            models.Index(name_purl_expr(), name="sbomcomp_name_purl"),
         ]
         ordering = ["name", "version"]
 

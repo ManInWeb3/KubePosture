@@ -2,11 +2,16 @@
 queue drains, plus the two ways an import is *discarded* instead.
 
 **Claim first.** Both reaps begin with `transition_mark_to_reaped` and
-return `None` when they lose that conditional UPDATE — two workers
+return `None` when they lose that non-blocking claim — two workers
 seeing the same drained tuple (or a worker racing the safety net) can
-never both run a reap body. Everything after the claim runs in the same
-transaction, so a failing body rolls the claim back and the mark stays
-`draining` for the next sweep.
+never both run a reap body, and the loser returns at once instead of
+waiting behind the winner's transaction. The claim, the body and the
+row deletion run in one transaction, so a failing body rolls the claim
+back and the mark stays `draining` for the next sweep. The priority
+recompute runs AFTER that transaction commits, in its own chunked
+commits (see `_recompute_after_commit`): it is whole-cluster for
+inventory and can take minutes, and holding the mark + cluster row locks
+for that long is what used to stall every other worker pod.
 
 **Rows go at reap.** Nothing reads `IngestQueue.raw_json` after an item
 is `done`. Once the reap has recorded `failed_count` / `last_error` on
@@ -27,11 +32,13 @@ import forever).
 from __future__ import annotations
 
 import logging
+import time
+from collections import defaultdict
 from datetime import timedelta
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import F, Q
 from django.utils import timezone
 
 from core.constants import (
@@ -44,6 +51,7 @@ from core.constants import (
 )
 from core.models import (
     Cluster,
+    Finding,
     ImportMark,
     IngestQueue,
     ScanInconsistency,
@@ -64,12 +72,12 @@ from core.services.queue import (
     transition_mark_to_reaped,
 )
 from core.services.snapshot import (
-    _priority_counts,
-    _severity_counts,
     capture_cluster_heartbeat,
+    grouped_counts,
+    snapshot_row,
 )
 from core.signals import SIGNALS
-from core.urgency import recompute_batch
+from core.urgency import finding_ids, recompute_ids
 
 log = logging.getLogger("core.reaper")
 
@@ -104,13 +112,63 @@ def _release_reap(mark: ImportMark, counters: dict) -> dict:
     return counters
 
 
+def _recompute_after_commit(counters: dict, ids, *, event: str, **extra) -> dict:
+    """Priority recompute for a reap. Runs OUTSIDE the reap transaction:
+    the mark is already `reaped`, its rows deleted, the anchor advanced.
+    It is whole-cluster for inventory and can take minutes, so it must not
+    hold the mark / cluster row locks. `recompute_ids` commits chunk by
+    chunk; a pod killed mid-way keeps the chunks it finished. A failure
+    here is logged and recorded on the counters but never propagated —
+    the reap itself succeeded and cannot be re-run (the mark is terminal);
+    the cluster's next reap or `recalculate_priorities` repairs priorities.
+    """
+    started = time.monotonic()
+    try:
+        scanned, updated = recompute_ids(ids)
+    except Exception:  # noqa: BLE001 - must not undo a committed reap
+        log.exception("%s.failed", event, extra=extra)
+        counters["recompute_failed"] = True
+        return counters
+    counters["priorities_recomputed"] = scanned
+    counters["priorities_changed"] = updated
+    log.info(event, extra={
+        **extra, "findings_recomputed": scanned, "priorities_changed": updated,
+        "seconds": round(time.monotonic() - started, 1),
+    })
+    return counters
+
+
 # ── Inventory reap ------------------------------------------------
 
-@transaction.atomic
 def _reap_inventory(mark: ImportMark) -> dict | None:
-    if not _claim_reap(mark):
+    # Discard, don't promote: a tuple drains once no row is pending or
+    # processing, so an inventory whose row ended `failed` looks drained
+    # too. The worker discards the import when *it* fails the row, but the
+    # abandon-exhausted SQL (a poison item past MAX_RECLAIM_ATTEMPTS) flips
+    # a row to `failed` with no discard — reaping that would advance the
+    # anchor on a cycle that never landed and retire every workload.
+    failed, _ = failure_summary(
+        cluster_name=mark.cluster.name, kind=mark.kind, import_id=mark.import_id,
+    )
+    if failed:
+        discard_import_for_failed_inventory(
+            cluster_name=mark.cluster.name, import_id=mark.import_id,
+        )
         return None
-    return _release_reap(mark, _reap_inventory_body(mark))
+    with transaction.atomic():
+        if not _claim_reap(mark):
+            return None
+        counters = _release_reap(mark, _reap_inventory_body(mark))
+    if counters.get("superseded"):
+        return counters
+    # Recompute priority for all findings on workloads in this cluster
+    # (publicly_exposed / namespace.internet_exposed may have moved).
+    cluster = mark.cluster
+    return _recompute_after_commit(
+        counters, finding_ids(cluster.findings.all()),
+        event="reap.inventory.recompute",
+        cluster=cluster.name, import_id=mark.import_id,
+    )
 
 
 def _reap_inventory_body(mark: ImportMark) -> dict:
@@ -191,85 +249,104 @@ def _reap_inventory_body(mark: ImportMark) -> dict:
     # currently_deployed flip so the snapshot writer can rely on it.
     _write_event_path_workload_snapshots(cluster, mark)
 
-    # Recompute priority for all findings on workloads in this cluster
-    # (publicly_exposed / namespace.internet_exposed may have moved).
-    affected = list(
-        cluster.findings.all().only("id")
-    )
-    recompute_batch(affected)
-
+    # The whole-cluster priority recompute runs in `_reap_inventory`,
+    # after this transaction has committed.
     log.info("reap.inventory", extra={"cluster": cluster.name, **counters})
     return counters
 
 
-def _write_event_path_workload_snapshots(cluster: Cluster, mark: ImportMark) -> None:
+def _classify_image_set_change(current: set[str], previous: set[str]) -> str:
+    added = current - previous
+    removed = previous - current
+    if added and not removed:
+        return ImageSetChangeKind.ADDED.value
+    if removed and not added:
+        return ImageSetChangeKind.REMOVED.value
+    if len(added) == 1 and len(removed) == 1:
+        return ImageSetChangeKind.REPLACED.value
+    return ImageSetChangeKind.MIXED.value
+
+
+def _write_event_path_workload_snapshots(cluster: Cluster, mark: ImportMark) -> int:
     """For each deployed workload, write a Snapshot iff its image-set
-    changed since the previous snapshot for that workload.
+    changed since the previous snapshot for that workload. Returns the
+    number of rows written.
 
     `current_set` is built from observations marked currently_deployed
     by the reaper's flag diff above — stale rows from prior cycles are
     excluded so they don't contaminate the current image set.
+
+    Set-based: the deployed workloads, their current digest sets, their
+    latest populated snapshot (DISTINCT ON) and the grouped finding
+    counts of the changed ones are each one query, then one bulk insert
+    — this runs inside the reap transaction under the mark lock, so its
+    cost must not grow with the cluster.
     """
-    for wl in cluster.workloads.filter(deployed=True).iterator():
-        current_set = sorted({
-            obs.image.digest
-            for obs in wl.image_observations.select_related("image").filter(
-                currently_deployed=True,
-            )
-        })
-        # Compare against the most recent snapshot whose digest set is
-        # populated. Daily-heartbeat rows (change_kind=none) without
-        # an explicit image_digest_set must not break the diff.
-        previous = (
-            wl.snapshots
-            .exclude(image_digest_set=[])
-            .order_by("-captured_at")
-            .first()
-        )
-        previous_set = sorted(previous.image_digest_set) if previous else None
+    deployed = dict(cluster.workloads.filter(deployed=True).values_list("id", "namespace_id"))
+    if not deployed:
+        return 0
 
-        if previous is None:
-            change_kind = ImageSetChangeKind.FIRST_SEEN.value
-            changed = False
-        elif current_set == previous_set:
-            continue  # No change — daily heartbeat handles continuity.
-        else:
-            cur_s = set(current_set)
-            prev_s = set(previous_set or [])
-            added = cur_s - prev_s
-            removed = prev_s - cur_s
-            if added and not removed:
-                change_kind = ImageSetChangeKind.ADDED.value
-            elif removed and not added:
-                change_kind = ImageSetChangeKind.REMOVED.value
-            elif len(added) == 1 and len(removed) == 1:
-                change_kind = ImageSetChangeKind.REPLACED.value
-            else:
-                change_kind = ImageSetChangeKind.MIXED.value
-            changed = True
+    current: dict[int, set[str]] = defaultdict(set)
+    for workload_id, digest in WorkloadImageObservation.objects.filter(
+        workload__cluster=cluster, workload__deployed=True, currently_deployed=True,
+    ).values_list("workload_id", "image__digest"):
+        current[workload_id].add(digest)
 
-        # Scope to findings on currently-deployed images (or image-less
-        # workload-level findings). Without this, the snapshot captures
-        # findings tied to the just-rolled-out image — Trivy can hold a
-        # stale VulnerabilityReport CRD past Pod deletion, and the
-        # ingest path bumps `last_seen` past `last_complete_inventory_at`,
-        # so `default_finding_qs` alone wouldn't filter them out.
-        wf = restrict_to_currently_deployed_images(
-            default_finding_qs(cluster=cluster).filter(workload=wl)
-        )
-        Snapshot.objects.create(
-            scope_kind=SnapshotScope.WORKLOAD.value,
+    # Newest EVENT snapshot per workload — the rows this writer produced
+    # (`change_kind` never `none`). Daily-heartbeat rows (`none`, no
+    # digest set) must not break the diff, and an event row with an
+    # empty set (pods without an imageID yet) must still be found, or
+    # the workload gets a fresh `first_seen` every reap.
+    previous = dict(
+        Snapshot.objects
+        .filter(workload__cluster=cluster, workload__deployed=True)
+        .exclude(change_kind=ImageSetChangeKind.NONE.value)
+        .order_by("workload_id", "-captured_at", "-id")
+        .distinct("workload_id")
+        .values_list("workload_id", "image_digest_set")
+    )
+
+    pending: dict[int, tuple[list[str], str, bool]] = {}
+    for workload_id in deployed:
+        current_set = current.get(workload_id, set())
+        previous_set = previous.get(workload_id)
+        if previous_set is None:
+            pending[workload_id] = (sorted(current_set), ImageSetChangeKind.FIRST_SEEN.value, False)
+        elif current_set != set(previous_set):
+            kind = _classify_image_set_change(current_set, set(previous_set))
+            pending[workload_id] = (sorted(current_set), kind, True)
+        # else: no change — the daily heartbeat handles continuity.
+    if not pending:
+        return 0
+
+    # Scope to findings on currently-deployed images (or image-less
+    # workload-level findings). Without this, the snapshot captures
+    # findings tied to the just-rolled-out image — Trivy can hold a
+    # stale VulnerabilityReport CRD past Pod deletion, and the ingest
+    # path bumps `last_seen` past `last_complete_inventory_at`, so
+    # `default_finding_qs` alone wouldn't filter them out.
+    severity, priority = grouped_counts(
+        restrict_to_currently_deployed_images(
+            default_finding_qs(cluster=cluster).filter(workload_id__in=list(pending)),
+        ),
+        "workload_id",
+    )
+    Snapshot.objects.bulk_create([
+        snapshot_row(
+            SnapshotScope.WORKLOAD.value,
             cluster=cluster,
-            namespace=wl.namespace,
-            workload=wl,
-            severity_counts=_severity_counts(wf),
-            priority_counts=_priority_counts(wf),
-            total_active=wf.count(),
+            namespace_id=deployed[workload_id],
+            workload_id=workload_id,
+            severity_counts=severity.get(workload_id, {}),
+            priority_counts=priority.get(workload_id, {}),
             import_id=mark.import_id,
-            image_digest_set=current_set,
+            image_digest_set=digest_set,
             image_set_changed_from_previous=changed,
-            change_kind=change_kind,
+            change_kind=kind,
         )
+        for workload_id, (digest_set, kind, changed) in pending.items()
+    ])
+    return len(pending)
 
 
 # ── Scan-kind reap (zero-input gate) ------------------------------
@@ -292,14 +369,26 @@ def _scope_has_items(cluster: Cluster, kind: str) -> bool:
     return cluster.workloads.filter(deployed=True).exists()
 
 
-@transaction.atomic
 def _reap_scan(mark: ImportMark) -> dict | None:
-    if not _claim_reap(mark):
-        return None
-    return _release_reap(mark, _reap_scan_body(mark))
+    with transaction.atomic():
+        if not _claim_reap(mark):
+            return None
+        body, workload_ids = _reap_scan_body(mark)
+        counters = _release_reap(mark, body)
+    if not workload_ids:
+        return counters
+    # Recompute the findings of the workloads whose signals were cleared.
+    return _recompute_after_commit(
+        counters, finding_ids(Finding.objects.filter(workload_id__in=workload_ids)),
+        event="reap.scan.recompute",
+        cluster=mark.cluster.name, kind=mark.kind, import_id=mark.import_id,
+    )
 
 
-def _reap_scan_body(mark: ImportMark) -> dict:
+def _reap_scan_body(mark: ImportMark) -> tuple[dict, set[int]]:
+    """Returns `(counters, workload_ids)` — the ids of workloads whose
+    signals were cleared, for the post-commit recompute (empty on the
+    zero-input / partial-failure / nothing-cleared paths)."""
     cluster = mark.cluster
     counters: dict = {"observed_count": mark.observed_count or 0}
     if (mark.observed_count or 0) == 0 and _scope_has_items(cluster, mark.kind):
@@ -316,7 +405,7 @@ def _reap_scan_body(mark: ImportMark) -> dict:
             "trivy.ExposedSecretReport",
         ):
             _write_scan_inconsistencies_for_outage(cluster, mark)
-        return counters
+        return counters, set()
 
     # Some of this kind's payloads failed to process, so their signals
     # were never bumped this cycle. Clearing "everything not bumped"
@@ -332,7 +421,7 @@ def _reap_scan_body(mark: ImportMark) -> dict:
             },
         )
         counters["skipped_partial_failure"] = True
-        return counters
+        return counters, set()
 
     # Source-specific signal clearing — only Kyverno/Trivy signals seen
     # by this kind get cleared. Per the no-canonical-dedup rule, each
@@ -340,6 +429,7 @@ def _reap_scan_body(mark: ImportMark) -> dict:
     # False on rows whose last_seen_at is older than this mark's
     # started_at (i.e. not bumped this cycle) AND whose signal_id was
     # in scope for this kind.
+    workload_ids: set[int] = set()
     in_scope_signal_ids = _signal_ids_for_kind(mark.kind)
     if in_scope_signal_ids:
         affected = list(
@@ -355,48 +445,55 @@ def _reap_scan_body(mark: ImportMark) -> dict:
         if affected:
             WorkloadSignal.objects.bulk_update(affected, ["currently_active"])
             counters["signals_cleared"] = len(affected)
-            # Recompute the affected workloads' findings.
             workload_ids = {s.workload_id for s in affected}
-            from core.models import Finding
-            findings = list(Finding.objects.filter(workload_id__in=workload_ids))
-            recompute_batch(findings)
 
     log.info("reap.scan", extra={"cluster": cluster.name, "kind": mark.kind, **counters})
-    return counters
+    return counters, workload_ids
 
 
 def _write_scan_inconsistencies_for_outage(cluster: Cluster, mark: ImportMark) -> None:
     """One ScanInconsistency row per currently-observed (workload, image)
     pair when a per-image scanner kind reports zero items. Lets Scan
     Health surface a coverage gap for the outage.
+
+    Pairs are deduplicated first: two containers of one workload running
+    the same image are two observation rows but one row here (the unique
+    key is `(cluster, kind, workload, image_digest)`). Known pairs get
+    `consecutive_cycles` bumped in one UPDATE, new ones one bulk insert.
     """
-    obs_qs = (
+    pairs = set(
         WorkloadImageObservation.objects
         .filter(workload__cluster=cluster, workload__deployed=True)
-        .select_related("workload", "image")
+        .values_list("workload_id", "image__digest")
     )
-    for obs in obs_qs:
-        existing = ScanInconsistency.objects.filter(
+    if not pairs:
+        return
+    known = {
+        (workload_id, digest): row_id
+        for row_id, workload_id, digest in ScanInconsistency.objects.filter(
+            cluster=cluster, kind=mark.kind, workload_id__in={w for w, _ in pairs},
+        ).values_list("id", "workload_id", "image_digest")
+        if (workload_id, digest) in pairs
+    }
+    if known:
+        ScanInconsistency.objects.filter(id__in=list(known.values())).update(
+            consecutive_cycles=F("consecutive_cycles") + 1,
+            seen_in_inventory=True,
+            seen_in_scans=False,
+            last_observed_at=timezone.now(),
+        )
+    ScanInconsistency.objects.bulk_create([
+        ScanInconsistency(
             cluster=cluster,
             kind=mark.kind,
-            workload=obs.workload,
-            image_digest=obs.image.digest,
-        ).first()
-        if existing:
-            existing.consecutive_cycles = (existing.consecutive_cycles or 0) + 1
-            existing.seen_in_inventory = True
-            existing.seen_in_scans = False
-            existing.save(update_fields=["consecutive_cycles", "seen_in_inventory", "seen_in_scans", "last_observed_at"])
-        else:
-            ScanInconsistency.objects.create(
-                cluster=cluster,
-                kind=mark.kind,
-                workload=obs.workload,
-                image_digest=obs.image.digest,
-                seen_in_inventory=True,
-                seen_in_scans=False,
-                consecutive_cycles=1,
-            )
+            workload_id=workload_id,
+            image_digest=digest,
+            seen_in_inventory=True,
+            seen_in_scans=False,
+            consecutive_cycles=1,
+        )
+        for workload_id, digest in sorted(pairs - known.keys())
+    ])
 
 
 def _signal_ids_for_kind(kind: str) -> set[str]:
@@ -469,7 +566,12 @@ def discard_import(
     `reaped` with `discard_reason=reason`, record each tuple's failure
     facts, and delete the import's queue rows. Never advances the
     cluster anchor, never runs a diff, never captures a heartbeat —
-    the cycle simply never happened, except for the audit row."""
+    the cycle simply never happened, except for the audit row.
+
+    The `select_for_update` here deliberately waits (no SKIP LOCKED): a
+    discard must be authoritative over every mark of the import. It can
+    only wait behind an in-flight reap of the *same* import, and that
+    reap's transaction is short now that the recompute runs after it."""
     marks = list(
         ImportMark.objects.select_for_update().filter(
             cluster=cluster, import_id=import_id, state__in=list(from_states),

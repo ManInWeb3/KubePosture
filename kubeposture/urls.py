@@ -1,4 +1,6 @@
 """Top-level URL routing."""
+import logging
+
 from django.contrib import admin
 from django.contrib.auth import views as auth_views
 from django.db import connection
@@ -21,8 +23,11 @@ def readyz(request):
         with connection.cursor() as cur:
             cur.execute("SELECT 1")
         return JsonResponse({"status": "ok"})
-    except Exception as exc:  # pragma: no cover — DB rarely down in dev
-        return JsonResponse({"status": "error", "detail": str(exc)}, status=503)
+    except Exception:  # pragma: no cover — DB rarely down in dev
+        # Unauthenticated endpoint: log the driver error (it carries
+        # host / user / dbname) instead of returning it.
+        logging.getLogger("kubeposture.readyz").exception("readyz: database unreachable")
+        return JsonResponse({"status": "error", "detail": "database unreachable"}, status=503)
 
 
 urlpatterns = [

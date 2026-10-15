@@ -76,21 +76,3 @@ namespace, workload, host, registry, repository or digest string survives
 — so a passing verify is the proof the fixture is both faithful and
 clean. Re-run step 2 with `--write-golden` whenever the capture changes.
 
-## `golden/expectations.yaml`
-
-A list of assertion-DSL entries (`core/services/test_assertions.py`),
-evaluated after the first import cycle:
-
-```yaml
-- kind: workload_count
-  filter: {cluster: prod-a, deployed: true}
-  expect: 42
-- kind: finding_count
-  filter: {cluster: prod-a, severity: critical}
-  expect: 17
-- kind: signal_present
-  workload: ns-1a2b3c4d/wl-9f8e7d6c
-  signal_id: kyverno:disallow-host-namespaces
-```
-
-Use the anonymised names (read them from the capture).

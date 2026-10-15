@@ -53,9 +53,10 @@ def _get_or_create_image(*, ref: str, digest: str) -> Image | None:
     """Return / create an Image row keyed by digest. Empty digest → None.
 
     Don't overwrite a longer-already-stored ref with a shorter one —
-    the inventory typically has the fully-qualified ref while Trivy's
-    artifact often omits the registry. Same digest, different display
-    forms; we keep the more informative one.
+    the inventory has the fully-qualified ref and so does a Trivy report
+    that carries `report.registry.server`; a report without that block
+    yields just `repo:tag`. Same digest, different display forms; we
+    keep the more informative one.
     """
     if not digest:
         return None
@@ -99,16 +100,7 @@ def _resolve_workload(
 def _upsert_signal(workload: Workload, signal_id: str) -> None:
     if signal_id not in SIGNALS:
         return
-    obj = WorkloadSignal.objects.filter(workload=workload, signal_id=signal_id).first()
-    if obj:
-        obj.currently_active = True
-        obj.save(update_fields=["currently_active", "last_seen_at"])
-    else:
-        WorkloadSignal.objects.create(
-            workload=workload,
-            signal_id=signal_id,
-            currently_active=True,
-        )
+    WorkloadSignal.objects.upsert(workload, signal_id)
 
 
 # ── Per-kind handlers ---------------------------------------------
@@ -319,33 +311,44 @@ def _process_sbom(item: IngestQueue, parser_func) -> dict:
             "components": len(components),
         },
     )
-    created, updated = 0, 0
-    # Sorted by purl so concurrent workers upserting overlapping images'
-    # components acquire row locks in the same relative order — the
-    # SbomComponent unique key is (image, purl), and update_or_create's
-    # internal select_for_update() deadlocks when two transactions lock
-    # the same two rows in reverse order (see core.services.worker's
-    # deadlock retry, which recovers whatever this doesn't prevent).
-    for c in sorted(components, key=lambda comp: comp["purl"]):
-        _, was_created = SbomComponent.objects.update_or_create(
+    # One INSERT … ON CONFLICT per batch instead of a select_for_update +
+    # INSERT/UPDATE savepoint per component: a BOM with thousands of
+    # components used to hold thousands of row locks for the whole item,
+    # which is the deadlock source core.services.worker retries. Rows are
+    # sorted by purl so two workers upserting overlapping images lock in
+    # the same order; a purl repeated inside one BOM is collapsed (last
+    # wins) because ON CONFLICT cannot touch the same row twice.
+    by_purl: dict[str, SbomComponent] = {}
+    for c in components:
+        purl = _fit(SbomComponent, "purl", c["purl"])
+        by_purl[purl] = SbomComponent(
             image=image,
-            purl=_fit(SbomComponent, "purl", c["purl"]),
-            defaults={
-                "name": _fit(SbomComponent, "name", c["name"]),
-                "version": _fit(SbomComponent, "version", c["version"]),
-                "ecosystem": _fit(SbomComponent, "ecosystem", c["ecosystem"]),
-                "component_type": _fit(SbomComponent, "component_type", c["component_type"]),
-                "supplier": _fit(SbomComponent, "supplier", c["supplier"]),
-                "license": _fit(SbomComponent, "license", c["license"]),
-                "layer_digest": _fit(SbomComponent, "layer_digest", c["layer_digest"]),
-                "raw": c["raw"],
-            },
+            purl=purl,
+            name=_fit(SbomComponent, "name", c["name"]),
+            version=_fit(SbomComponent, "version", c["version"]),
+            ecosystem=_fit(SbomComponent, "ecosystem", c["ecosystem"]),
+            component_type=_fit(SbomComponent, "component_type", c["component_type"]),
+            supplier=_fit(SbomComponent, "supplier", c["supplier"]),
+            license=_fit(SbomComponent, "license", c["license"]),
+            layer_digest=_fit(SbomComponent, "layer_digest", c["layer_digest"]),
+            raw=c["raw"],
         )
-        if was_created:
-            created += 1
-        else:
-            updated += 1
-
+    existing = set(
+        SbomComponent.objects.filter(image=image, purl__in=list(by_purl))
+        .values_list("purl", flat=True)
+    )
+    SbomComponent.objects.bulk_create(
+        [by_purl[p] for p in sorted(by_purl)],
+        update_conflicts=True,
+        unique_fields=["image", "purl"],
+        update_fields=[
+            "name", "version", "ecosystem", "component_type", "supplier",
+            "license", "layer_digest", "raw", "last_seen_at",
+        ],
+        batch_size=1000,
+    )
+    updated = len(existing)
+    created = len(by_purl) - updated
     return {"components": len(components), "created": created, "updated": updated}
 
 
