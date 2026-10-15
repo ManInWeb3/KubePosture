@@ -111,7 +111,6 @@ def test_upsert_retries_once_when_a_concurrent_insert_wins_the_race(monkeypatch)
     luck. Simulate the loser: the first SELECT FOR UPDATE sees nothing, the
     INSERT then collides with a row another transaction committed, and the
     retry must update that row instead of failing the whole queue item."""
-    from django.db import IntegrityError
 
     from core.services import dedup
 

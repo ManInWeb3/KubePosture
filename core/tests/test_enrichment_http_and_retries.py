@@ -13,7 +13,6 @@ from django.db import OperationalError
 from core.models import FeedFetchState
 from core.services import enrichment
 
-
 # ── _exec_with_deadlock_retry ─────────────────────────────────────
 
 

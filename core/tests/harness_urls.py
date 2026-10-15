@@ -15,8 +15,4 @@ from core.api import testing_views
 urlpatterns = [
     path("api/v1/testing/reset/", testing_views.reset),
     path("api/v1/testing/load_scenario/", testing_views.load_scenario),
-    path("api/v1/testing/run_snapshot/", testing_views.run_snapshot),
-    path("api/v1/testing/run_enrichment/", testing_views.run_enrichment),
-    path("api/v1/testing/advance_clock/", testing_views.advance_clock),
-    path("api/v1/testing/assert_batch/", testing_views.assert_batch),
 ]

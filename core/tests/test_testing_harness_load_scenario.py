@@ -87,3 +87,31 @@ def test_count_mismatch_in_finish_is_rejected(client):
     assert resp.status_code == 409
     assert resp.json()["error"] == "count_mismatch"
     assert ImportMark.objects.get(import_id="imp-1").state == ImportMarkState.OPEN.value
+
+
+@pytest.mark.django_db(transaction=True)
+def test_reset_truncates_app_tables_and_keeps_auth_users(client):
+    from django.contrib.auth.models import User
+
+    User.objects.create_user(username="keep", password="x")
+    _load(client, {
+        "cluster": "c-harness", "import_id": "01HW0000000000000000000RSET",
+        "payloads": [{"kind": "inventory", "payload": INV_ENVELOPE}],
+        "finishes": [{"kind": "inventory", "observed_count": 1}],
+    })
+    assert Workload.objects.exists() and Cluster.objects.exists()
+
+    resp = client.post("/api/v1/testing/reset/", data="{}", content_type="application/json")
+
+    assert resp.status_code == 200
+    assert not Workload.objects.exists() and not Cluster.objects.exists()
+    assert not ImportMark.objects.exists() and not IngestQueue.objects.exists()
+    assert User.objects.filter(username="keep").exists()
+
+
+def test_harness_views_refuse_when_the_flag_is_off(client, db):
+    """The prod safety: even with the routes mounted, the views gate on
+    TESTING_HARNESS_ENABLED."""
+    with override_settings(TESTING_HARNESS_ENABLED=False, ROOT_URLCONF="core.tests.harness_urls"):
+        assert client.post("/api/v1/testing/reset/", data="{}", content_type="application/json").status_code == 403
+        assert _load(client, {"cluster": "c", "import_id": "x", "payloads": [], "finishes": []}).status_code == 403

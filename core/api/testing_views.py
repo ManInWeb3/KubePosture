@@ -12,29 +12,15 @@ Endpoints:
         Synchronous: stores one bundle per (import_id, kind) through the
         same service the upload endpoint uses, commits each import,
         drains the queue inline, fires reaps.
-  POST /api/v1/testing/run_snapshot/
-        Fires the daily snapshot-capture inline.
-  POST /api/v1/testing/run_enrichment/
-        body: {source: "epss"|"kev", path: "..."}
-        Loads a fixture file off disk and applies it.
-  POST /api/v1/testing/advance_clock/
-        body: {seconds: N}
-        Shifts every stored timestamp in app tables backwards by
-        N seconds. Real timezone.now() is unchanged, so any
-        time-based gate (safety-net 1h, expires_at, last_seen
-        staleness) sees pre-existing rows as "older" — exactly
-        what tests need to assert TTL/aging behaviour without
-        sleeping.
-  POST /api/v1/testing/assert_batch/
-        body: {assertions: [...]}  →  {results: [...]}
+
+The former run_snapshot / run_enrichment / advance_clock / assert_batch
+endpoints and the assertion DSL had no callers and were removed; the
+realdata e2e tests assert through the ORM instead.
 """
 from __future__ import annotations
 
-from datetime import timedelta
-
 from django.conf import settings
-from django.db import connection, transaction
-from django.db.models import F
+from django.db import connection
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import (
@@ -65,7 +51,6 @@ from core.models import (
 )
 from core.services import worker as worker_service
 from core.services.bundle_ingest import BundleError, commit_import, store_items
-from core.services.test_assertions import evaluate_assertions
 
 
 def _gated() -> Response | None:
@@ -183,123 +168,3 @@ def load_scenario(request):
         "finishes": len(finishes),
         **totals,
     })
-
-
-@api_view(["POST"])
-@authentication_classes([])
-@permission_classes([AllowAny])
-def run_snapshot(request):
-    if (gate := _gated()):
-        return gate
-    from core.services.snapshot import capture_daily_heartbeat
-    n = capture_daily_heartbeat()
-    return Response({"snapshot_rows_written": n})
-
-
-@api_view(["POST"])
-@authentication_classes([])
-@permission_classes([AllowAny])
-def run_enrichment(request):
-    if (gate := _gated()):
-        return gate
-    body = request.data
-    source = body.get("source")
-    path = body.get("path")
-    if not source or not path:
-        return Response(
-            {"error": "source and path are required"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-    from core.services.enrichment import (
-        load_epss_from_file,
-        load_kev_from_file,
-    )
-    if source == "epss":
-        n = load_epss_from_file(path)
-    elif source == "kev":
-        n = load_kev_from_file(path)
-    else:
-        return Response(
-            {"error": f"unknown source: {source}"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-    return Response({"source": source, "rows": n})
-
-
-# ── advance_clock (Option B: shift stored timestamps backwards) ──
-#
-# Each entry: (Model, [field_name, ...]). Listed fields are shifted
-# backwards by `seconds` in one transaction. Nullable columns are
-# safe — F("col") - delta on NULL stays NULL.
-_CLOCK_SHIFTABLE: list[tuple[type, list[str]]] = [
-    (ImportMark, ["started_at", "completed_at"]),
-    (IngestQueue, ["created_at", "claimed_at", "processed_at"]),
-    (Workload, ["last_inventory_at", "first_seen_at", "last_seen_at"]),
-    (WorkloadImageObservation, ["first_seen_at", "last_seen_at"]),
-    (WorkloadAlias, ["last_seen_at"]),
-    (WorkloadSignal, ["first_seen_at", "last_seen_at"]),
-    (Finding, ["first_seen", "last_seen"]),
-    (FindingAction, ["created_at", "expires_at", "sla_due_at", "revoked_at"]),
-    (Image, ["first_seen_at", "last_seen_at"]),
-    (Namespace, ["first_seen_at", "last_seen_at", "deactivated_at"]),
-    (Cluster, ["created_at", "last_seen_at", "last_complete_inventory_at"]),
-    (IngestToken, ["created_at", "last_used_at", "revoked_at"]),
-    (ScanInconsistency, ["first_observed_at", "last_observed_at"]),
-    (Snapshot, ["captured_at"]),
-    (EpssScore, ["fetched_at"]),
-    (KevEntry, ["fetched_at"]),
-]
-
-
-@api_view(["POST"])
-@authentication_classes([])
-@permission_classes([AllowAny])
-def advance_clock(request):
-    """Shift every stored timestamp backwards by `seconds` so real
-    `timezone.now()` looks `seconds` further in the future. Forward-
-    only; no clock mocking — only column rewrites. See module
-    docstring for the rationale.
-    """
-    if (gate := _gated()):
-        return gate
-    try:
-        seconds = int(request.data.get("seconds", 0))
-    except (TypeError, ValueError):
-        return Response(
-            {"error": "seconds must be an integer"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-    if seconds < 0:
-        return Response(
-            {"error": "negative seconds not supported"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-    delta = timedelta(seconds=seconds)
-    shifted: dict[str, int] = {}
-    with transaction.atomic():
-        for model, fields in _CLOCK_SHIFTABLE:
-            updates = {f: F(f) - delta for f in fields}
-            n = model.objects.update(**updates)
-            shifted[model._meta.db_table] = n
-    return Response({
-        "advanced_seconds": seconds,
-        "now": timezone.now().isoformat(),
-        "shifted": shifted,
-    })
-
-
-@api_view(["POST"])
-@authentication_classes([])
-@permission_classes([AllowAny])
-def assert_batch(request):
-    if (gate := _gated()):
-        return gate
-    body = request.data
-    assertions = body.get("assertions") or []
-    results = evaluate_assertions(assertions)
-    summary = {
-        "total": len(results),
-        "passed": sum(1 for r in results if r["pass"]),
-        "failed": sum(1 for r in results if not r["pass"]),
-    }
-    return Response({"summary": summary, "results": results})

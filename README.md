@@ -463,7 +463,6 @@ core/
     worker.py            # claim → process → reap loop
     bundle_ingest.py     # bundle spool/verify/store, commit, abort
     reaper.py            # claim-first reaps, delete-at-reap, discards
-    test_assertions.py   # assertion DSL (harness + real-data e2e)
   api/
     auth.py              # bearer-token auth + IngestToken hashing
     views.py             # /api/v1/imports/pending/*  /cluster-metadata/sync/
