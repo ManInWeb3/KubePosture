@@ -54,32 +54,29 @@ def score(finding: Finding) -> PriorityResult:
     ...
 
 
-def compute_priority(finding: Finding) -> PriorityResult:
-    """Public entry point. Ensures relations are loaded, then calls score().
-    For bulk paths use recompute_batch() to avoid N+1.
+def apply_score(finding: Finding) -> Finding:
+    """Compute + assign in-memory (no save). Caller controls persistence —
+    used by ingest where the Finding is being upserted anyway.
     """
-    finding = (Finding.objects
-        .select_related("workload__namespace__cluster", "image")
-        .prefetch_related("workload__signals")
-        .get(pk=finding.pk))
-    return score(finding)
+    finding.effective_priority = score(finding).band
+    return finding
 
 
-def recompute_batch(findings: Iterable[Finding]) -> None:
-    """Bulk recompute entry. One query pass to load every finding's
-    relations, then loops calling score() in memory. Use from enrichment
-    refresh, signal-change fan-out, inventory reap, etc.
+RECOMPUTE_CHUNK_SIZE = 5000
+
+
+def recompute_ids(ids: Iterable[int]) -> tuple[int, int]:
+    """Bulk recompute by id, RECOMPUTE_CHUNK_SIZE at a time: each chunk is
+    one query pass loading relations, score() in memory, one bulk_update
+    in its own transaction. Pass `finding_ids(queryset)` to stream ids so
+    memory stays flat however large the set. Returns (scanned, updated).
     """
-    loaded = (Finding.objects
-        .filter(pk__in=[f.pk for f in findings])
-        .select_related("workload__namespace__cluster", "image")
-        .prefetch_related("workload__signals"))
-    updated = []
-    for f in loaded:
-        result = score(f)
-        f.effective_priority = result.band
-        updated.append(f)
-    Finding.objects.bulk_update(updated, ["effective_priority"])
+    ...
+
+
+def finding_ids(qs) -> Iterable[int]:
+    """Stream a Finding queryset's ids for recompute_ids."""
+    return qs.values_list("id", flat=True).iterator(chunk_size=RECOMPUTE_CHUNK_SIZE)
 ```
 
 **Cluster-scoped findings** (`finding.workload is None` — e.g. RBAC
@@ -87,9 +84,10 @@ findings on ClusterRoles) skip the workload reads and score off
 finding fields + `finding.cluster` only. `score()` handles this with an
 early branch.
 
-The caller always sees `compute_priority(finding)` or
-`recompute_batch(findings)`. The editable core is `score(finding)` —
-that's the function to edit when tuning the formula.
+The callers always see `apply_score(finding)` (ingest, in-memory) or
+`recompute_ids(finding_ids(queryset))` (every bulk fan-out). The
+editable core is `score(finding)` — that's the function to edit when
+tuning the formula.
 
 ## Decision tree (v1 reference)
 
@@ -245,9 +243,9 @@ The formula is code. Treat it accordingly:
 - **Adding a new signal category** (e.g. NetworkPolicy gaps as their own
   weighted bucket): add the category to `SignalCategory`, assign
   affected signals, then reference the new category in
-  `compute_priority`.
+  `score()`.
 - **Replacing the decision tree with a weighted-sum scorer**: the
-  `PriorityInput` contract stays; only `compute_priority`'s body
+  `PriorityInput` contract stays; only `score()`'s body
   changes. Callers (ingest, signal-change recompute, enrichment
   recompute) are unaffected.
 
@@ -306,7 +304,7 @@ knows. It is surfaced outside the formula via:
 The rule: **the scoring function trusts the data it is given and
 applies defaults; the coverage layer (Scan Health, policy inventory)
 is what tells the operator whether to trust the scoring.** Never mix
-these concerns inside `compute_priority`.
+these concerns inside `score()`.
 
 ## Recomputation triggers
 
@@ -328,9 +326,13 @@ transaction per trigger event:
 - **On cluster environment change** — admin flips `environment_is_manual`.
   Fan-out: `Finding.objects.filter(workload__namespace__cluster=C)`.
 
-Each trigger calls `recompute_batch(findings_in_scope)` — one query
-pass loads relations, loops calling `score(finding)` in memory, bulk
-updates `effective_priority`.
+Each trigger calls `recompute_ids(finding_ids(findings_in_scope))` —
+per chunk of 5000 ids, one query pass loads relations, `score(finding)`
+runs in memory, one bulk update of `effective_priority` commits. The
+inventory reap runs its whole-cluster recompute *after* the reap
+transaction commits (`reaper._recompute_after_commit`); the cluster /
+namespace flag edits run it inside `snapshot.bracketed_recompute`
+between pre and post snapshot rows.
 
 ## Worked examples
 
@@ -371,7 +373,7 @@ affect the priority differently:
 | Path | Mechanism | How priority changes |
 |---|---|---|
 | **Fix** | Deploy a new image without the finding. | Old image's `deployed` flips False at the next inventory reap; finding drops out of default views entirely (no recompute — it's filtered out). |
-| **Remediate** | Change the workload's config so observed `WorkloadSignal` rows flip `currently_active=false`. | Signal-change recompute reruns `compute_priority`; band drops. The CVE is still there, just ranks lower. |
+| **Remediate** | Change the workload's config so observed `WorkloadSignal` rows flip `currently_active=false`. | Signal-change recompute reruns `score()`; band drops. The CVE is still there, just ranks lower. |
 | **Accept** | Create a `FindingAction` row. | No change to `effective_priority`. The action's state overlays the display; the band stays computed so revocation immediately restores the true rank. |
 
 ## Cross-references
