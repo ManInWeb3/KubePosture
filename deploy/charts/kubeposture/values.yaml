@@ -281,7 +281,7 @@ worker:
   # was missing SKIP LOCKED (fixed in core/services/queue.py) — that one
   # unprotected statement, run first on every drain_once iteration, could
   # block an entire pod on a lock held by an unrelated in-flight worker.
-  parallelism: 4
+  parallelism: 1
   # @schema
   # type: integer
   # minimum: 1
