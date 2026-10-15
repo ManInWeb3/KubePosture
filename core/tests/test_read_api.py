@@ -387,3 +387,25 @@ def test_image_filter_by_repository_substring(
     data = response.json()
     assert data["count"] == 1
     assert data["results"][0]["ref"] == "x:api-v1"
+
+
+def test_image_list_unknown_cluster_is_empty_not_fleet_wide(
+    authed_client, image_api, image_frontend
+):
+    """`?cluster=typo` used to resolve to None and silently return every
+    image in the fleet."""
+    response = authed_client.get("/api/v1/images/?cluster=no-such-cluster&currently_deployed=true")
+    assert response.status_code == 200
+    assert response.json()["count"] == 0
+
+
+def test_image_list_honours_ordering_param(authed_client, image_api, image_frontend, image_orphan):
+    """`ordering_fields` were inert until OrderingFilter was wired in."""
+    asc = [r["ref"] for r in authed_client.get("/api/v1/images/?ordering=ref").json()["results"]]
+    desc = [r["ref"] for r in authed_client.get("/api/v1/images/?ordering=-ref").json()["results"]]
+    assert asc == sorted(asc) and desc == sorted(asc, reverse=True)
+
+
+def test_snapshot_series_rejects_non_numeric_params(authed_client, cluster_a):
+    assert authed_client.get("/api/v1/snapshots/series/?scope=cluster&days=abc").status_code == 400
+    assert authed_client.get("/api/v1/snapshots/series/?scope=workload&workload_id=abc").status_code == 400

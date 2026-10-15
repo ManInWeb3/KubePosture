@@ -220,7 +220,8 @@ class Command(KubePostureCommand):
         if options["known_iocs"]:
             self._inject_known_iocs()
         elif options["use_existing_purl"]:
-            self._seed_ioc_only(options["use_existing_purl"])
+            if not self._seed_ioc_only(options["use_existing_purl"]):
+                return
         else:
             self._seed_full(options["purl"])
 
@@ -281,7 +282,10 @@ class Command(KubePostureCommand):
         self.stdout.write(f"  ioc:       {TEST_FEED}/{TEST_ADVISORY} → {purl}")
 
     @transaction.atomic
-    def _seed_ioc_only(self, purl: str):
+    def _seed_ioc_only(self, purl: str) -> bool:
+        """Returns False when nothing was seeded (unknown purl), so the
+        caller skips the matcher run."""
+        purl = normalize_purl(purl)
         self.stdout.write(self.style.NOTICE(f"\n=== Inserting IoC against existing purl ({purl}) ==="))
 
         comps = SbomComponent.objects.filter(purl=purl)
@@ -290,7 +294,7 @@ class Command(KubePostureCommand):
                 f"purl {purl!r} not found in SbomComponent — nothing to match against."
             ))
             self.stderr.write("Run a real import or use the default --purl flag.")
-            return
+            return False
 
         active_count = (
             WorkloadImageObservation.objects
@@ -314,6 +318,7 @@ class Command(KubePostureCommand):
         )
         self.stdout.write(f"  ioc inserted: {TEST_FEED}/{TEST_ADVISORY} → {purl}")
         self.stdout.write(f"  deployed observations matching this purl: {active_count}")
+        return True
 
     @transaction.atomic
     def _inject_known_iocs(self):
@@ -425,21 +430,24 @@ class Command(KubePostureCommand):
         finding_filter.delete()
         self.stdout.write(f"  removed {n_find} Finding row(s) (TEST-* vuln_id)")
 
-        # Known-historical findings: only delete those whose IoC came from
-        # our KNOWN_FEED (the IoC row is gone above, but the Finding may
-        # have been linked to a different feed_source if the same purl is
-        # later picked up by OSV — be conservative and only delete findings
-        # whose vuln_id matches our advisory list *and* no other
-        # SupplyChainIoc row remains for that purl).
-        n_known = Finding.objects.filter(
-            source="supply_chain_ioc",
-            vuln_id__in=known_advisory_ids,
-        ).count()
-        Finding.objects.filter(
-            source="supply_chain_ioc",
-            vuln_id__in=known_advisory_ids,
-        ).delete()
-        self.stdout.write(f"  removed {n_known} Finding row(s) (known-historical advisory ids)")
+        # Known-historical findings: the KNOWN_FEED IoC rows are gone
+        # above, but a real feed (OSV) may carry the same advisory id for
+        # the same purl — those findings are real and must survive. Only
+        # delete a finding when no SupplyChainIoc row remains for its purl.
+        n_known = 0
+        for ioc in KNOWN_HISTORICAL_IOCS:
+            purl = normalize_purl(ioc["purl"])
+            if SupplyChainIoc.objects.filter(purl=purl).exists():
+                continue
+            n_known += Finding.objects.filter(
+                source="supply_chain_ioc",
+                vuln_id=ioc["advisory_id"],
+                details__purl=purl,
+            ).delete()[0]
+        self.stdout.write(
+            f"  removed {n_known} Finding row(s) (known-historical advisory ids with no "
+            f"remaining IoC row; {len(known_advisory_ids)} ids checked)"
+        )
 
         test_cluster = Cluster.objects.filter(name=TEST_CLUSTER).first()
         if test_cluster:

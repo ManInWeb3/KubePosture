@@ -36,6 +36,10 @@ class KubePostureCommand(BaseCommand):
         rc = 0
         try:
             return super().execute(*args, **options)
+        except SystemExit as exc:
+            # `sys.exit(0)` is a success (search_sbom uses it for "found").
+            rc = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+            raise
         except BaseException:
             rc = 1
             raise

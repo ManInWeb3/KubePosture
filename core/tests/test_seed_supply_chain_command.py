@@ -239,3 +239,33 @@ def test_cleanup_preserves_real_findings():
         stdout=io.StringIO(), stderr=io.StringIO(),
     )
     assert Finding.objects.filter(pk=real.pk).exists()
+
+
+@pytest.mark.django_db
+def test_cleanup_keeps_a_known_advisory_finding_while_a_real_ioc_row_remains():
+    """--cleanup used to delete every supply_chain_ioc Finding whose vuln_id
+    is in KNOWN_HISTORICAL_IOCS — including one produced by the real OSV
+    feed for the same advisory."""
+    from core.management.commands.seed_supply_chain_test import KNOWN_HISTORICAL_IOCS
+    from core.models import SupplyChainIoc
+
+    known = KNOWN_HISTORICAL_IOCS[0]
+    c = Cluster.objects.create(name="prod-real", environment=Environment.PROD.value)
+    ns = Namespace.objects.create(cluster=c, name="payments")
+    w = Workload.objects.create(cluster=c, namespace=ns, kind="Deployment", name="api", deployed=True)
+    img = Image.objects.create(digest="sha256:" + "e" * 64, ref="reg/api:v1")
+    SupplyChainIoc.objects.create(
+        purl=known["purl"], feed_source="osv", advisory_id=known["advisory_id"],
+        severity="critical", title="real", advisory_url="https://osv.dev",
+    )
+    real = Finding.objects.create(
+        cluster=c, workload=w, image=img, source="supply_chain_ioc", category="supply_chain",
+        vuln_id=known["advisory_id"], pkg_name="event-stream", installed_version="3.3.6",
+        title="real", severity="critical", details={"purl": known["purl"]}, hash_code="real-known",
+        first_seen="2026-04-01T00:00:00Z", last_seen="2026-04-01T00:00:00Z",
+    )
+
+    call_command("seed_supply_chain_test", "--known-iocs", stdout=io.StringIO(), stderr=io.StringIO())
+    call_command("seed_supply_chain_test", "--cleanup", stdout=io.StringIO(), stderr=io.StringIO())
+
+    assert Finding.objects.filter(pk=real.pk).exists()

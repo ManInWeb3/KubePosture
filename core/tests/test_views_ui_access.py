@@ -119,3 +119,31 @@ def test_cluster_environment_edit_is_snapshot_bracketed(client, admin_user, clus
     assert Snapshot.objects.filter(cluster=cluster, scope_kind="cluster").count() == 2, (
         "pre + post rows, like the admin path"
     )
+
+
+# ── cluster detail: rollup card + namespace active-finding counts ──
+
+
+def test_cluster_detail_rollup_and_namespace_counts(client, admin_user, cluster):
+    from core.constants import Severity
+    from core.models import Finding, Namespace, Workload
+
+    exposed = Namespace.objects.create(cluster=cluster, name="edge", internet_exposed=True)
+    quiet = Namespace.objects.create(cluster=cluster, name="quiet")
+    live = Workload.objects.create(cluster=cluster, namespace=exposed, kind="Deployment",
+                                   name="api", deployed=True)
+    gone = Workload.objects.create(cluster=cluster, namespace=quiet, kind="Deployment",
+                                   name="old", deployed=False)
+    for i, w in enumerate((live, live, gone)):
+        Finding.objects.create(cluster=cluster, workload=w, source="trivy", category="vulnerability",
+                               vuln_id=f"CVE-2024-{i}", title="t", severity=Severity.HIGH.value,
+                               hash_code=f"h{i}")
+
+    client.force_login(admin_user)
+    resp = client.get(reverse("cluster-detail", args=[cluster.pk]))
+
+    assert resp.status_code == 200
+    assert resp.context["has_public_exposure"] is True
+    assert resp.context["has_sensitive_data"] is False
+    counts = {ns.name: ns.finding_count for ns in resp.context["namespaces"]}
+    assert counts == {"edge": 2, "quiet": 0}, "undeployed workloads' findings are not active"

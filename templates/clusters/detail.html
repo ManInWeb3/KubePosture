@@ -218,7 +218,7 @@
           <div class="datagrid-item">
             <div class="datagrid-title">Has public exposure</div>
             <div class="datagrid-content">
-              {% if cluster.has_public_exposure %}
+              {% if has_public_exposure %}
                 <span class="badge bg-success-lt text-success">yes</span>
               {% else %}
                 <span class="badge bg-secondary-lt text-secondary">no</span>
@@ -228,7 +228,7 @@
           <div class="datagrid-item">
             <div class="datagrid-title">Has sensitive data</div>
             <div class="datagrid-content">
-              {% if cluster.has_sensitive_data %}
+              {% if has_sensitive_data %}
                 <span class="badge bg-warning-lt text-warning">yes</span>
               {% else %}
                 <span class="badge bg-secondary-lt text-secondary">no</span>
@@ -237,7 +237,7 @@
           </div>
         </div>
         <small class="d-block text-muted mt-2">
-          Derived from active namespaces. Cluster-scoped findings (ClusterRole, etc.) use these for priority.
+          Rolled up from active namespaces. Namespace exposure and sensitivity feed the priority of findings on workloads in that namespace; cluster-scoped findings (ClusterRole, etc.) use only the cluster environment.
         </small>
       </div>
     </div>

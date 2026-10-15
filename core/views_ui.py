@@ -41,10 +41,12 @@ from core.services.images import (
     list_images,
 )
 from core.services.inventory import (
+    default_finding_qs,
     findings_for_workload_image,
     list_findings,
     list_workload_images,
     list_workloads,
+    restrict_to_currently_deployed_images,
     workloads_for_kind_name,
 )
 from core.services.snapshot import bracketed_recompute
@@ -57,6 +59,21 @@ def _is_admin(user) -> bool:
     if user.is_superuser:
         return True
     return user.groups.filter(name="admin").exists()
+
+
+def _active_findings_by_namespace(cluster: Cluster) -> dict[int, int]:
+    """Namespace id → active-finding count, using the same definition as
+    the workloads / findings pages (default filter + currently deployed
+    image). A raw `Count("workloads__findings")` counted stale, muted and
+    rolled-out findings, so the cluster page disagreed with every other
+    page for the same namespace."""
+    rows = (
+        restrict_to_currently_deployed_images(default_finding_qs(cluster=cluster))
+        .order_by()
+        .values("workload__namespace_id")
+        .annotate(n=Count("id"))
+    )
+    return {r["workload__namespace_id"]: r["n"] for r in rows if r["workload__namespace_id"]}
 
 
 def _bracketed_namespace_mutation(ns: Namespace, mutate) -> None:
@@ -782,10 +799,11 @@ class ComponentDetailPanelView(LoginRequiredMixin, View):
             raise Http404("purl is required")
 
         cluster_name = request.GET.get("cluster") or ""
-        cluster = (
-            Cluster.objects.filter(name=cluster_name).first()
-            if cluster_name else None
-        )
+        cluster = None
+        if cluster_name:
+            cluster = Cluster.objects.filter(name=cluster_name).first()
+            if cluster is None:
+                raise Http404("unknown cluster")  # not a silent fleet-wide view
         include_inactive = request.GET.get("include_inactive") == "1"
 
         detail = component_detail(
@@ -846,24 +864,19 @@ class ClusterDetailView(LoginRequiredMixin, View):
     template_name = "clusters/detail.html"
 
     def _context(self, request, cluster):
-        # Active namespaces first, then inactive; both alphabetical.
-        # Annotate with finding counts so the row shows useful info.
-        namespaces = (
-            Namespace.objects
-            .filter(cluster=cluster)
-            .annotate(
-                finding_count=Count(
-                    "workloads__findings",
-                    filter=Q(workloads__deployed=True),
-                    distinct=True,
-                ),
-            )
-            .order_by("-active", "name")
-        )
+        # Active namespaces first, then inactive; both alphabetical, each
+        # carrying its active-finding count for the row.
+        namespaces = list(Namespace.objects.filter(cluster=cluster).order_by("-active", "name"))
+        counts = _active_findings_by_namespace(cluster)
+        for ns in namespaces:
+            ns.finding_count = counts.get(ns.pk, 0)
+        active = Namespace.objects.filter(cluster=cluster, active=True)
         return {
             "nav": "clusters",
             "cluster": cluster,
             "namespaces": namespaces,
+            "has_public_exposure": active.filter(internet_exposed=True).exists(),
+            "has_sensitive_data": active.filter(contains_sensitive_data=True).exists(),
             "is_admin": _is_admin(request.user),
         }
 
@@ -1007,10 +1020,7 @@ class NamespaceToggleView(LoginRequiredMixin, View):
         _bracketed_namespace_mutation(ns, _flip)
 
         # Re-annotate finding_count so the row's count cell stays accurate.
-        ns.finding_count = (
-            ns.workloads.filter(deployed=True)
-            .aggregate(n=Count("findings", distinct=True))["n"] or 0
-        )
+        ns.finding_count = _active_findings_by_namespace(ns.cluster).get(ns.pk, 0)
         return render(request, self.template_name, {
             "ns": ns,
             "cluster": ns.cluster,
@@ -1040,10 +1050,7 @@ class NamespaceResetAutoView(LoginRequiredMixin, View):
 
         _bracketed_namespace_mutation(ns, _reset)
 
-        ns.finding_count = (
-            ns.workloads.filter(deployed=True)
-            .aggregate(n=Count("findings", distinct=True))["n"] or 0
-        )
+        ns.finding_count = _active_findings_by_namespace(ns.cluster).get(ns.pk, 0)
         return render(request, self.template_name, {
             "ns": ns,
             "cluster": ns.cluster,

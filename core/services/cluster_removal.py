@@ -32,6 +32,7 @@ from core.models import (
     WorkloadImageObservation,
     WorkloadSignal,
 )
+from core.services.pruning import delete_in_chunks
 
 
 @dataclass(frozen=True)
@@ -96,10 +97,16 @@ def remove_cluster(cluster: Cluster, *, dry_run: bool = False) -> ClusterRemoval
     with transaction.atomic():
         # IngestQueue has no FK to Cluster — cascade can't reach it.
         queue_deleted = IngestQueue.objects.filter(cluster_name=name).delete()[0]
-        # Cascades the entire FK-linked subtree, including the cluster row.
+        # Findings first, in pk slices: `FindingAction.finding` is a CASCADE
+        # FK, so the cluster cascade would otherwise materialise every
+        # Finding of the cluster in this (web) process before deleting.
+        deleted = delete_in_chunks(cluster.findings.all())
+        # Cascades the rest of the FK-linked subtree, including the cluster row.
         _total, per_model = cluster.delete()
 
-    deleted = {label: n for label, n in per_model.items() if n}
+    for label, n in per_model.items():
+        deleted[label] = deleted.get(label, 0) + n
+    deleted = {label: n for label, n in deleted.items() if n}
     if queue_deleted:
         deleted["core.IngestQueue"] = queue_deleted
     return ClusterRemovalResult(name, dry_run=False, deleted=deleted)

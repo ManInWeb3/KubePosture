@@ -217,3 +217,18 @@ def test_clear_requires_satisfied_at(client, token, cluster):
         **_auth(token),
     )
     assert resp.status_code == 400
+
+
+def test_clear_rejects_naive_satisfied_at(client, token, cluster):
+    """A naive datetime used to TypeError against the aware stored value (500)."""
+    cluster.reimport_requested_at = timezone.now()
+    cluster.save(update_fields=["reimport_requested_at"])
+    resp = client.post(
+        "/api/v1/imports/pending/clear/",
+        data={"cluster": "c-pending", "satisfied_at": "2026-10-15T10:00:00"},
+        content_type="application/json",
+        **_auth(token),
+    )
+    assert resp.status_code == 400
+    cluster.refresh_from_db()
+    assert cluster.reimport_requested_at is not None
