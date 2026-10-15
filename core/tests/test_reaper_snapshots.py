@@ -360,3 +360,32 @@ def test_cluster_heartbeat_query_count_does_not_grow_with_namespace_count():
 
     assert Snapshot.objects.filter(cluster=many, scope_kind=SnapshotScope.NAMESPACE.value).count() == 6
     assert n_many == n_one, (n_one, n_many)
+
+
+@pytest.mark.django_db
+def test_workload_with_no_image_digests_gets_one_first_seen_row_not_one_per_reap():
+    """A deployed workload whose pods have no imageID yet (Pending /
+    ImagePullBackOff with an unpinned template) has an empty image set.
+    The diff must find its own earlier empty `first_seen` row and stay
+    quiet until an image appears — it used to look only at rows with a
+    populated digest set, so every reap wrote another `first_seen`."""
+    c = _cluster()
+    ns = Namespace.objects.create(cluster=c, name="a")
+    w = _deployed_workload(c, ns, "pending", images=[])
+
+    _write_event_path_workload_snapshots(c, _inventory_mark(c, "imp-1"))
+    _write_event_path_workload_snapshots(c, _inventory_mark(c, "imp-2"))
+
+    rows = list(Snapshot.objects.filter(workload=w).order_by("pk"))
+    assert [(r.change_kind, r.image_digest_set, r.import_id) for r in rows] == [
+        (ImageSetChangeKind.FIRST_SEEN.value, [], "imp-1")]
+
+    Snapshot.objects.create(scope_kind=SnapshotScope.WORKLOAD.value, cluster=c, namespace=ns, workload=w,
+                            image_digest_set=[], change_kind=ImageSetChangeKind.NONE.value)  # daily heartbeat
+    img = Image.objects.create(digest=_digest("a"), ref="img:a")
+    WorkloadImageObservation.objects.create(workload=w, image=img, container_name="app", currently_deployed=True)
+    _write_event_path_workload_snapshots(c, _inventory_mark(c, "imp-3"))
+
+    new = Snapshot.objects.filter(workload=w, import_id="imp-3").get()
+    assert (new.change_kind, new.image_digest_set, new.image_set_changed_from_previous) == (
+        ImageSetChangeKind.ADDED.value, [_digest("a")], True)

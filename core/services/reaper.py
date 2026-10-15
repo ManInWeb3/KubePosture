@@ -292,13 +292,15 @@ def _write_event_path_workload_snapshots(cluster: Cluster, mark: ImportMark) -> 
     ).values_list("workload_id", "image__digest"):
         current[workload_id].add(digest)
 
-    # Newest snapshot per workload whose digest set is populated.
-    # Daily-heartbeat rows (change_kind=none) without an explicit
-    # image_digest_set must not break the diff.
+    # Newest EVENT snapshot per workload — the rows this writer produced
+    # (`change_kind` never `none`). Daily-heartbeat rows (`none`, no
+    # digest set) must not break the diff, and an event row with an
+    # empty set (pods without an imageID yet) must still be found, or
+    # the workload gets a fresh `first_seen` every reap.
     previous = dict(
         Snapshot.objects
         .filter(workload__cluster=cluster, workload__deployed=True)
-        .exclude(image_digest_set=[])
+        .exclude(change_kind=ImageSetChangeKind.NONE.value)
         .order_by("workload_id", "-captured_at", "-id")
         .distinct("workload_id")
         .values_list("workload_id", "image_digest_set")
