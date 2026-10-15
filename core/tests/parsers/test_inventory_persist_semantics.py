@@ -14,7 +14,6 @@ from core.models import (
     Workload,
     WorkloadAlias,
     WorkloadImageObservation,
-    WorkloadSignal,
 )
 from core.parsers import inventory as inv
 from core.tests.parsers.test_inventory_parser import (
