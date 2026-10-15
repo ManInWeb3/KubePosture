@@ -27,8 +27,17 @@ from django.views import View
 from django.views.generic import RedirectView
 
 from core.api.auth import generate_token
-from core.constants import Environment, PriorityBand, Source, WorkloadKind
-from core.models import Cluster, Finding, Image, IngestToken, Namespace, UserPreference, Workload
+from core.constants import Environment, ImportMarkState, PriorityBand, Source, WorkloadKind
+from core.models import (
+    Cluster,
+    Finding,
+    Image,
+    ImportMark,
+    IngestToken,
+    Namespace,
+    UserPreference,
+    Workload,
+)
 from core.services import hardening_preview
 from core.services.cluster_removal import remove_cluster
 from core.services.components import (
@@ -74,6 +83,47 @@ def _active_findings_by_namespace(cluster: Cluster) -> dict[int, int]:
         .annotate(n=Count("id"))
     )
     return {r["workload__namespace_id"]: r["n"] for r in rows if r["workload__namespace_id"]}
+
+
+def _latest_import(cluster: Cluster) -> dict | None:
+    """The cluster's most recent import (by `started_at`), one row per
+    kind, rolled up into a status for the cluster page:
+    `uploading` (a kind still open), `processing` (committed, draining),
+    `discarded` (never applied — reason on the row), `failed` (every kind
+    reaped but some payloads failed), else `complete`. None when the
+    cluster has never imported."""
+    latest = (
+        ImportMark.objects.filter(cluster=cluster)
+        .order_by("-started_at", "-id")
+        .values_list("import_id", flat=True)
+        .first()
+    )
+    if latest is None:
+        return None
+    kinds = list(ImportMark.objects.filter(cluster=cluster, import_id=latest).order_by("kind"))
+    states = {m.state for m in kinds}
+    discard = next((m.discard_reason for m in kinds if m.discard_reason), "")
+    failed = sum(m.failed_count for m in kinds)
+    if discard:
+        status = "discarded"
+    elif ImportMarkState.OPEN.value in states:
+        status = "uploading"
+    elif ImportMarkState.DRAINING.value in states:
+        status = "processing"
+    elif failed:
+        status = "failed"
+    else:
+        status = "complete"
+    return {
+        "import_id": latest,
+        "started_at": kinds[0].started_at,
+        "completed_at": max((m.completed_at for m in kinds if m.completed_at), default=None),
+        "status": status,
+        "discard_reason": discard,
+        "failed_count": failed,
+        "reaped": sum(m.state == ImportMarkState.REAPED.value for m in kinds),
+        "kinds": kinds,
+    }
 
 
 def _bracketed_namespace_mutation(ns: Namespace, mutate) -> None:
@@ -883,6 +933,7 @@ class ClusterDetailView(LoginRequiredMixin, View):
             "namespaces": namespaces,
             "has_public_exposure": active.filter(internet_exposed=True).exists(),
             "has_sensitive_data": active.filter(contains_sensitive_data=True).exists(),
+            "latest_import": _latest_import(cluster),
             "is_admin": _is_admin(request.user),
         }
 
