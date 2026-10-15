@@ -10,14 +10,6 @@
 {% endblock %}
 
 {% block content %}
-{% if messages %}
-{% for msg in messages %}
-<div class="alert alert-{{ msg.tags }} alert-dismissible">{{ msg }}
-  <a class="btn-close" data-bs-dismiss="alert"></a>
-</div>
-{% endfor %}
-{% endif %}
-
 <div class="row">
   <div class="col-lg-8">
 

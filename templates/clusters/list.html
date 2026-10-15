@@ -9,14 +9,6 @@
 {% endblock %}
 
 {% block content %}
-{% if messages %}
-{% for msg in messages %}
-<div class="alert alert-{{ msg.tags }} alert-dismissible">{{ msg }}
-  <a class="btn-close" data-bs-dismiss="alert"></a>
-</div>
-{% endfor %}
-{% endif %}
-
 {% help "Clusters" %}
   <p>Clusters are <strong>auto-registered on first ingest</strong> — when the <code>kubeposture-import</code>
   CronJob POSTs scan data with a new cluster name, a row appears here. You never create clusters manually.</p>

@@ -766,7 +766,7 @@
       "description": "The ingest-queue worker CronJob (process_ingest_queue).",
       "properties": {
         "activeDeadlineSeconds": {
-          "default": 300,
+          "default": 1800,
           "minimum": 1,
           "title": "activeDeadlineSeconds",
           "type": "integer"

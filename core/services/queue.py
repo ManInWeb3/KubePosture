@@ -60,11 +60,12 @@ from core.models import ImportMark, IngestQueue
 
 log = logging.getLogger("core.queue")
 
-# Comfortably larger than the worker Job's activeDeadlineSeconds (300s at
-# the time of writing) so a still-legitimately-running item is never
-# mistaken for abandoned — only reclaim rows no currently-running worker
-# could still hold.
-STALE_PROCESSING_SECONDS = 900
+# Larger than the worker Job's activeDeadlineSeconds (1800s in
+# deploy/charts/kubeposture/values.yaml) so a still-legitimately-running
+# item is never mistaken for abandoned — only reclaim rows no
+# currently-running worker could still hold. tests/test_chart_invariants.py
+# pins the relation.
+STALE_PROCESSING_SECONDS = 2100
 
 # After this many reclaims, stop bouncing the item back to pending and
 # mark it failed instead — protects against a poison item that reliably
