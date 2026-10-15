@@ -439,7 +439,7 @@ PR rather than by a user at install time.
 | Search the SBOM inventory for a purl | `python manage.py search_sbom --purl <purl> \| --prefix <pfx> \| --purls-file <path>` |
 | Seed an end-to-end supply-chain test | `python manage.py seed_supply_chain_test [--purl <purl>] [--cleanup]` |
 | Seed RBAC groups | `python manage.py setup_rbac` |
-| Run scenario tests | `TESTING_HARNESS_ENABLED=true pytest tests/scenario_runner/` |
+| Run integration tests | `pytest tests/integration/` |
 | System check | `python manage.py check` |
 
 ---

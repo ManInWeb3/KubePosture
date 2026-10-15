@@ -54,7 +54,6 @@ class FindingAction(models.Model):
         blank=True,
         help_text="Required for action_type=accept; optional otherwise.",
     )
-    ticket_ref = models.CharField(max_length=128, blank=True)
     sla_due_at = models.DateTimeField(null=True, blank=True)
 
     actor = models.ForeignKey(

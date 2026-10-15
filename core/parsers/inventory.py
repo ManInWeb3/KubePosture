@@ -67,6 +67,12 @@ class _InventoryStaging:
     # (namespace, alias_kind, alias_name) → (target_kind, target_name)
     aliases: dict[tuple[str, str, str], tuple[str, str]] = field(default_factory=dict)
 
+    # Owned Pods, keyed by (namespace, owner_kind, owner_name) — resolved
+    # to their top-level workload in the persist pass, once the alias
+    # chain is complete.
+    _pending_pod_observations: dict[tuple[str, str, str], list] = field(default_factory=dict)
+    _pending_pod_signals: dict[tuple[str, str, str], set[str]] = field(default_factory=dict)
+
     # Service / Ingress data for exposure derivation.
     services: list[dict] = field(default_factory=list)
     ingresses: list[dict] = field(default_factory=list)
@@ -328,16 +334,9 @@ def _ingest_namespace(item: dict, st: _InventoryStaging) -> None:
 def _ingest_controller(item: dict, st: _InventoryStaging) -> None:
     """Upsert a top-level Workload from a controller manifest."""
     api_kind = item.get("kind") or ""
+    # `_DISPATCH` routes ReplicaSets, Pods and owned Jobs elsewhere; only
+    # top-level controllers reach this point.
     if api_kind not in CONTROLLER_KINDS_TO_WORKLOAD:
-        return
-    if api_kind == "ReplicaSet":
-        # ReplicaSets are alias targets, not workloads.
-        return
-    if api_kind == "Pod":
-        # Pod handling is gated on ownerReferences — done in _ingest_pod.
-        return
-    if api_kind == "Job" and _controller_owner(item) is not None:
-        # Owned Jobs (CronJob children) are aliases, not workloads.
         return
 
     name = _name(item)
@@ -366,7 +365,6 @@ def _ingest_controller(item: dict, st: _InventoryStaging) -> None:
         labels=labels,
     )
     # Stash the namespace string for the persist-pass.
-    workload._namespace_name = namespace  # type: ignore[attr-defined]
     st.workloads[key] = workload
 
     sigs = _pod_security_signals(pod_spec)
@@ -420,7 +418,6 @@ def _ingest_pod(item: dict, st: _InventoryStaging) -> None:
             replicas=None,
             labels=labels,
         )
-        workload._namespace_name = namespace  # type: ignore[attr-defined]
         key = (namespace, WorkloadKind.POD.value, name)
         st.workloads[key] = workload
 
@@ -442,7 +439,7 @@ def _ingest_pod(item: dict, st: _InventoryStaging) -> None:
     # not be fully built yet).
     spec_signals = _pod_security_signals(spec)
 
-    pending = st._pending_pod_observations.setdefault(  # type: ignore[attr-defined]
+    pending = st._pending_pod_observations.setdefault(
         (namespace, owner_ref.get("kind"), owner_ref.get("name")),
         [],
     )
@@ -456,7 +453,7 @@ def _ingest_pod(item: dict, st: _InventoryStaging) -> None:
 
     # PodSpec-level signals attach to the owning workload too.
     if spec_signals:
-        st._pending_pod_signals.setdefault(  # type: ignore[attr-defined]
+        st._pending_pod_signals.setdefault(
             (namespace, owner_ref.get("kind"), owner_ref.get("name")),
             set(),
         ).update(spec_signals)
@@ -530,8 +527,6 @@ _DISPATCH = {
 def parse_envelope(payload: dict, cluster: Cluster) -> _InventoryStaging:
     """Parse one inventory payload (envelope) into a staging object."""
     st = _InventoryStaging(cluster=cluster)
-    st._pending_pod_observations = {}  # type: ignore[attr-defined]
-    st._pending_pod_signals = {}  # type: ignore[attr-defined]
     st.cluster_meta = dict(payload.get("cluster_meta") or {})
 
     items = payload.get("items") or []
@@ -836,7 +831,7 @@ def persist(st: _InventoryStaging, mark_started_at) -> dict:
     # current-cycle staging dict AND the previous-cycle alias rows
     # still in the DB (real clusters can have a Pod whose owning
     # ReplicaSet/Job ages out of `kubectl get` mid-cycle).
-    pending_obs = getattr(st, "_pending_pod_observations", {})
+    pending_obs = st._pending_pod_observations
     for (ns_name, owner_kind, owner_name), obs in pending_obs.items():
         resolved = _resolve_alias(st, ns_name, owner_kind, owner_name)
         if resolved is None:
@@ -845,7 +840,7 @@ def persist(st: _InventoryStaging, mark_started_at) -> dict:
         target_key = (ns_name, wk, wname)
         st.image_observations.setdefault(target_key, []).extend(obs)
 
-    pending_sigs = getattr(st, "_pending_pod_signals", {})
+    pending_sigs = st._pending_pod_signals
     for (ns_name, owner_kind, owner_name), sigs in pending_sigs.items():
         resolved = _resolve_alias(st, ns_name, owner_kind, owner_name)
         if resolved is None:

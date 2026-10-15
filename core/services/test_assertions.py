@@ -473,16 +473,14 @@ def _enrichment(a):
 
 
 def _log_event_count(a):
-    """Stub. v1 doesn't capture log events for harness assertions; treat
-    as always-pass to allow scenarios that lean on log assertions to
-    survive this milestone. A future iteration can hook structlog
-    capture into the harness."""
-    return True, {"note": "log_event_count stubbed in v1"}
+    """Not implemented: the harness does not capture log events. Fails
+    loudly so a scenario that relies on it is not silently green."""
+    raise NotImplementedError("log_event_count assertions are not supported by the harness")
 
 
 def _log_event_exists(a):
-    """Stub — same rationale as `_log_event_count`."""
-    return True, {"note": "log_event_exists stubbed in v1"}
+    """Not implemented — see `_log_event_count`."""
+    raise NotImplementedError("log_event_exists assertions are not supported by the harness")
 
 
 def _workload_last_inventory_advanced(a):
@@ -565,8 +563,8 @@ def _import_mark_count(a):
 
 
 def _scan_health_widget(a):
-    """Stub — no UI in v1. Always passes."""
-    return True, {"note": "scan_health_widget stubbed in v1"}
+    """Not implemented — no widget assertion exists; fails loudly."""
+    raise NotImplementedError("scan_health_widget assertions are not supported by the harness")
 
 
 def _snapshot_absent_since(a):

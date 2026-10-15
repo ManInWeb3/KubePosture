@@ -161,10 +161,8 @@ app:
     # stops gating new ones before it is discarded.
     IMPORT_LOCK_TIMEOUT_SECONDS: "1200"
 
-# Compliance framework loading is not implemented in this milestone.
-# The fixtures/ directory holds sample YAMLs but no `load_frameworks`
-# command exists yet; the setup job will only seed RBAC + the default
-# admin user.
+# Compliance framework loading is not implemented; the setup job only
+# seeds RBAC + the default admin user.
 
 # ── Web Deployment ──────────────────────────────────────────────
 

@@ -50,15 +50,13 @@ from core.services.inventory import (
     workloads_for_kind_name,
 )
 from core.services.snapshot import bracketed_recompute
+from core.templatetags.access_tags import is_admin
 
 
 def _is_admin(user) -> bool:
-    """Admin if superuser or in the seeded `admin` group."""
-    if not getattr(user, "is_authenticated", False):
-        return False
-    if user.is_superuser:
-        return True
-    return user.groups.filter(name="admin").exists()
+    """Admin if superuser or in the seeded `admin` group. Delegates to the
+    templatetag filter so the view and the navbar share one cached query."""
+    return is_admin(user)
 
 
 def _active_findings_by_namespace(cluster: Cluster) -> dict[int, int]:
@@ -325,7 +323,6 @@ class WorkloadDetailView(LoginRequiredMixin, View):
             "selected_namespace": namespace_name,
             "namespaces_with_workload": namespaces_with_workload,
             "scoped_workloads": scoped,
-            "all_workloads": all_workloads,
             "signal_chips": signal_chips,
             "image_rows": image_rows,
             "active_row": active_row,
@@ -1061,18 +1058,6 @@ class NamespaceResetAutoView(LoginRequiredMixin, View):
 # ── Profile (per-user UI preferences) ────────────────────────────
 
 
-class _PrefView:
-    """Lightweight wrapper exposing `show_help` for the template, since the
-    storage side uses inverted `hide_help` semantics."""
-
-    def __init__(self, pref):
-        self._pref = pref
-
-    @property
-    def show_help(self) -> bool:
-        return not self._pref.hide_help
-
-
 class ProfileView(LoginRequiredMixin, View):
     """`/profile/` — per-user account info + UI preferences.
 
@@ -1090,7 +1075,8 @@ class ProfileView(LoginRequiredMixin, View):
         return {
             "nav": "profile",
             "groups": list(request.user.groups.values_list("name", flat=True)),
-            "preference": _PrefView(pref),
+            # Storage uses inverted `hide_help` semantics.
+            "show_help": not pref.hide_help,
         }
 
     def get(self, request):

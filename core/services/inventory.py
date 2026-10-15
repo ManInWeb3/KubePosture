@@ -385,7 +385,6 @@ def list_workload_images(workloads, *, include_history: bool = False):
 # ── /findings/ list-page query helpers ──────────────────────────
 
 
-_EXPOSURE_VALUES = {"internet", "sensitive", "either"}
 _FINDING_LIST_SORTS = {
     "last_seen": "last_seen",
     "first_seen": "first_seen",

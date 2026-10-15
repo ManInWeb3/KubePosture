@@ -222,8 +222,8 @@ def test_typed_list_error_fails_the_cycle_instead_of_shipping_a_partial_inventor
     the server treats a committed inventory as complete, so one timeout
     on `list_namespace` would deactivate every namespace of the cluster.
     Now it raises before any byte is sent."""
-    from kubernetes.client.exceptions import ApiException
     from kubeposture_importer.sources.kube import InventoryListError
+    from kubernetes.client.exceptions import ApiException
     mod = _build_mock_module(namespaces=[_v1_namespace("test-ns")])
     mod.CoreV1Api.return_value.list_namespace.side_effect = ApiException(status=500, reason="Boom")
     with pytest.raises(InventoryListError, match="namespaces: 500 Boom"):

@@ -89,7 +89,6 @@ PUBLIC_LABEL_DOMAINS = (
     "prometheus.io", "posture.io", "projectcalico.org", "metallb.io", "traefik.io",
 )
 LAYOUT = (("kubeapi", FROM_FOLDER_KUBEAPI), ("trivy", FROM_FOLDER_TRIVY), ("kyverno", FROM_FOLDER_KYVERNO))
-GRAPH_KINDS = ("Deployment", "StatefulSet", "DaemonSet", "CronJob", "Job", "ReplicaSet", "Pod")
 CONTROLLER_KINDS = ("Deployment", "StatefulSet", "DaemonSet", "CronJob", "Job", "Pod")
 
 _SHA_RE = re.compile(r"sha256:[0-9a-f]{64}")

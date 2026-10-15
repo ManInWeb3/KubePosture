@@ -227,17 +227,6 @@ _FINDING_RELATIONS = (
 )
 
 
-def compute_priority(finding: Finding) -> PriorityResult:
-    """Single-finding entry point. Reloads relations + calls score()."""
-    finding = (
-        Finding.objects
-        .select_related(*_FINDING_RELATIONS)
-        .prefetch_related("workload__signals")
-        .get(pk=finding.pk)
-    )
-    return score(finding)
-
-
 #: Findings loaded (with relations + workload signals) per pass. Bounds worker
 #: memory regardless of cluster size — a whole-cluster pass OOMKilled workers.
 RECOMPUTE_CHUNK_SIZE = 5000
