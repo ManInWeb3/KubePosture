@@ -143,12 +143,15 @@ tmp:
   # @schema
   sizeLimit: 256Mi
 
-# -- When an import run succeeds, delete previously failed Jobs owned by
-# the same CronJob (main or trigger, whichever just succeeded). Transient
-# failures (connection resets, etc.) that later resolve on their own would
-# otherwise sit in the Job history and keep tripping failed-job alerts.
-# failedJobsHistoryLimit still applies as a cap for the case where cleanup
-# itself can't run (flag disabled, or the delete fails).
+# -- After a successful run, delete previously failed Jobs owned by the
+# same CronJob (main or trigger, whichever just succeeded). For the
+# trigger that includes idle ticks that found nothing pending — a
+# successful pending check proves the earlier failure is gone.
+# Transient failures (connection resets, etc.) that later resolve on
+# their own would otherwise sit in the Job history and keep tripping
+# failed-job alerts. Grants `delete` on Jobs in the release namespace
+# only (templates/role.yaml). failedJobsHistoryLimit still applies as a
+# cap for the case where cleanup itself can't run.
 cleanupFailedJobsOnSuccess: true
 
 # @schema

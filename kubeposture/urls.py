@@ -16,7 +16,10 @@ def healthz(request):
 def readyz(request):
     """Readiness probe — DB reachable."""
     try:
-        connection.ensure_connection()
+        # A real query, not ensure_connection(): with CONN_MAX_AGE the
+        # connection is reused and ensure_connection() is a no-op on it.
+        with connection.cursor() as cur:
+            cur.execute("SELECT 1")
         return JsonResponse({"status": "ok"})
     except Exception as exc:  # pragma: no cover — DB rarely down in dev
         return JsonResponse({"status": "error", "detail": str(exc)}, status=503)

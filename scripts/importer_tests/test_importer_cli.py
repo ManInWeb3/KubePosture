@@ -152,3 +152,73 @@ def test_pending_cleared_only_on_success(tmp_path, monkeypatch, flag):
     rc = cli.main(["c", "--on-demand-only", "--from-folder", str(_capture(tmp_path))])
     cleared = "api/v1/imports/pending/clear/" in net.paths()
     assert (rc == 0) is flag and cleared is flag
+
+
+# ── failed-Job cleanup runs after EVERY successful run ─────────────
+
+
+@pytest.fixture
+def cleanup_calls(monkeypatch):
+    """Patch the kube side of the cleanup; returns the list of calls."""
+    from kubeposture_importer.sources import kube as kube_source
+
+    calls: list[dict] = []
+    monkeypatch.setattr(kube_source, "load_kube_config", lambda kubeconfig, in_cluster: "kube-client")
+    monkeypatch.setattr(kube_source, "cleanup_failed_sibling_jobs",
+                        lambda client, **kw: calls.append({"client": client, **kw}))
+    monkeypatch.setenv("KUBEPOSTURE_TOKEN", "tok")
+    monkeypatch.setenv("KUBEPOSTURE_CLEANUP_FAILED_JOBS", "true")
+    monkeypatch.setenv("KUBEPOSTURE_NAMESPACE", "ns")
+    monkeypatch.setenv("KUBEPOSTURE_CRONJOB_NAME", "imp-trigger")
+    return calls
+
+
+@pytest.mark.parametrize("pending", [
+    {"pending": False, "in_flight": False},   # the common idle tick
+    {"pending": True, "in_flight": True},     # another import already running
+])
+def test_idle_trigger_tick_cleans_up_its_own_failed_jobs(monkeypatch, cleanup_calls, pending):
+    """The trigger's idle ticks used to return before the cleanup (and had
+    no kube client loaded), so a failed trigger Job was only cleared on
+    the rare tick that actually imported."""
+    net = FakeNet([_Resp(200, pending)])
+    monkeypatch.setattr(cli, "HttpClient", lambda *a, **k: net.client())
+    assert cli.main(["c", "--on-demand-only", "--in-cluster"]) == 0
+    assert cleanup_calls == [{"client": "kube-client", "namespace": "ns", "cronjob_name": "imp-trigger"}]
+
+
+def test_failed_run_does_not_clean_up(monkeypatch, cleanup_calls):
+    net = FakeNet([_http_error(503)] * 10)
+    monkeypatch.setenv("KUBEPOSTURE_HTTP_RETRY_BASE_DELAY", "0")
+    monkeypatch.setattr(cli, "HttpClient", lambda *a, **k: net.client())
+    assert cli.main(["c", "--on-demand-only", "--in-cluster"]) == 1
+    assert cleanup_calls == []
+
+
+def test_cleanup_off_or_unconfigured_or_from_folder_is_skipped(monkeypatch, cleanup_calls, tmp_path, capsys):
+    def tick(*extra):
+        net = FakeNet([_Resp(200, {"pending": False})])
+        monkeypatch.setattr(cli, "HttpClient", lambda *a, **k: net.client())
+        return cli.main(["c", "--on-demand-only", *extra])
+
+    monkeypatch.setenv("KUBEPOSTURE_CLEANUP_FAILED_JOBS", "false")
+    assert tick("--in-cluster") == 0
+    monkeypatch.setenv("KUBEPOSTURE_CLEANUP_FAILED_JOBS", "true")
+    assert tick("--from-folder", str(tmp_path)) == 0, "a local replay has no CronJob to clean"
+    monkeypatch.delenv("KUBEPOSTURE_CRONJOB_NAME")
+    assert tick("--in-cluster") == 0
+    assert cleanup_calls == []
+    assert "KUBEPOSTURE_CRONJOB_NAME not set" in capsys.readouterr().err
+
+
+def test_cleanup_error_never_changes_the_exit_code(monkeypatch, cleanup_calls, capsys):
+    from kubeposture_importer.sources import kube as kube_source
+
+    def boom(*a, **k):
+        raise RuntimeError("no in-cluster config")
+
+    monkeypatch.setattr(kube_source, "load_kube_config", boom)
+    net = FakeNet([_Resp(200, {"pending": False})])
+    monkeypatch.setattr(cli, "HttpClient", lambda *a, **k: net.client())
+    assert cli.main(["c", "--on-demand-only", "--in-cluster"]) == 0
+    assert "cleanup: skipped: no in-cluster config" in capsys.readouterr().err

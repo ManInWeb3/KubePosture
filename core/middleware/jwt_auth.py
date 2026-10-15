@@ -57,7 +57,9 @@ class _JWKSCache:
             entry = self._entries.get(url)
             if entry is not None and (now - entry[0]) < ttl:
                 return entry[1]
-            client = PyJWKClient(url, cache_keys=True)
+            # Explicit UA: Cloudflare-fronted JWKS endpoints 403 PyJWT's
+            # default `Python-urllib/x.y`, failing every login silently.
+            client = PyJWKClient(url, cache_keys=True, headers={"User-Agent": "kubeposture-jwt-auth"})
             self._entries[url] = (now, client)
             return client
 
