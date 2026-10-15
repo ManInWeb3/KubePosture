@@ -58,12 +58,13 @@ def _cutoff(days: int):
 DELETE_CHUNK_SIZE = 5000
 
 
-def delete_in_chunks(qs, *, chunk_size: int = DELETE_CHUNK_SIZE) -> dict[str, int]:
+def delete_in_chunks(qs, *, chunk_size: int | None = None) -> dict[str, int]:
     """Delete `qs` by primary-key slices so memory stays flat however many
     rows match. Returns the per-model counts summed over every chunk, in
     the same `{"app.Model": n}` shape as `QuerySet.delete()`. Safe only
     because no `pre_delete` / `post_delete` receivers exist for these
     models — the cascade collector is still used per chunk."""
+    chunk_size = chunk_size or DELETE_CHUNK_SIZE  # read at call time (tests patch it)
     totals: dict[str, int] = {}
     model = qs.model
     base = qs.order_by()

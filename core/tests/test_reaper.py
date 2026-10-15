@@ -1148,3 +1148,51 @@ def test_scan_reap_skips_the_recompute_when_nothing_was_cleared():
 
     recompute.assert_not_called()
     assert result.get("skipped_partial_failure") is True
+
+
+# ── discard, don't promote: a failed inventory row reaching the sweep ──
+
+
+@pytest.mark.django_db
+def test_inventory_reap_with_failed_row_discards_instead_of_advancing_anchor():
+    """`drain_check` only counts pending/processing rows, so an inventory
+    whose single row ended `failed` looks drained. The worker discards the
+    import when it fails the row itself, but the abandon-exhausted SQL
+    flips a poison row to `failed` with no discard — the sweep used to reap
+    it as a complete cycle (anchor advanced, every workload retired)."""
+    c = _cluster()
+    w = _workload(c)
+    mark = _mark(c, kind="inventory", import_id="imp-poison")
+    sibling = _mark(c, kind="trivy.ConfigAuditReport", import_id="imp-poison")
+    _row(mark, status=IngestQueueStatus.FAILED.value, error="abandoned: poison")
+    _row(sibling, status=IngestQueueStatus.PENDING.value)
+
+    with patch("core.services.reaper._maybe_capture_heartbeat") as hb:
+        fired = reap_all_drainable()
+
+    assert fired == 0
+    hb.assert_not_called()
+    c.refresh_from_db()
+    w.refresh_from_db()
+    assert c.last_complete_inventory_at is None, "a cycle that never landed must not become the anchor"
+    assert w.deployed is True, "nothing was retired"
+    for m in (mark, sibling):
+        m.refresh_from_db()
+        assert m.state == ImportMarkState.REAPED.value
+        assert m.discard_reason == ImportDiscardReason.INVENTORY_FAILED.value
+    assert mark.last_error == "abandoned: poison"
+    assert _rows(mark) == 0 and _rows(sibling) == 0, "the whole import's rows are gone"
+
+
+@pytest.mark.django_db
+def test_maybe_reap_discards_failed_inventory_without_a_heartbeat():
+    c = _cluster()
+    mark = _mark(c, kind="inventory", import_id="imp-poison")
+    _row(mark, status=IngestQueueStatus.FAILED.value, error="x")
+
+    with patch("core.services.reaper._maybe_capture_heartbeat") as hb:
+        assert maybe_reap(mark) is None
+
+    hb.assert_not_called()
+    mark.refresh_from_db()
+    assert mark.discard_reason == ImportDiscardReason.INVENTORY_FAILED.value

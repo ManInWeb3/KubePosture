@@ -33,6 +33,16 @@ def _cluster_with_findings(n: int, *, name: str = "c-chunks") -> tuple[Cluster, 
 def test_delete_in_chunks_deletes_every_row_and_sums_cascade_counts(monkeypatch):
     monkeypatch.setattr(pruning, "DELETE_CHUNK_SIZE", 2)
     c, findings = _cluster_with_findings(5)
+    chunks = _spy_chunks(monkeypatch)
+    counts = delete_in_chunks(Finding.objects.filter(cluster=c))
+
+    assert chunks == [2, 2, 1]
+    assert counts == {"core.Finding": 5, "core.FindingAction": 5}
+    assert not Finding.objects.filter(cluster=c).exists()
+
+
+def _spy_chunks(monkeypatch) -> list[int]:
+    """Record the size of every pk slice `delete_in_chunks` deletes."""
     chunks: list[int] = []
     real = Finding._base_manager.filter
 
@@ -42,19 +52,18 @@ def test_delete_in_chunks_deletes_every_row_and_sums_cascade_counts(monkeypatch)
         return real(*args, **kwargs)
 
     monkeypatch.setattr(Finding._base_manager, "filter", spy)
-    counts = delete_in_chunks(Finding.objects.filter(cluster=c), chunk_size=pruning.DELETE_CHUNK_SIZE)
-
-    assert chunks == [2, 2, 1]
-    assert counts == {"core.Finding": 5, "core.FindingAction": 5}
-    assert not Finding.objects.filter(cluster=c).exists()
+    return chunks
 
 
 @pytest.mark.django_db
 def test_remove_cluster_reports_chunk_deleted_findings_in_its_counts(monkeypatch):
     monkeypatch.setattr(pruning, "DELETE_CHUNK_SIZE", 2)
     c, _ = _cluster_with_findings(3)
+    chunks = _spy_chunks(monkeypatch)
 
     result = remove_cluster(c)
+
+    assert chunks == [2, 1], "cluster removal must go through delete_in_chunks"
 
     assert result.deleted["core.Finding"] == 3
     assert result.deleted["core.FindingAction"] == 3
@@ -67,9 +76,11 @@ def test_prune_stale_findings_deletes_in_chunks(monkeypatch):
     monkeypatch.setattr(pruning, "DELETE_CHUNK_SIZE", 2)
     c, findings = _cluster_with_findings(5)
     Finding.objects.filter(cluster=c).update(last_seen=timezone.now() - timezone.timedelta(days=400))
+    chunks = _spy_chunks(monkeypatch)
 
     result = prune_stale_findings(days=180)
 
+    assert chunks == [2, 2, 1], "the prune must go through delete_in_chunks"
     assert (result.scanned, result.deleted) == (5, 5)
     assert not Finding.objects.filter(cluster=c).exists()
 

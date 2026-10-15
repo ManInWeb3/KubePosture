@@ -140,6 +140,20 @@ def _recompute_after_commit(counters: dict, ids, *, event: str, **extra) -> dict
 # ── Inventory reap ------------------------------------------------
 
 def _reap_inventory(mark: ImportMark) -> dict | None:
+    # Discard, don't promote: a tuple drains once no row is pending or
+    # processing, so an inventory whose row ended `failed` looks drained
+    # too. The worker discards the import when *it* fails the row, but the
+    # abandon-exhausted SQL (a poison item past MAX_RECLAIM_ATTEMPTS) flips
+    # a row to `failed` with no discard — reaping that would advance the
+    # anchor on a cycle that never landed and retire every workload.
+    failed, _ = failure_summary(
+        cluster_name=mark.cluster.name, kind=mark.kind, import_id=mark.import_id,
+    )
+    if failed:
+        discard_import_for_failed_inventory(
+            cluster_name=mark.cluster.name, import_id=mark.import_id,
+        )
+        return None
     with transaction.atomic():
         if not _claim_reap(mark):
             return None

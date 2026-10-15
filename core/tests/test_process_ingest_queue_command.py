@@ -474,3 +474,30 @@ def test_max_seconds_zero_means_no_budget(monkeypatch):
 
     assert totals["claimed"] == 5
     sweep.assert_called_once()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_poison_inventory_item_is_discarded_not_promoted(cluster):
+    """A stale inventory row past MAX_RECLAIM_ATTEMPTS is flipped to `failed`
+    by claim_batch's abandon sweep (no worker ever ran the discard hook);
+    the run's final reap sweep must discard the import, not reap it."""
+    from core.services.queue import MAX_RECLAIM_ATTEMPTS, STALE_PROCESSING_SECONDS
+
+    mark = ImportMark.objects.create(
+        cluster=cluster, kind="inventory", import_id="imp-poison",
+        state=ImportMarkState.DRAINING.value, started_at=timezone.now(),
+    )
+    IngestQueue.objects.create(
+        cluster_name=cluster.name, kind="inventory", import_id="imp-poison", raw_json={},
+        status=IngestQueueStatus.PROCESSING.value, attempts=MAX_RECLAIM_ATTEMPTS,
+        claimed_at=timezone.now() - timezone.timedelta(seconds=STALE_PROCESSING_SECONDS + 60),
+    )
+
+    call_command("process_ingest_queue", stdout=io.StringIO(), stderr=io.StringIO())
+
+    cluster.refresh_from_db()
+    mark.refresh_from_db()
+    assert cluster.last_complete_inventory_at is None
+    assert mark.state == ImportMarkState.REAPED.value
+    assert mark.discard_reason == ImportDiscardReason.INVENTORY_FAILED.value
+    assert not IngestQueue.objects.filter(import_id="imp-poison").exists()
