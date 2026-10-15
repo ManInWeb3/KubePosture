@@ -119,9 +119,16 @@ class WorkloadsListView(LoginRequiredMixin, View):
             sort=sort,
             sort_dir=sort_dir,
         )
+        # Rows are cheap dicts (band counts are one GROUP BY), but the
+        # table itself was unbounded — a fleet-wide list rendered every
+        # deployed workload on each HTMX keystroke.
+        page = Paginator(rows, 50).get_page(params.get("page") or 1)
+        request_qs = _qs_without_page(request.GET)
 
         if _is_htmx(request) and (request.headers.get("HX-Target") == "workload-rows"):
-            return render(request, "workloads/_rows.html", {"rows": rows})
+            return render(request, "workloads/_rows.html", {
+                "page_obj": page, "rows": page.object_list, "request_qs": request_qs,
+            })
 
         clusters = Cluster.objects.order_by("name")
         ns_qs = Namespace.objects.filter(workloads__deployed=True)
@@ -133,7 +140,9 @@ class WorkloadsListView(LoginRequiredMixin, View):
 
         return render(request, self.template_name, {
             "nav": "workloads",
-            "rows": rows,
+            "page_obj": page,
+            "rows": page.object_list,
+            "request_qs": request_qs,
             "clusters": clusters,
             "namespace_names": namespace_names,
             "filters": {

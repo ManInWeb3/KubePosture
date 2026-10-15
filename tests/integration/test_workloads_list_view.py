@@ -476,3 +476,24 @@ def test_current_image_counts_unchanged_with_include_history(authed, scene_with_
     # Same expectations as test_workloads_priority_counts_match for cluster-a/api.
     assert shared["n_immediate"] == 1
     assert shared["n_out_of_band"] == 0
+
+
+def test_workloads_list_is_paginated(authed, cluster_a):
+    """The table used to render every deployed workload on each HTMX
+    keystroke; it is now 50 per page with the shared pagination widget."""
+    ns = Namespace.objects.create(cluster=cluster_a, name="bulk")
+    for i in range(55):
+        Workload.objects.create(cluster=cluster_a, namespace=ns, kind="Deployment",
+                                name=f"wl-{i:03d}", deployed=True)
+
+    resp = authed.get(reverse("workloads-list") + "?cluster=cluster-a&sort=name&dir=asc")
+    body = resp.content.decode()
+    assert resp.status_code == 200
+    assert resp.context["page_obj"].paginator.count == 55
+    assert len(resp.context["rows"]) == 50
+    assert "page=2" in body and "cluster=cluster-a" in body
+
+    page2 = authed.get(reverse("workloads-list") + "?cluster=cluster-a&sort=name&dir=asc&page=2",
+                       HTTP_HX_REQUEST="true", HTTP_HX_TARGET="workload-rows")
+    assert len(page2.context["rows"]) == 5
+    assert "<html" not in page2.content.decode().lower()
