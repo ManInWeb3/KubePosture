@@ -445,3 +445,60 @@ def test_matcher_full_scan_uses_semi_join_not_purl_set():
 
     ioc_queries = [q["sql"] for q in ctx.captured_queries if "core_supplychainioc" in q["sql"]]
     assert any("IN (SELECT" in q and "core_sbomcomponent" in q for q in ioc_queries), ioc_queries
+
+
+# ── name-only (every-version) IoC purls ─────────────────────────────
+#
+# The OSV loader stores `pkg:npm/foo` (no version) for an advisory that
+# covers every version of a package (`ranges: [{introduced: "0"}]`, the
+# standard ossf/malicious-packages shape). Component purls always carry a
+# version, so exact equality never matched these — the most common
+# malicious-package shape produced no Finding at all.
+
+
+def _deployed_component(purl: str, *, cluster_name: str = "c1"):
+    c = _cluster(cluster_name)
+    w = _workload(c, _ns(c), "api")
+    img = _image("sha256:" + "d" * 64)
+    _observation(w, img, deployed=True)
+    return _component(img, purl)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("touched", [True, False], ids=["incremental", "full-rescan"])
+def test_sentinel_ioc_matches_every_deployed_version(touched):
+    comp = _deployed_component("pkg:npm/evil-pkg@1.2.3")
+    ioc = _ioc("pkg:npm/evil-pkg")
+
+    n = match_iocs_to_components(touched_purls={ioc.purl} if touched else None)
+
+    assert n == 1
+    f = Finding.objects.get()
+    assert f.vuln_id == ioc.advisory_id and f.details["purl"] == comp.purl
+
+
+@pytest.mark.django_db
+def test_sentinel_ioc_matches_scoped_package_names():
+    """A literal `@` in a scope must not be mistaken for the version
+    separator by the name-purl expression."""
+    _deployed_component("pkg:npm/@scope/evil@2.0.0")
+    ioc = _ioc("pkg:npm/@scope/evil")
+
+    assert match_iocs_to_components(touched_purls={ioc.purl}) == 1
+
+
+@pytest.mark.django_db
+def test_sentinel_ioc_does_not_match_a_different_package():
+    _deployed_component("pkg:npm/evil-pkg-fork@1.0.0")
+    ioc = _ioc("pkg:npm/evil-pkg")
+
+    assert match_iocs_to_components(touched_purls={ioc.purl}) == 0
+    assert Finding.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_versioned_ioc_still_requires_an_exact_version():
+    _deployed_component("pkg:npm/evil-pkg@1.2.3")
+    ioc = _ioc("pkg:npm/evil-pkg@9.9.9")
+
+    assert match_iocs_to_components(touched_purls={ioc.purl}) == 0

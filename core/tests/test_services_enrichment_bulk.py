@@ -18,7 +18,7 @@ from unittest.mock import patch
 import pytest
 
 from core import urgency
-from core.constants import Environment, Severity
+from core.constants import Environment, PriorityBand, Severity
 from core.models import (
     Cluster,
     EpssScore,
@@ -478,3 +478,26 @@ def test_recompute_affected_findings_accepts_a_subquery():
     spy.assert_called_once()
     assert set(spy.call_args.args[0]) == {hit.pk}
     assert miss.pk not in set(spy.call_args.args[0])
+
+
+@pytest.mark.django_db
+def test_kev_delisting_recomputes_the_findings_priority():
+    """The clear-UPDATE's rows are not in the new feed, so the feed-driven
+    recompute never saw them: a de-listed finding kept `immediate` until
+    its report was next ingested."""
+    c = _cluster()
+    ns = _ns(c)
+    w = _workload(c, ns)
+    f = _finding(w, "CVE-2024-AAA", kev_listed=True, hash_code="ha")
+    Finding.objects.filter(pk=f.pk).update(effective_priority=PriorityBand.IMMEDIATE.value)
+    KevEntry.objects.create(vuln_id="CVE-2024-AAA")
+
+    path = _write_kev("CVE-2024-BBB")
+    try:
+        enrichment.load_kev_from_file(path)
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+    f.refresh_from_db()
+    assert f.kev_listed is False
+    assert f.effective_priority != PriorityBand.IMMEDIATE.value

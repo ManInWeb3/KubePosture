@@ -291,3 +291,70 @@ def test_osv_handles_bad_zip_gracefully():
     with patch.object(enrichment, "_http_download_conditional", return_value=_bytes_path(b"not a zip")):
         n = enrichment.fetch_osv_supply_chain()
     assert n == 0
+
+
+@pytest.mark.django_db
+def test_osv_ranges_only_advisory_matches_every_deployed_version():
+    """`ranges: [{events: [{introduced: "0"}]}]` with no `versions` is how
+    ossf/malicious-packages says "the whole package is malicious". It
+    stores a name-only IoC purl, which must still match the deployed
+    `pkg:npm/foo@1.2.3`."""
+    _seed_deployed("pkg:npm/evil-pkg@1.2.3", ecosystem="npm")
+    advisories = [{
+        "id": "MAL-2026-0042",
+        "summary": "Malicious evil-pkg",
+        "affected": [{
+            "package": {"name": "evil-pkg", "ecosystem": "npm"},
+            "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}]}],
+        }],
+    }]
+
+    with patch.object(enrichment, "_http_download_conditional", return_value=_zip_path(advisories)):
+        enrichment.fetch_osv_supply_chain()
+
+    assert SupplyChainIoc.objects.get().purl == "pkg:npm/evil-pkg"
+    assert Finding.objects.filter(vuln_id="MAL-2026-0042").count() == 1
+
+
+@pytest.mark.django_db
+def test_osv_go_advisory_without_purl_synthesises_a_golang_purl():
+    """Trivy emits `pkg:golang/...`; a reverse map that also knew "gomod"
+    used to synthesise `pkg:gomod/...`, which never matched anything."""
+    _seed_deployed("pkg:golang/github.com/evil/mod@v1.0.0", ecosystem="golang",
+                   name="github.com/evil/mod")
+    advisories = [{
+        "id": "MAL-2026-0043",
+        "summary": "Malicious Go module",
+        "affected": [{
+            "package": {"name": "github.com/evil/mod", "ecosystem": "Go"},
+            "versions": ["v1.0.0"],
+        }],
+    }]
+
+    with patch.object(enrichment, "_http_download_conditional", return_value=_zip_path(advisories)):
+        enrichment.fetch_osv_supply_chain()
+
+    assert SupplyChainIoc.objects.get().purl == "pkg:golang/github.com/evil/mod@v1.0.0"
+    assert Finding.objects.filter(vuln_id="MAL-2026-0043").count() == 1
+
+
+@pytest.mark.django_db
+def test_osv_fetch_state_is_persisted_only_after_the_zip_was_applied():
+    """Persisting ETag/Last-Modified on download meant a bad zip got a 304
+    next run and the feed was skipped until upstream republished."""
+    from core.models import FeedFetchState
+
+    _seed_deployed("pkg:npm/lodash@4.17.21", ecosystem="npm")
+
+    bad = enrichment._DownloadPath(_bytes_path(b"not a zip"))
+    bad.fetch_state = {"etag": '"bad"', "last_modified": ""}
+    with patch.object(enrichment, "_http_download_conditional", return_value=bad):
+        enrichment.fetch_osv_supply_chain()
+    assert not FeedFetchState.objects.filter(state_key="osv:npm").exists()
+
+    good = enrichment._DownloadPath(_zip_path([]))
+    good.fetch_state = {"etag": '"good"', "last_modified": "Wed, 15 Oct 2026 00:00:00 GMT"}
+    with patch.object(enrichment, "_http_download_conditional", return_value=good):
+        enrichment.fetch_osv_supply_chain()
+    state = FeedFetchState.objects.get(state_key="osv:npm")
+    assert state.etag == '"good"' and state.last_success_at is not None

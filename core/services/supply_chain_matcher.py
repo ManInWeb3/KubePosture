@@ -20,11 +20,13 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 
+from django.db.models import Q
 from django.utils import timezone
 
 from core.constants import Category, Severity, Source
 from core.models import SbomComponent, SupplyChainIoc, WorkloadImageObservation
-from core.purl import normalize_purl
+from core.models.sbom_component import name_purl_expr
+from core.purl import normalize_purl, parse_purl_name_version
 from core.services.dedup import upsert_findings
 
 # Purls per `IN (...)` when intersecting the feed's touched purls with the
@@ -43,15 +45,39 @@ def _chunked(items: Iterable, size: int) -> Iterator[list]:
         yield chunk
 
 
+def _is_sentinel(purl: str) -> bool:
+    """A name-only IoC purl (`pkg:npm/foo`, no version): the advisory
+    covers every version of the package. Stored by the OSV loader when an
+    advisory has no explicit versions (`ranges: [{introduced: "0"}]`)."""
+    _name, version = parse_purl_name_version(purl)
+    return not version
+
+
+def _components():
+    """SbomComponent rows annotated with `name_purl` (purl minus the
+    trailing `@version`, backed by the `sbomcomp_name_purl` functional
+    index) so a sentinel IoC matches every version of its package."""
+    return SbomComponent.objects.annotate(name_purl=name_purl_expr())
+
+
 def _deployed_among(touched: set[str]) -> set[str]:
     """`touched ∩ {purls in SbomComponent}`, computed by Postgres one
-    chunk of `touched` at a time. The result is bounded by the number of
+    chunk of `touched` at a time. Sentinel purls are intersected with the
+    components' name purls. The result is bounded by the number of
     malicious purls actually deployed — normally a handful."""
     found: set[str] = set()
     for chunk in _chunked(sorted(touched), _PURL_CHUNK_SIZE):
-        found.update(
-            SbomComponent.objects.filter(purl__in=chunk).values_list("purl", flat=True).distinct()
-        )
+        exact = [p for p in chunk if not _is_sentinel(p)]
+        sentinels = [p for p in chunk if _is_sentinel(p)]
+        if exact:
+            found.update(
+                SbomComponent.objects.filter(purl__in=exact).values_list("purl", flat=True).distinct()
+            )
+        if sentinels:
+            found.update(
+                _components().filter(name_purl__in=sentinels)
+                .values_list("name_purl", flat=True).distinct()
+            )
     return found
 
 
@@ -78,15 +104,21 @@ def match_iocs_to_components(
         touched = {normalize_purl(p) for p in touched_purls if p}
         if not touched:
             return 0
-        purl_filter = {"purl__in": _deployed_among(touched)}
-        if not purl_filter["purl__in"]:
+        deployed = _deployed_among(touched)
+        if not deployed:
             return 0
+        ioc_qs = SupplyChainIoc.objects.filter(purl__in=deployed)
     else:
-        purl_filter = {"purl__in": SbomComponent.objects.values("purl")}  # semi-join
+        # Semi-joins: versioned IoCs against component purls, sentinels
+        # against the components' name purls.
+        ioc_qs = SupplyChainIoc.objects.filter(
+            Q(purl__in=SbomComponent.objects.values("purl"))
+            | Q(purl__in=_components().values("name_purl"))
+        )
 
     # `raw` is the full advisory JSON and is never read by the matcher.
     # Loading it dominates row memory for npm scans.
-    ioc_qs = SupplyChainIoc.objects.filter(**purl_filter).defer("raw")
+    ioc_qs = ioc_qs.defer("raw")
 
     iocs_by_purl: dict[str, list[SupplyChainIoc]] = {}
     for ioc in ioc_qs.iterator(chunk_size=2000):
@@ -94,14 +126,22 @@ def match_iocs_to_components(
     if not iocs_by_purl:
         return 0
 
+    exact_keys = [p for p in iocs_by_purl if not _is_sentinel(p)]
+    sentinel_keys = [p for p in iocs_by_purl if _is_sentinel(p)]
     comp_qs = (
-        SbomComponent.objects.filter(purl__in=list(iocs_by_purl))
+        _components()
+        .filter(Q(purl__in=exact_keys) | Q(name_purl__in=sentinel_keys))
         .select_related("image")
     )
     total = 0
     now = timezone.now()
 
     for comp in comp_qs:
+        matched = list(iocs_by_purl.get(comp.purl, ()))
+        if comp.name_purl != comp.purl:
+            matched += iocs_by_purl.get(comp.name_purl, ())
+        if not matched:
+            continue
         observations = list(
             WorkloadImageObservation.objects
             .filter(image=comp.image, currently_deployed=True)
@@ -111,7 +151,7 @@ def match_iocs_to_components(
             continue
 
         finding_dicts = []
-        for ioc in iocs_by_purl[comp.purl]:
+        for ioc in matched:
             finding_dicts.append({
                 "source": Source.SUPPLY_CHAIN_IOC.value,
                 "category": Category.SUPPLY_CHAIN.value,

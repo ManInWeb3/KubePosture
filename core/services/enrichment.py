@@ -53,7 +53,6 @@ PURL_TO_OSV = {
     "npm": "npm",
     "pypi": "PyPI",
     "golang": "Go",
-    "gomod": "Go",
     "cargo": "crates.io",
     "gem": "RubyGems",
     "maven": "Maven",
@@ -61,6 +60,12 @@ PURL_TO_OSV = {
     "hex": "Hex",
     "composer": "Packagist",
 }
+# OSV ecosystem → purl type, for synthesising IoC purls from `package.name`
+# when an advisory carries no explicit purl. Must stay one-to-one with
+# PURL_TO_OSV: Trivy emits `pkg:golang/...`, so a second alias mapping to
+# "Go" (there used to be a "gomod" entry) made every synthesised Go purl
+# unmatchable.
+_OSV_TO_PURL = {v: k for k, v in PURL_TO_OSV.items()}
 
 _HTTP_TIMEOUT = 60
 _HTTP_MAX_ATTEMPTS = 3
@@ -109,6 +114,24 @@ def _http_open(url: str) -> Iterator[io.BufferedIOBase | None]:
     yield None
 
 
+class _DownloadPath(str):
+    """Temp-file path returned by `_http_download_conditional`, carrying
+    the response validators to persist once the file has been applied."""
+
+    fetch_state: dict | None = None
+
+
+def _commit_fetch_state(state_key: str, fetch_state: dict | None) -> None:
+    """Persist ETag / Last-Modified for `state_key` — called by the feed
+    loader only after it has applied the download successfully."""
+    if not fetch_state:
+        return
+    FeedFetchState.objects.update_or_create(
+        state_key=state_key,
+        defaults={**fetch_state, "last_success_at": timezone.now()},
+    )
+
+
 def _http_download_conditional(
     url: str, *, state_key: str, suffix: str = ".bin"
 ) -> str | None:
@@ -124,7 +147,12 @@ def _http_download_conditional(
     `zipfile.ZipFile` then decompresses one entry at a time off the file.
 
     Returns:
-      - path to a temp file on 200 (and persists new ETag/Last-Modified)
+      - path to a temp file on 200, as a `_DownloadPath` carrying the
+        response's ETag / Last-Modified. The caller persists them with
+        `_commit_fetch_state` once it has *applied* the file: persisting
+        on download used to mean a failure after download (bad zip, pod
+        killed) got a 304 on the next run and skipped the feed until
+        upstream republished.
       - None on 304, network failure, or non-2xx
     """
     state = FeedFetchState.objects.filter(state_key=state_key).first()
@@ -146,15 +174,12 @@ def _http_download_conditional(
                 except BaseException:
                     Path(tmp_path).unlink(missing_ok=True)
                     raise
-                FeedFetchState.objects.update_or_create(
-                    state_key=state_key,
-                    defaults={
-                        "etag": resp.headers.get("ETag", ""),
-                        "last_modified": resp.headers.get("Last-Modified", ""),
-                        "last_success_at": timezone.now(),
-                    },
-                )
-                return tmp_path
+                path = _DownloadPath(tmp_path)
+                path.fetch_state = {
+                    "etag": resp.headers.get("ETag", ""),
+                    "last_modified": resp.headers.get("Last-Modified", ""),
+                }
+                return path
         except HTTPError as e:
             if e.code == 304:
                 log.info("enrichment.fetch.not_modified url=%s", url)
@@ -224,8 +249,9 @@ _PG_DEADLOCK = "40P01"
 _DEADLOCK_MAX_ATTEMPTS = 5
 _DEADLOCK_BACKOFF_BASE = 0.5
 
-def _exec_with_deadlock_retry(sql: str) -> None:
+def _exec_with_deadlock_retry(sql: str) -> list[int]:
     """Run `sql` in autocommit mode with a deadlock-detect retry loop.
+    Returns the first column of a `RETURNING` clause (empty otherwise).
 
     Running outside an outer `transaction.atomic()` is the point: the
     statement's row locks release immediately on completion instead of
@@ -238,7 +264,7 @@ def _exec_with_deadlock_retry(sql: str) -> None:
         try:
             with connection.cursor() as cur:
                 cur.execute(sql)
-            return
+                return [row[0] for row in cur.fetchall()] if cur.description else []
         except OperationalError as exc:
             pgcode = getattr(getattr(exc, "__cause__", None), "sqlstate", None)
             if pgcode != _PG_DEADLOCK or attempt == _DEADLOCK_MAX_ATTEMPTS:
@@ -263,7 +289,7 @@ def _recompute_affected_findings(vuln_ids) -> int:
     return updated
 
 
-def _refresh_finding_epss_cache() -> None:
+def _refresh_finding_epss_cache() -> list[int]:
     """Propagate the (refreshed) EpssScore table into the Finding cache.
 
     Two bulk UPDATEs replace the prior per-CVE Python loop:
@@ -273,6 +299,10 @@ def _refresh_finding_epss_cache() -> None:
     `IS DISTINCT FROM` skips rows that already match so we don't acquire
     write locks on unchanged tuples. Each statement runs in autocommit
     with deadlock retry.
+
+    Returns the ids cleared by (2): those CVEs are no longer in the feed,
+    so the feed-driven recompute would miss them — the caller recomputes
+    them explicitly or their band stays where the old score put it.
     """
     _exec_with_deadlock_retry("""
         UPDATE core_finding f
@@ -282,7 +312,7 @@ def _refresh_finding_epss_cache() -> None:
           AND (f.epss_score IS DISTINCT FROM e.score
                OR f.epss_percentile IS DISTINCT FROM e.percentile)
     """)
-    _exec_with_deadlock_retry("""
+    return _exec_with_deadlock_retry("""
         UPDATE core_finding f
         SET epss_score = NULL, epss_percentile = NULL
         WHERE f.vuln_id LIKE 'CVE-%'
@@ -290,11 +320,13 @@ def _refresh_finding_epss_cache() -> None:
           AND NOT EXISTS (
               SELECT 1 FROM core_epssscore e WHERE e.vuln_id = f.vuln_id
           )
+        RETURNING f.id
     """)
 
 
-def _refresh_finding_kev_cache() -> None:
-    """Propagate the (refreshed) KevEntry table into the Finding cache."""
+def _refresh_finding_kev_cache() -> list[int]:
+    """Propagate the (refreshed) KevEntry table into the Finding cache.
+    Returns the ids of Findings de-listed from KEV (see the EPSS twin)."""
     _exec_with_deadlock_retry("""
         UPDATE core_finding f
         SET kev_listed = TRUE
@@ -303,13 +335,14 @@ def _refresh_finding_kev_cache() -> None:
               SELECT 1 FROM core_keventry k WHERE k.vuln_id = f.vuln_id
           )
     """)
-    _exec_with_deadlock_retry("""
+    return _exec_with_deadlock_retry("""
         UPDATE core_finding f
         SET kev_listed = FALSE
         WHERE f.kev_listed = TRUE
           AND NOT EXISTS (
               SELECT 1 FROM core_keventry k WHERE k.vuln_id = f.vuln_id
           )
+        RETURNING f.id
     """)
 
 
@@ -374,9 +407,10 @@ def _load_epss_rows(lines: Iterable[str], *, source: str) -> int:
     # per-CVE UPDATE loop inside one atomic block held thousands of row
     # locks and deadlocked with the ingest queue worker; bulk SQL via JOIN
     # finishes in one statement and releases locks immediately on commit.
-    _refresh_finding_epss_cache()
+    cleared = _refresh_finding_epss_cache()
 
     _recompute_affected_findings(EpssScore.objects.values("vuln_id"))
+    recompute_ids(cleared)
     return n
 
 
@@ -442,9 +476,10 @@ def load_kev_from_file(path: str) -> int:
         n += len(chunk)
     KevEntry.objects.filter(fetched_at__lt=run_started).delete()
 
-    _refresh_finding_kev_cache()
+    cleared = _refresh_finding_kev_cache()
 
     _recompute_affected_findings(KevEntry.objects.values("vuln_id"))
+    recompute_ids(cleared)
     return n
 
 
@@ -603,8 +638,7 @@ def fetch_osv_supply_chain() -> int:
                             advisory_url = ref["url"][:512]
                             break
                     published_at = _parse_iso_dt(advisory.get("published"))
-                    reverse = {v: k for k, v in PURL_TO_OSV.items()}
-                    purl_eco = reverse.get(osv_eco)
+                    purl_eco = _OSV_TO_PURL.get(osv_eco)
 
                     for affected in advisory.get("affected") or []:
                         pkg = affected.get("package") or {}
@@ -616,8 +650,12 @@ def fetch_osv_supply_chain() -> int:
                         elif purl_eco and name_ and versions:
                             purls = [f"pkg:{purl_eco}/{name_}@{v}" for v in versions]
                         elif purl_eco and name_:
-                            # No explicit version → store name-only purl as
-                            # a sentinel; matcher uses prefix match for these.
+                            # No explicit version (typically a ranges-only
+                            # `introduced: "0"` block: every version is
+                            # malicious) → store the name-only purl as a
+                            # sentinel; the matcher matches it against
+                            # every version of that package (see
+                            # supply_chain_matcher's name-purl match).
                             purls = [f"pkg:{purl_eco}/{name_}"]
                         else:
                             continue
@@ -639,6 +677,8 @@ def fetch_osv_supply_chain() -> int:
                             )
                             touched_purls.add(purl)
                             upserted += 1
+            # Only now is the zip known to be good and fully applied.
+            _commit_fetch_state(f"osv:{osv_eco}", getattr(zip_path, "fetch_state", None))
         except zipfile.BadZipFile:
             log.warning("enrichment.osv.bad_zip eco=%s", osv_eco)
         finally:
