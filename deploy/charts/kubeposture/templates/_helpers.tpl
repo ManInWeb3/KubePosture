@@ -70,6 +70,10 @@ Common environment variables shared across web, worker, cronjobs.
     secretKeyRef:
       name: {{ .Values.db.secretName }}
       key: {{ .Values.db.urlKey }}
+{{- if .Values.db.caSecret.name }}
+- name: PGSSLROOTCERT
+  value: /etc/kubeposture/db-ca/ca.crt
+{{- end }}
 - name: SECRET_KEY
 {{- if .Values.secretKey.secretRef.name }}
   valueFrom:
@@ -107,6 +111,34 @@ capabilities:
 {{- end }}
 
 {{/*
+Volumes/mounts shared by every container: writable /tmp, plus the DB CA
+bundle (libpq reads it via PGSSLROOTCERT) when db.caSecret.name is set.
+*/}}
+{{- define "kubeposture.volumeMounts" -}}
+- name: tmp
+  mountPath: /tmp
+{{- if .Values.db.caSecret.name }}
+- name: db-ca
+  mountPath: /etc/kubeposture/db-ca
+  readOnly: true
+{{- end }}
+{{- end }}
+
+{{- define "kubeposture.volumes" -}}
+- name: tmp
+  emptyDir:
+    sizeLimit: {{ .Values.tmp.sizeLimit }}
+{{- if .Values.db.caSecret.name }}
+- name: db-ca
+  secret:
+    secretName: {{ .Values.db.caSecret.name }}
+    items:
+      - key: {{ .Values.db.caSecret.key }}
+        path: ca.crt
+{{- end }}
+{{- end }}
+
+{{/*
 wait-for-db init container — blocks pod startup until Postgres is reachable.
 Uses the app image so it has Django + psycopg available, no extra tooling.
 Pass the root context (.) — needs .Values.image and the env helper.
@@ -120,13 +152,15 @@ Pass the root context (.) — needs .Values.image and the env helper.
     - -c
     - |
       echo "Waiting for database..."
-      until python -c "import django, os; os.environ.setdefault('DJANGO_SETTINGS_MODULE','kubeposture.settings'); django.setup(); from django.db import connection; connection.ensure_connection()" 2>/dev/null; do
-        echo "  not ready, retrying in 2s..."
+      until err=$(python -c "import django, os; os.environ.setdefault('DJANGO_SETTINGS_MODULE','kubeposture.settings'); django.setup(); from django.db import connection; connection.ensure_connection()" 2>&1); do
+        echo "  not ready ($(echo "$err" | tail -n 1)), retrying in 2s..."
         sleep 2
       done
       echo "Database ready."
   env:
     {{- include "kubeposture.env" . | nindent 4 }}
+  volumeMounts:
+    {{- include "kubeposture.volumeMounts" . | nindent 4 }}
   securityContext:
     {{- include "kubeposture.securityContext" . | nindent 4 }}
   # requests == limits: QoS is decided per pod, so a Burstable init

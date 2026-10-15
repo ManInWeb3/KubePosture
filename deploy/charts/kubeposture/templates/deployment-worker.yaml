@@ -45,12 +45,9 @@ spec:
               resources:
                 {{- toYaml .Values.worker.resources | nindent 16 }}
               volumeMounts:
-                - name: tmp
-                  mountPath: /tmp
+                {{- include "kubeposture.volumeMounts" . | nindent 16 }}
           volumes:
-            - name: tmp
-              emptyDir:
-                sizeLimit: {{ .Values.tmp.sizeLimit }}
+            {{- include "kubeposture.volumes" . | nindent 12 }}
           {{- with .Values.nodeSelector }}
           nodeSelector:
             {{- toYaml . | nindent 12 }}
