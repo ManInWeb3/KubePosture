@@ -75,3 +75,29 @@ def test_dockerignore_excludes_tests_and_real_fixtures():
     lines = {ln.strip() for ln in (REPO / ".dockerignore").read_text().splitlines()}
     for entry in ("tests", "core/tests", "scripts/importer_tests", "fixtures/real", ".github"):
         assert entry in lines, entry
+
+
+def test_every_cronjob_runs_with_guaranteed_qos():
+    """Batch jobs set requests == limits so a job is only ever killed for
+    exceeding its *own* memory, never evicted because a neighbour spiked.
+    Sizes come from the `command.finished peak_rss_mb=` log line."""
+    values = _values(CENTRAL)
+    jobs = dict(values["cronJobs"], worker=values["worker"])
+    for name, job in jobs.items():
+        res = job["resources"]
+        assert res["requests"] == res["limits"], f"{name}: requests must equal limits"
+    # QoS is pod-level: the shared wait-for-db init container must match too.
+    helpers = (CENTRAL / "templates/_helpers.tpl").read_text()
+    block = helpers.split('define "kubeposture.waitForDb"')[1].split("{{- end }}")[0]
+    res = yaml.safe_load(block.split("resources:")[1])
+    assert res["requests"] == res["limits"], "wait-for-db init container"
+
+
+def test_central_tmp_is_a_bounded_disk_backed_emptydir():
+    values = _values(CENTRAL)
+    assert values["tmp"]["sizeLimit"]
+    for name in ("deployment-web.yaml", "deployment-worker.yaml", "job-setup.yaml",
+                 "cronjobs.yaml", "jobs-cron-initial.yaml"):
+        text = (CENTRAL / "templates" / name).read_text()
+        assert "Values.tmp.sizeLimit" in text, name
+        assert "medium: Memory" not in text, f"{name}: /tmp must not count against the memory limit"

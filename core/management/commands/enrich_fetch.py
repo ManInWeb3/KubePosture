@@ -6,8 +6,8 @@ Usage:
 Network failures are non-fatal: the underlying loaders honour the
 zero-input rule and leave existing rows intact.
 """
-from django.core.management.base import BaseCommand
 
+from core.management.base import KubePostureCommand
 from core.services.enrichment import (
     fetch_epss,
     fetch_kev,
@@ -21,7 +21,7 @@ _FETCHERS = {
 }
 
 
-class Command(BaseCommand):
+class Command(KubePostureCommand):
     help = "Fetch the latest enrichment feed over HTTP and apply it."
 
     def add_arguments(self, parser):

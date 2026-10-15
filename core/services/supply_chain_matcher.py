@@ -18,7 +18,7 @@ lands as IMMEDIATE.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 
 from django.utils import timezone
 
@@ -26,6 +26,33 @@ from core.constants import Category, Severity, Source
 from core.models import SbomComponent, SupplyChainIoc, WorkloadImageObservation
 from core.purl import normalize_purl
 from core.services.dedup import upsert_findings
+
+# Purls per `IN (...)` when intersecting the feed's touched purls with the
+# SBOM table. npm's MAL-* feed touches 100k+ purls per cycle.
+_PURL_CHUNK_SIZE = 5000
+
+
+def _chunked(items: Iterable, size: int) -> Iterator[list]:
+    chunk: list = []
+    for item in items:
+        chunk.append(item)
+        if len(chunk) >= size:
+            yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
+
+
+def _deployed_among(touched: set[str]) -> set[str]:
+    """`touched ∩ {purls in SbomComponent}`, computed by Postgres one
+    chunk of `touched` at a time. The result is bounded by the number of
+    malicious purls actually deployed — normally a handful."""
+    found: set[str] = set()
+    for chunk in _chunked(sorted(touched), _PURL_CHUNK_SIZE):
+        found.update(
+            SbomComponent.objects.filter(purl__in=chunk).values_list("purl", flat=True).distinct()
+        )
+    return found
 
 
 def match_iocs_to_components(
@@ -41,30 +68,25 @@ def match_iocs_to_components(
     Returns:
         Count of Findings created + updated.
     """
-    # Pre-intersect with the deployed SBOM. The matcher only emits Findings
-    # for purls a deployed component carries, so loading IoCs for purls with
-    # no matching component is pure waste — and npm's MAL-* feed contributes
-    # 100k+ rows per cycle. Combined with the deferred `raw` field below,
-    # this keeps the enrichment pod under its 2Gi limit.
-    deployed_purls = set(
-        SbomComponent.objects.values_list("purl", flat=True).distinct()
-    )
-    if not deployed_purls:
-        return 0
-
+    # The matcher only emits Findings for purls a deployed component
+    # carries, so IoCs are restricted to that intersection — and the
+    # intersection stays in SQL. The previous `set(SbomComponent.values_
+    # list("purl").distinct())` pulled every distinct purl of a multi-GB
+    # table into Python strings on each hourly run, which was the largest
+    # allocation of the OSV job.
     if touched_purls is not None:
         touched = {normalize_purl(p) for p in touched_purls if p}
-        relevant_purls = deployed_purls & touched
+        if not touched:
+            return 0
+        purl_filter = {"purl__in": _deployed_among(touched)}
+        if not purl_filter["purl__in"]:
+            return 0
     else:
-        relevant_purls = deployed_purls
-    if not relevant_purls:
-        return 0
+        purl_filter = {"purl__in": SbomComponent.objects.values("purl")}  # semi-join
 
     # `raw` is the full advisory JSON and is never read by the matcher.
     # Loading it dominates row memory for npm scans.
-    ioc_qs = (
-        SupplyChainIoc.objects.filter(purl__in=relevant_purls).defer("raw")
-    )
+    ioc_qs = SupplyChainIoc.objects.filter(**purl_filter).defer("raw")
 
     iocs_by_purl: dict[str, list[SupplyChainIoc]] = {}
     for ioc in ioc_qs.iterator(chunk_size=2000):

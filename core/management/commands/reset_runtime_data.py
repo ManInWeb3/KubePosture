@@ -24,9 +24,9 @@ What is PRESERVED:
   EpssScore, KevEntry
   auth_user, django_session, …
 """
-from django.core.management.base import BaseCommand
 from django.db import connection, transaction
 
+from core.management.base import KubePostureCommand
 from core.models import (
     Cluster,
     Finding,
@@ -59,7 +59,7 @@ _RUNTIME_TABLES = [
 ]
 
 
-class Command(BaseCommand):
+class Command(KubePostureCommand):
     help = "Wipe runtime data; preserve EPSS/KEV, Cluster, IngestToken."
 
     def add_arguments(self, parser):

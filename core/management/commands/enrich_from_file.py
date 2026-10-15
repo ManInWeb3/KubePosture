@@ -3,15 +3,15 @@
 Usage:
   manage.py enrich_from_file --source {epss|kev} <path>
 """
-from django.core.management.base import BaseCommand
 
+from core.management.base import KubePostureCommand
 from core.services.enrichment import (
     load_epss_from_file,
     load_kev_from_file,
 )
 
 
-class Command(BaseCommand):
+class Command(KubePostureCommand):
     help = "Load enrichment data from a local file."
 
     def add_arguments(self, parser):

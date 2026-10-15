@@ -229,7 +229,12 @@ python manage.py enrich_fetch --source epss   # ~330k rows, ~3 min
 ```
 
 Failures are non-fatal: the loaders honour the universal zero-input
-no-op rule (empty/failed fetch leaves existing rows alone).
+no-op rule (empty/failed fetch leaves existing rows alone — including
+a stream that dies mid-body). EPSS is streamed straight from the HTTP
+response into 5k-row upserts, so the job's memory is one chunk, not
+the feed; every command logs `command.finished … peak_rss_mb=` on
+exit, which is what the chart's memory sizes come from
+([docs/operations/batch-jobs-memory.md](docs/operations/batch-jobs-memory.md)).
 
 In production both run as daily CronJobs. Locally, re-run when you
 want fresh threat-intel.
@@ -309,7 +314,7 @@ re-run on the same triggers (or just on demand).
 | `createsuperuser` | once per env | Initial admin |
 | `process_ingest_queue` | every 1–3 min (continuous) | Drains `IngestQueue`; reaps inline as marks finish draining (the reap deletes the tuple's rows — the queue only ever holds in-flight work) |
 | `enrich_fetch --source kev` | daily | CISA KEV catalog refresh |
-| `enrich_fetch --source epss` | daily | first.org EPSS publishes daily |
+| `enrich_fetch --source epss` | daily | first.org EPSS publishes daily; streamed gzip CSV → chunked upserts, stale rows swept by `fetched_at` watermark |
 | `enrich_fetch --source osv-supply-chain` | hourly | OSV.dev per-ecosystem bulk-zip snapshots; conditional GET keeps off-cycle ticks cheap; streams each zip to disk so memory stays flat; calls the matcher inline |
 | `match_supply_chain` | on-demand | Re-run matcher without re-fetching feeds (after seeding test IoCs, or after a matching-logic change) |
 | `reap_safety_net` | hourly | Catches stuck `state=draining` ImportMarks the inline reaper missed; discards imports that can never complete — marks abandoned in `state=open` (importer died before `/imports/<id>/commit/`) and imports whose inventory payload failed — deleting their rows and marking them `reaped` with a `discard_reason` |
@@ -359,6 +364,11 @@ Every reap deletes its tuple's queue rows after recording
 
 Side endpoints: `GET /api/v1/imports/pending/?cluster=`,
 `POST /api/v1/imports/pending/clear/`, `POST /api/v1/cluster-metadata/sync/`.
+
+The decisions behind this protocol (why bundles, why discard instead
+of promote, why relevance and not age, timer ordering, why
+`complete_snapshot` is gone) are recorded in
+[docs/import-pipeline.md](docs/import-pipeline.md).
 
 ---
 

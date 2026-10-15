@@ -7,6 +7,8 @@ EpssScore / KevEntry into the Finding cache columns.
 """
 from __future__ import annotations
 
+import contextlib
+import gzip
 import io
 import json
 import tempfile
@@ -301,3 +303,181 @@ def test_epss_bulk_refresh_recomputes_priority_for_affected_findings():
     mock_recompute.assert_called_once()
     recomputed_pks = {f.pk for f in mock_recompute.call_args.args[0]}
     assert recomputed_pks == {Finding.objects.get(vuln_id="CVE-2024-AAA").pk}
+
+
+# ── streaming / chunked feed load ─────────────────────────────────
+#
+# The EPSS loader used to hold the ~330k-row feed in RAM several times
+# over (gz bytes, decompressed str, temp-file copy, row list, model
+# list) before a single bulk_create — the actual OOM of the enrich-epss
+# job. It now streams: lines → csv.reader → chunks of _UPSERT_CHUNK_SIZE
+# model instances → one upsert per chunk, and "rows the feed dropped"
+# is a `fetched_at < run_started` delete instead of a 330k-id NOT IN.
+
+
+def _gz_csv(rows: list[tuple[str, float, float]]) -> bytes:
+    out = io.StringIO()
+    out.write("#model_version:v2024.05.18,score_date:2025-01-01T00:00:00+0000\n")
+    out.write("cve,epss,percentile\n")
+    for cve, score, pct in rows:
+        out.write(f"{cve},{score},{pct}\n")
+    return gzip.compress(out.getvalue().encode())
+
+
+@contextlib.contextmanager
+def _fake_http_open(body: bytes | None):
+    yield None if body is None else io.BytesIO(body)
+
+
+@pytest.mark.django_db
+def test_epss_loader_upserts_in_bounded_chunks_and_sweeps_stale_rows(monkeypatch):
+    monkeypatch.setattr(enrichment, "_UPSERT_CHUNK_SIZE", 2)
+    EpssScore.objects.create(vuln_id="CVE-STALE", score=0.1, percentile=0.1)
+    EpssScore.objects.create(vuln_id="CVE-2024-0", score=0.0, percentile=0.0)  # re-listed, value changes
+
+    rows = [(f"CVE-2024-{i}", i / 10, i / 10) for i in range(5)]
+    batches: list[int] = []
+    real_bulk_create = EpssScore.objects.bulk_create
+
+    def _spy(objs, **kw):
+        batches.append(len(objs))
+        return real_bulk_create(objs, **kw)
+
+    path = _write_csv(rows)
+    try:
+        with patch.object(EpssScore.objects, "bulk_create", side_effect=_spy):
+            n = enrichment.load_epss_from_file(path)
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+    assert n == 5
+    assert batches == [2, 2, 1], "5 rows at chunk size 2 must be 3 statements, never one list"
+    assert set(EpssScore.objects.values_list("vuln_id", flat=True)) == {f"CVE-2024-{i}" for i in range(5)}
+    assert EpssScore.objects.get(vuln_id="CVE-2024-0").score == 0.0
+    assert EpssScore.objects.get(vuln_id="CVE-2024-3").score == 0.3
+
+
+@pytest.mark.django_db
+def test_epss_loader_zero_rows_leaves_table_intact():
+    """Zero-input rule survives the rewrite: a feed that parses to no rows
+    must not sweep the existing table."""
+    EpssScore.objects.create(vuln_id="CVE-KEEP", score=0.5, percentile=0.5)
+    fd = tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False)
+    fd.write("cve,epss,percentile\n#nothing,here\n")
+    fd.close()
+    try:
+        assert enrichment.load_epss_from_file(fd.name) == 0
+    finally:
+        Path(fd.name).unlink(missing_ok=True)
+    assert EpssScore.objects.filter(vuln_id="CVE-KEEP").exists()
+    assert enrichment.load_epss_from_file("/nonexistent/epss.csv") == 0
+    assert EpssScore.objects.filter(vuln_id="CVE-KEEP").exists()
+
+
+@pytest.mark.django_db
+def test_fetch_epss_streams_gzip_response_without_temp_file(monkeypatch, tmp_path):
+    """The HTTP body is gunzipped and parsed as it arrives; no temp file
+    is written and the stale-row sweep still runs."""
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    tempfile.tempdir = None  # make tempfile re-read TMPDIR
+    EpssScore.objects.create(vuln_id="CVE-STALE", score=0.1, percentile=0.1)
+    body = _gz_csv([("CVE-2024-AAA", 0.91, 0.99), ("CVE-2024-BBB", 0.10, 0.40)])
+
+    with patch.object(enrichment, "_http_open", return_value=_fake_http_open(body)):
+        n = enrichment.fetch_epss()
+
+    assert n == 2
+    assert set(EpssScore.objects.values_list("vuln_id", flat=True)) == {"CVE-2024-AAA", "CVE-2024-BBB"}
+    assert list(tmp_path.iterdir()) == [], "EPSS must stream, not spool to disk"
+    tempfile.tempdir = None
+
+
+@pytest.mark.django_db
+def test_fetch_epss_failed_connection_is_zero_input():
+    EpssScore.objects.create(vuln_id="CVE-KEEP", score=0.5, percentile=0.5)
+    with patch.object(enrichment, "_http_open", return_value=_fake_http_open(None)):
+        assert enrichment.fetch_epss() == 0
+    assert EpssScore.objects.filter(vuln_id="CVE-KEEP").exists()
+
+
+class _DiesMidStream(io.RawIOBase):
+    """Delivers `good` bytes, then fails like a dropped connection."""
+
+    def __init__(self, good: bytes):
+        self._buf = io.BytesIO(good)
+
+    def readable(self):
+        return True
+
+    def readinto(self, b):
+        n = self._buf.readinto(b)
+        if n == 0:
+            raise ConnectionResetError("peer reset")
+        return n
+
+
+@pytest.mark.django_db
+def test_fetch_epss_stream_dying_mid_body_does_not_sweep_table(monkeypatch):
+    """A connection reset half-way through the body: rows that already
+    arrived are upserted (idempotent), but the stale-row delete and the
+    Finding-cache refresh must not run on a partial feed."""
+    monkeypatch.setattr(enrichment, "_UPSERT_CHUNK_SIZE", 1)
+    EpssScore.objects.create(vuln_id="CVE-STALE", score=0.1, percentile=0.1)
+    body = _gz_csv([(f"CVE-2024-{i}", 0.5, 0.5) for i in range(50)])
+    truncated = body[: len(body) // 2]
+
+    @contextlib.contextmanager
+    def _open(url):
+        yield io.BufferedReader(_DiesMidStream(truncated))
+
+    with patch.object(enrichment, "_http_open", _open), \
+            patch.object(enrichment, "_refresh_finding_epss_cache") as refresh:
+        assert enrichment.fetch_epss() == 0
+
+    refresh.assert_not_called()
+    assert EpssScore.objects.filter(vuln_id="CVE-STALE").exists(), "partial feed must not delete"
+
+
+@pytest.mark.django_db
+def test_fetch_kev_streams_response_to_disk_then_loads():
+    KevEntry.objects.create(vuln_id="CVE-STALE")
+    body = json.dumps({"vulnerabilities": [{"cveID": "CVE-2024-AAA", "dateAdded": "2025-01-01"}]}).encode()
+    with patch.object(enrichment, "_http_open", return_value=_fake_http_open(body)):
+        assert enrichment.fetch_kev() == 1
+    assert set(KevEntry.objects.values_list("vuln_id", flat=True)) == {"CVE-2024-AAA"}
+    with patch.object(enrichment, "_http_open", return_value=_fake_http_open(None)):
+        assert enrichment.fetch_kev() == 0
+    assert KevEntry.objects.filter(vuln_id="CVE-2024-AAA").exists()
+
+
+@pytest.mark.django_db
+def test_kev_loader_invalid_json_and_empty_catalog_change_nothing():
+    KevEntry.objects.create(vuln_id="CVE-KEEP")
+    for content in (b"{not json", json.dumps({"vulnerabilities": []}).encode()):
+        fd = tempfile.NamedTemporaryFile("wb", suffix=".json", delete=False)
+        fd.write(content)
+        fd.close()
+        try:
+            assert enrichment.load_kev_from_file(fd.name) == 0
+        finally:
+            Path(fd.name).unlink(missing_ok=True)
+        assert KevEntry.objects.filter(vuln_id="CVE-KEEP").exists()
+
+
+@pytest.mark.django_db
+def test_recompute_affected_findings_accepts_a_subquery():
+    """The loaders hand over `EpssScore.objects.values("vuln_id")` so the
+    catalog never round-trips through Python as an IN list."""
+    c = _cluster()
+    ns = _ns(c)
+    w = _workload(c, ns)
+    hit = _finding(w, "CVE-2024-HIT", hash_code="h1")
+    miss = _finding(w, "CVE-2024-MISS", hash_code="h2")
+    EpssScore.objects.create(vuln_id="CVE-2024-HIT", score=0.5, percentile=0.5)
+
+    with patch.object(enrichment, "recompute_batch", wraps=enrichment.recompute_batch) as spy:
+        enrichment._recompute_affected_findings(EpssScore.objects.values("vuln_id"))
+
+    spy.assert_called_once()
+    assert {f.pk for f in spy.call_args.args[0]} == {hit.pk}
+    assert miss.pk not in {f.pk for f in spy.call_args.args[0]}

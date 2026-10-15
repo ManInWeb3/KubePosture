@@ -155,10 +155,12 @@ worker:
     - process_ingest_queue
     - --limit
     - "100"
+  # requests == limits (Guaranteed QoS) like the other batch jobs; size
+  # from the `command.finished peak_rss_mb=` log line.
   resources:
     requests:
-      cpu: 200m
-      memory: 512Mi
+      cpu: 500m
+      memory: 1Gi
     limits:
       cpu: 500m
       memory: 1Gi
@@ -179,6 +181,15 @@ migration:
 # Crons with initialRun: true also run once as a post-install/upgrade Job —
 # used for seeding EPSS/KEV data immediately instead of waiting for the next tick.
 # Crons without initialRun only run on their schedule.
+#
+# Batch jobs run with requests == limits (Guaranteed QoS): a job is then
+# never evicted or OOM-killed because a *neighbour* spiked, only when it
+# exceeds its own limit. Every command logs `command.finished ...
+# peak_rss_mb=` on exit — size `memory` from those lines, not by guess
+# (EPSS/KEV are sized already; the rest still carry their old 2Gi limit
+# as the request until a few runs have been read), and keep /tmp on the disk-backed emptyDir (`tmp.sizeLimit`), never
+# `medium: Memory`, so a runaway download evicts the pod instead of
+# counting against its memory limit.
 cronJobs:
   # CISA KEV catalog — small (~1.5k rows), refreshed daily by CISA.
   enrichKev:
@@ -188,14 +199,16 @@ cronJobs:
     command: ["python", "manage.py", "enrich_fetch", "--source", "kev"]
     resources:
       requests:
-        cpu: 200m
+        cpu: 500m
         memory: 512Mi
       limits:
-        cpu: 1
-        memory: 2Gi
+        cpu: 500m
+        memory: 512Mi
     activeDeadlineSeconds: 300
 
-  # first.org EPSS feed — ~330k rows, published daily.
+  # first.org EPSS feed — ~330k rows, published daily. Streamed from the
+  # HTTP response through gunzip + csv.reader into 5k-row upserts, so
+  # peak memory is one chunk, not the feed.
   enrichEpss:
     enabled: true
     initialRun: true            # seed EPSS on install
@@ -203,27 +216,27 @@ cronJobs:
     command: ["python", "manage.py", "enrich_fetch", "--source", "epss"]
     resources:
       requests:
-        cpu: 200m
+        cpu: 500m
         memory: 512Mi
       limits:
-        cpu: 1
-        memory: 2Gi
+        cpu: 500m
+        memory: 512Mi
     activeDeadlineSeconds: 600
 
   # OSV.dev per-ecosystem bulk-zip snapshots. Conditional GET keeps
   # off-cycle ticks cheap; only ecosystems present in SbomComponent
   # are fetched. The npm zip is hundreds of MB on actual fetches, but
   # the fetcher streams it to a temp file and decompresses one advisory
-  # at a time, so peak memory stays flat — the limit below is headroom,
-  # not a working-set requirement.
+  # at a time; the matcher intersects touched purls with the SBOM table
+  # in SQL. Larger than the others for the per-advisory upsert loop.
   enrichOsvSupplyChain:
     enabled: true
     schedule: "5 * * * *"       # hourly at :05 to avoid coinciding with EPSS
     command: ["python", "manage.py", "enrich_fetch", "--source", "osv-supply-chain"]
     resources:
       requests:
-        cpu: 200m
-        memory: 512Mi
+        cpu: 1
+        memory: 2Gi
       limits:
         cpu: 1
         memory: 2Gi
@@ -245,10 +258,10 @@ cronJobs:
     command: ["python", "manage.py", "reap_safety_net"]
     resources:
       requests:
-        cpu: 200m
-        memory: 512Mi
+        cpu: 500m
+        memory: 2Gi
       limits:
-        cpu: 1
+        cpu: 500m
         memory: 2Gi
     activeDeadlineSeconds: 300
 
@@ -261,10 +274,10 @@ cronJobs:
     command: ["python", "manage.py", "snapshot_capture"]
     resources:
       requests:
-        cpu: 200m
-        memory: 512Mi
+        cpu: 500m
+        memory: 2Gi
       limits:
-        cpu: 1
+        cpu: 500m
         memory: 2Gi
     activeDeadlineSeconds: 300
 
@@ -279,10 +292,10 @@ cronJobs:
     command: ["python", "manage.py", "prune_stale_data"]
     resources:
       requests:
-        cpu: 200m
-        memory: 512Mi
+        cpu: 500m
+        memory: 2Gi
       limits:
-        cpu: 1
+        cpu: 500m
         memory: 2Gi
     activeDeadlineSeconds: 600
 
@@ -293,10 +306,10 @@ cronJobs:
     command: ["python", "manage.py", "prune_snapshots"]
     resources:
       requests:
-        cpu: 200m
-        memory: 512Mi
+        cpu: 500m
+        memory: 2Gi
       limits:
-        cpu: 1
+        cpu: 500m
         memory: 2Gi
     activeDeadlineSeconds: 300
 
@@ -309,10 +322,10 @@ cronJobs:
     command: ["python", "manage.py", "recalculate_priorities"]
     resources:
       requests:
-        cpu: 200m
-        memory: 512Mi
+        cpu: 500m
+        memory: 2Gi
       limits:
-        cpu: 1
+        cpu: 500m
         memory: 2Gi
     activeDeadlineSeconds: 1800
 

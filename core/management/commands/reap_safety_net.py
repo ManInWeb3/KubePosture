@@ -1,8 +1,8 @@
 """Safety-net reaper: discards imports that can never complete (marks
 stuck `open` past their TTL, imports whose inventory payload failed),
 then fires reaps for any draining mark whose queue is empty."""
-from django.core.management.base import BaseCommand
 
+from core.management.base import KubePostureCommand
 from core.services.reaper import (
     discard_inventory_failed_imports,
     reap_all_drainable,
@@ -10,7 +10,7 @@ from core.services.reaper import (
 )
 
 
-class Command(BaseCommand):
+class Command(KubePostureCommand):
     help = (
         "Discard stuck-open / inventory-failed imports, then sweep draining "
         "marks and fire eligible reaps."

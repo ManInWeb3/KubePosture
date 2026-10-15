@@ -1,10 +1,10 @@
 """Daily heartbeat — write Snapshot rows for all scopes."""
-from django.core.management.base import BaseCommand
 
+from core.management.base import KubePostureCommand
 from core.services.snapshot import capture_daily_heartbeat
 
 
-class Command(BaseCommand):
+class Command(KubePostureCommand):
     help = "Write today's Snapshot heartbeat rows."
 
     def handle(self, *args, **options):

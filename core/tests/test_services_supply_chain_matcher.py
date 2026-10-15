@@ -384,3 +384,64 @@ def test_matcher_one_workload_two_images_two_findings():
     assert {f.image_id for f in findings} == {img_main.id, img_sidecar.id}
     # Both attach to the same workload.
     assert {f.workload_id for f in findings} == {w.id}
+
+
+@pytest.mark.django_db
+def test_matcher_intersects_touched_purls_with_sbom_in_sql_chunks(monkeypatch):
+    """`touched ∩ deployed` is computed by Postgres one chunk of touched
+    purls at a time — never by loading every SBOM purl into Python. With
+    the chunk size forced to 2, five touched purls must still all be
+    considered, and only the deployed ones produce Findings."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    from core.services import supply_chain_matcher as scm
+
+    monkeypatch.setattr(scm, "_PURL_CHUNK_SIZE", 2)
+    c = _cluster("c1")
+    ns = _ns(c)
+    w = _workload(c, ns, "api")
+    img = _image("sha256:" + "a" * 64)
+    _observation(w, img, deployed=True)
+    for i in (0, 4):  # only the first and last touched purl are deployed
+        _component(img, f"pkg:npm/p{i}@1.0")
+    _component(img, "pkg:npm/untouched@1.0")
+    for i in range(5):
+        _ioc(f"pkg:npm/p{i}@1.0", advisory_id=f"MAL-{i}")
+    _ioc("pkg:npm/untouched@1.0", advisory_id="MAL-untouched")
+
+    with CaptureQueriesContext(connection) as ctx:
+        n = match_iocs_to_components(touched_purls=[f"pkg:npm/p{i}@1.0" for i in range(5)])
+
+    assert n == 2
+    assert set(Finding.objects.values_list("vuln_id", flat=True)) == {"MAL-0", "MAL-4"}
+    purl_lookups = [q["sql"] for q in ctx.captured_queries
+                    if "core_sbomcomponent" in q["sql"] and '"core_sbomcomponent"."purl" IN' in q["sql"]]
+    # 5 touched purls / chunk 2 = 3 intersection queries (+1 for the component fetch).
+    assert len(purl_lookups) >= 3
+    assert not any(
+        'SELECT DISTINCT "core_sbomcomponent"."purl" FROM "core_sbomcomponent"' in q["sql"]
+        and "WHERE" not in q["sql"]
+        for q in ctx.captured_queries
+    ), "must never SELECT every distinct purl of the SBOM table"
+
+
+@pytest.mark.django_db
+def test_matcher_full_scan_uses_semi_join_not_purl_set():
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    c = _cluster("c1")
+    ns = _ns(c)
+    w = _workload(c, ns, "api")
+    img = _image("sha256:" + "a" * 64)
+    _observation(w, img, deployed=True)
+    _component(img, "pkg:npm/lodash@4.17.21")
+    _ioc("pkg:npm/lodash@4.17.21", advisory_id="MAL-1")
+    _ioc("pkg:npm/not-deployed@1.0", advisory_id="MAL-2")
+
+    with CaptureQueriesContext(connection) as ctx:
+        assert match_iocs_to_components() == 1
+
+    ioc_queries = [q["sql"] for q in ctx.captured_queries if "core_supplychainioc" in q["sql"]]
+    assert any("IN (SELECT" in q and "core_sbomcomponent" in q for q in ioc_queries), ioc_queries

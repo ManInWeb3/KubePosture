@@ -11,13 +11,12 @@ Usage:
 """
 from __future__ import annotations
 
-from django.core.management.base import BaseCommand
-
 from core.api.auth import generate_token
+from core.management.base import KubePostureCommand
 from core.models import IngestToken
 
 
-class Command(BaseCommand):
+class Command(KubePostureCommand):
     help = "Generate a named ingest bearer token (cluster-less)."
 
     def add_arguments(self, parser):

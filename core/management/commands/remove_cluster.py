@@ -14,13 +14,14 @@ Usage:
 """
 from __future__ import annotations
 
-from django.core.management.base import BaseCommand, CommandError
+from django.core.management.base import CommandError
 
+from core.management.base import KubePostureCommand
 from core.models import Cluster
 from core.services.cluster_removal import remove_cluster
 
 
-class Command(BaseCommand):
+class Command(KubePostureCommand):
     help = "Completely remove a cluster and all data tied to it."
 
     def add_arguments(self, parser):

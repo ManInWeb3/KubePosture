@@ -5,8 +5,10 @@ unreadable input skips the removal phase so existing rows stay intact.
 """
 from __future__ import annotations
 
+import contextlib
 import csv
 import gzip
+import http.client
 import io
 import json
 import logging
@@ -16,11 +18,13 @@ import socket
 import tempfile
 import time
 import zipfile
+import zlib
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from django.db import OperationalError, connection, transaction
+from django.db import OperationalError, connection
 from django.utils import timezone
 
 from core.constants import Severity
@@ -62,30 +66,47 @@ _HTTP_TIMEOUT = 60
 _HTTP_MAX_ATTEMPTS = 3
 _HTTP_BACKOFF_BASE = 1.5
 _USER_AGENT = "kubepostureng-enrichment/1.0"
+# Everything a streamed body can raise after the headers arrived: socket
+# errors (OSError), a truncated chunked response (IncompleteRead is an
+# HTTPException, not an OSError), corrupt gzip (BadGzipFile is an OSError
+# but raw deflate errors are zlib.error), premature EOF in the gzip member.
+_STREAM_ERRORS = (OSError, http.client.HTTPException, zlib.error, EOFError)
 
 
-def _http_get(url: str) -> bytes | None:
-    """Fetch `url` with retries. Returns None on persistent failure
-    so callers honour the zero-input no-op rule.
+@contextlib.contextmanager
+def _http_open(url: str) -> Iterator[io.BufferedIOBase | None]:
+    """Open `url` for **streaming** reads, retrying the connection.
+    Yields the response (a file-like object) or None on persistent
+    failure so callers honour the zero-input no-op rule.
+
+    Only the connect/headers phase is retried; a stream that dies
+    mid-body raises inside the caller's loop, which treats it as a
+    failed fetch. The body is never read into one `bytes`: EPSS's
+    ~330k-row CSV used to live in RAM five times over (gz bytes, the
+    decompressed str, the temp-file copy, the row list, the model
+    list) and OOM-killed a 512Mi pod.
     """
     last_err = ""
     for attempt in range(1, _HTTP_MAX_ATTEMPTS + 1):
         try:
             req = Request(url, headers={"User-Agent": _USER_AGENT})
-            with urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
-                return resp.read()
+            resp = urlopen(req, timeout=_HTTP_TIMEOUT)
         except HTTPError as e:
             last_err = f"HTTP {e.code}"
             if 400 <= e.code < 500:
                 break  # don't retry client errors
         except (URLError, socket.timeout) as e:
             last_err = f"transport: {e}"
+        else:
+            with resp:
+                yield resp
+            return
 
         if attempt < _HTTP_MAX_ATTEMPTS:
             time.sleep(_HTTP_BACKOFF_BASE * (2 ** (attempt - 1)))
 
     log.warning("enrichment.fetch.failed url=%s last_err=%s", url, last_err)
-    return None
+    yield None
 
 
 def _http_download_conditional(
@@ -152,37 +173,42 @@ def _http_download_conditional(
 
 
 def fetch_epss() -> int:
-    """Download the latest EPSS dump (gzipped CSV), apply via the
-    file loader. Returns the number of rows upserted (0 on failure).
+    """Stream the latest EPSS dump (gzipped CSV) straight from the
+    response into the loader: HTTP body → gunzip → csv.reader → chunked
+    upserts. Nothing larger than one chunk is ever held. Returns the
+    number of rows upserted (0 on failure).
     """
-    body = _http_get(EPSS_URL)
-    if body is None:
-        return 0
-    try:
-        text = gzip.decompress(body).decode("utf-8", errors="replace")
-    except OSError:
-        log.warning("enrichment.epss.gunzip_failed")
-        return 0
-    with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False) as tmp:
-        tmp.write(text)
-        tmp_path = tmp.name
-    try:
-        return load_epss_from_file(tmp_path)
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
+    with _http_open(EPSS_URL) as resp:
+        if resp is None:
+            return 0
+        text = io.TextIOWrapper(gzip.GzipFile(fileobj=resp), encoding="utf-8", errors="replace", newline="")
+        try:
+            return _load_epss_rows(text, source=EPSS_URL)
+        except _STREAM_ERRORS as e:
+            # Transport died mid-body or the gzip stream is corrupt. Rows
+            # already upserted are harmless (idempotent on vuln_id); the
+            # stale-row delete and cache refresh did not run.
+            log.warning("enrichment.epss.stream_failed err=%s", e)
+            return 0
 
 
 def fetch_kev() -> int:
-    """Download the latest CISA KEV catalog JSON, apply via the file
-    loader. Returns the number of rows upserted (0 on failure).
+    """Download the latest CISA KEV catalog JSON to a temp file (it is
+    one JSON document, so it has to be parsed whole — but ~2 MB, and
+    it never lives in RAM as a second `bytes` copy), then apply via the
+    file loader. Returns the number of rows upserted (0 on failure).
     """
-    body = _http_get(KEV_URL)
-    if body is None:
-        return 0
-    text = body.decode("utf-8", errors="replace")
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tmp:
-        tmp.write(text)
-        tmp_path = tmp.name
+    with _http_open(KEV_URL) as resp:
+        if resp is None:
+            return 0
+        fd, tmp_path = tempfile.mkstemp(suffix=".json")
+        try:
+            with os.fdopen(fd, "wb") as out:
+                shutil.copyfileobj(resp, out, length=1024 * 1024)
+        except _STREAM_ERRORS as e:
+            log.warning("enrichment.kev.stream_failed err=%s", e)
+            Path(tmp_path).unlink(missing_ok=True)
+            return 0
     try:
         return load_kev_from_file(tmp_path)
     finally:
@@ -231,10 +257,14 @@ def _exec_with_deadlock_retry(sql: str) -> None:
             delay *= 2
 
 
-def _recompute_affected_findings(vuln_ids: list[str]) -> int:
+def _recompute_affected_findings(vuln_ids) -> int:
     """Recompute priority for every Finding matching `vuln_ids`, in bounded
     chunks of `_RECOMPUTE_CHUNK_SIZE` ids at a time instead of one
     `list(...)` over the whole match set. Returns the count updated.
+
+    `vuln_ids` is a list or a `values("vuln_id")` queryset; the loaders
+    pass the latter so the whole catalog (330k ids for EPSS) becomes a
+    subquery instead of a Python list shipped as `IN (...)`.
     """
     total = 0
     chunk: list[int] = []
@@ -305,52 +335,60 @@ def _refresh_finding_kev_cache() -> None:
 
 # ── EPSS ----------------------------------------------------------
 
-def load_epss_from_file(path: str) -> int:
-    """Accepts the FIRST.org CSV format (`cve,epss,percentile`).
+# Rows per upsert statement. Also the memory high-water mark of a feed
+# refresh: the loaders build at most one chunk of model instances.
+_UPSERT_CHUNK_SIZE = 5000
 
-    Returns the number of rows upserted.
-    """
-    text = _read(path)
-    if not text:
-        log.info("enrichment.epss.empty_input", extra={"path": path})
-        return 0
 
-    rows = list(csv.reader(io.StringIO(text)))
-    # Skip blank rows + a possible 1-line preamble + 1 header row.
-    cleaned: list[tuple[str, float, float]] = []
-    for r in rows:
-        if not r or len(r) < 3:
-            continue
-        if r[0].startswith("#"):
-            continue
-        if r[0].lower() == "cve":
+def _chunked(items: Iterable, size: int) -> Iterator[list]:
+    chunk: list = []
+    for item in items:
+        chunk.append(item)
+        if len(chunk) >= size:
+            yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
+
+
+def _parse_epss_rows(lines: Iterable[str]) -> Iterator[tuple[str, float, float]]:
+    """FIRST.org CSV (`cve,epss,percentile`): skip blank rows, the
+    `#model_version` preamble and the header; drop unparsable rows."""
+    for r in csv.reader(lines):
+        if not r or len(r) < 3 or r[0].startswith("#") or r[0].lower() == "cve":
             continue
         try:
-            cleaned.append((r[0], float(r[1]), float(r[2])))
+            yield r[0], float(r[1]), float(r[2])
         except ValueError:
             continue
 
-    if not cleaned:
-        log.info("enrichment.epss.no_rows_after_parse", extra={"path": path})
-        return 0
 
-    seen_ids = [cve for cve, _, _ in cleaned]
-    # EpssScore refresh: small, fast atomic block. Holding locks here only
-    # blocks readers of EpssScore (rare), not Finding.
-    with transaction.atomic():
-        rows = [
-            EpssScore(vuln_id=cve, score=score, percentile=pct)
-            for cve, score, pct in cleaned
-        ]
+def _load_epss_rows(lines: Iterable[str], *, source: str) -> int:
+    """Upsert EPSS rows from an iterable of CSV lines in chunks of
+    `_UPSERT_CHUNK_SIZE`, then drop every row the feed no longer lists.
+
+    Each chunk autocommits (idempotent on vuln_id, so a failure mid-way
+    leaves nothing to undo). "No longer listed" is `fetched_at <
+    run_started`: the upsert bumps `fetched_at` on every row it touches,
+    which keeps the whole set operation in SQL instead of shipping the
+    feed's 330k ids back as `NOT IN (...)`.
+
+    Zero-input rule: a feed that parses to no rows changes nothing.
+    """
+    run_started = timezone.now()
+    n = 0
+    for chunk in _chunked(_parse_epss_rows(lines), _UPSERT_CHUNK_SIZE):
         EpssScore.objects.bulk_create(
-            rows,
+            [EpssScore(vuln_id=cve, score=score, percentile=pct) for cve, score, pct in chunk],
             update_conflicts=True,
-            update_fields=["score", "percentile"],
+            update_fields=["score", "percentile", "fetched_at"],
             unique_fields=["vuln_id"],
-            batch_size=5000,
         )
-        EpssScore.objects.exclude(vuln_id__in=seen_ids).delete()
-    n = len(cleaned)
+        n += len(chunk)
+    if n == 0:
+        log.info("enrichment.epss.no_rows_after_parse source=%s", source)
+        return 0
+    EpssScore.objects.filter(fetched_at__lt=run_started).delete()
 
     # Finding-cache refresh in autocommit + deadlock retry. The prior
     # per-CVE UPDATE loop inside one atomic block held thousands of row
@@ -358,67 +396,79 @@ def load_epss_from_file(path: str) -> int:
     # finishes in one statement and releases locks immediately on commit.
     _refresh_finding_epss_cache()
 
-    _recompute_affected_findings(seen_ids)
+    _recompute_affected_findings(EpssScore.objects.values("vuln_id"))
     return n
+
+
+def load_epss_from_file(path: str) -> int:
+    """Accepts the FIRST.org CSV format (`cve,epss,percentile`), read
+    line by line. Returns the number of rows upserted.
+    """
+    p = Path(path)
+    if not p.is_file():
+        log.info("enrichment.epss.empty_input path=%s", path)
+        return 0
+    try:
+        with p.open(encoding="utf-8", errors="replace", newline="") as fh:
+            return _load_epss_rows(fh, source=path)
+    except OSError:
+        log.info("enrichment.epss.empty_input path=%s", path)
+        return 0
 
 
 # ── KEV -----------------------------------------------------------
 
 def load_kev_from_file(path: str) -> int:
-    """Accepts the CISA KEV JSON format (`{"vulnerabilities": [...]}`)."""
-    text = _read(path)
-    if not text:
-        log.info("enrichment.kev.empty_input", extra={"path": path})
+    """Accepts the CISA KEV JSON format (`{"vulnerabilities": [...]}`).
+    Same chunked-upsert + `fetched_at` sweep as EPSS (the catalog is
+    ~1.5k rows, so this is for one pattern everywhere, not for memory).
+    """
+    p = Path(path)
+    if not p.is_file():
+        log.info("enrichment.kev.empty_input path=%s", path)
         return 0
     try:
-        doc = json.loads(text)
-    except json.JSONDecodeError:
-        log.warning("enrichment.kev.invalid_json", extra={"path": path})
+        with p.open("rb") as fh:
+            doc = json.load(fh)
+    except OSError:
+        log.info("enrichment.kev.empty_input path=%s", path)
         return 0
-    vulns = doc.get("vulnerabilities") or []
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        log.warning("enrichment.kev.invalid_json path=%s", path)
+        return 0
+    vulns = [v for v in (doc.get("vulnerabilities") or []) if isinstance(v, dict) and v.get("cveID")]
     if not vulns:
-        log.info("enrichment.kev.no_rows", extra={"path": path})
+        log.info("enrichment.kev.no_rows path=%s", path)
         return 0
 
-    seen_ids = [v["cveID"] for v in vulns if v.get("cveID")]
-    with transaction.atomic():
-        rows = [
-            KevEntry(
-                vuln_id=v["cveID"],
-                added_at=_date(v.get("dateAdded")),
-                short_description=v.get("shortDescription") or "",
-                required_action=v.get("requiredAction") or "",
-                due_date=_date(v.get("dueDate")),
-            )
-            for v in vulns if v.get("cveID")
-        ]
+    run_started = timezone.now()
+    n = 0
+    for chunk in _chunked(vulns, _UPSERT_CHUNK_SIZE):
         KevEntry.objects.bulk_create(
-            rows,
+            [
+                KevEntry(
+                    vuln_id=v["cveID"],
+                    added_at=_date(v.get("dateAdded")),
+                    short_description=v.get("shortDescription") or "",
+                    required_action=v.get("requiredAction") or "",
+                    due_date=_date(v.get("dueDate")),
+                )
+                for v in chunk
+            ],
             update_conflicts=True,
-            update_fields=["added_at", "short_description", "required_action", "due_date"],
+            update_fields=["added_at", "short_description", "required_action", "due_date", "fetched_at"],
             unique_fields=["vuln_id"],
-            batch_size=2000,
         )
-        KevEntry.objects.exclude(vuln_id__in=seen_ids).delete()
-    n = len(rows)
+        n += len(chunk)
+    KevEntry.objects.filter(fetched_at__lt=run_started).delete()
 
     _refresh_finding_kev_cache()
 
-    _recompute_affected_findings(seen_ids)
+    _recompute_affected_findings(KevEntry.objects.values("vuln_id"))
     return n
 
 
 # ── Helpers -------------------------------------------------------
-
-def _read(path: str) -> str:
-    p = Path(path)
-    if not p.is_file():
-        return ""
-    try:
-        return p.read_text()
-    except OSError:
-        return ""
-
 
 def _date(value):
     if not value:

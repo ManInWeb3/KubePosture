@@ -16,12 +16,11 @@ Returns the number of findings created or updated.
 """
 from __future__ import annotations
 
-from django.core.management.base import BaseCommand
-
+from core.management.base import KubePostureCommand
 from core.services.supply_chain_matcher import match_iocs_to_components
 
 
-class Command(BaseCommand):
+class Command(KubePostureCommand):
     help = "Match the SupplyChainIoc table against deployed SbomComponents."
 
     def add_arguments(self, parser):

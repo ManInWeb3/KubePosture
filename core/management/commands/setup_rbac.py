@@ -15,12 +15,13 @@ Usage:
 Idempotent. Re-run after migrations or whenever you reset the DB.
 """
 from django.contrib.auth.models import Group
-from django.core.management.base import BaseCommand
+
+from core.management.base import KubePostureCommand
 
 _ROLES = ["viewer", "SecEngineer", "admin"]
 
 
-class Command(BaseCommand):
+class Command(KubePostureCommand):
     help = "Create the three RBAC groups (viewer, SecEngineer, admin)."
 
     def handle(self, *args, **opts):
