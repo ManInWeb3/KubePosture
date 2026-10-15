@@ -74,14 +74,18 @@ def _artifact(obj: dict) -> dict:
     return (obj.get("report") or {}).get("artifact") or {}
 
 
-def _image_ref(artifact: dict) -> str:
-    """Best-effort `registry/repo:tag` reconstruction from artifact dict.
+def _image_ref(obj: dict) -> str:
+    """`registry/repo:tag` reconstruction from the report. Trivy Operator
+    puts the registry at `report.registry.server` and repo/tag/digest
+    under `report.artifact`.
 
     Excludes the `@digest` suffix — `Image.ref` is the human-readable
     label; the digest lives on its own column.
     """
+    report = obj.get("report") or {}
+    artifact = report.get("artifact") or {}
     repo = artifact.get("repository") or ""
-    registry = artifact.get("registry") or ""
+    registry = (report.get("registry") or {}).get("server") or ""
     tag = artifact.get("tag") or ""
     base = repo
     if registry and not repo.startswith(registry + "/"):
@@ -160,7 +164,7 @@ def parse_vulnerability_report(obj: dict) -> dict:
         "resource_kind": kind,
         "resource_name": name,
         "container_name": container,
-        "image_ref": _image_ref(artifact),
+        "image_ref": _image_ref(obj),
         "image_digest": _image_digest(artifact),
         "os_family": os_family,
         "os_version": os_version,
@@ -349,7 +353,7 @@ def parse_exposed_secret_report(obj: dict) -> dict:
         "resource_kind": kind,
         "resource_name": name,
         "container_name": container,
-        "image_ref": _image_ref(artifact),
+        "image_ref": _image_ref(obj),
         "image_digest": _image_digest(artifact),
         "findings": findings,
         "signal_ids": signal_ids,
@@ -569,7 +573,7 @@ def parse_sbom_report(obj: dict) -> dict:
         "resource_kind": kind,
         "resource_name": name,
         "container_name": container,
-        "image_ref": _image_ref(artifact),
+        "image_ref": _image_ref(obj),
         "image_digest": _image_digest(artifact),
         "components": components,
     }

@@ -85,7 +85,7 @@ The False bucket is now formally `controlled` rather than collapsed `small`/`con
 
 `publicly_exposed` is auto-derived during inventory ingest (`core/parsers/inventory.py`):
 - True iff a non-internal `LoadBalancer` Service OR a non-internal `Ingress` selects the workload.
-- "Non-internal" is detected via cloud annotations (`service.beta.kubernetes.io/aws-load-balancer-internal`, `networking.gke.io/load-balancer-type=Internal`, `service.beta.kubernetes.io/azure-load-balancer-internal`) and ingress class names containing `internal`/`private`. Operators can list additional class names via the `INTERNAL_INGRESS_CLASSES` env var (CSV, case-insensitive exact match — useful for IAP-style classes like `pomerium`).
+- "Non-internal" is detected via cloud annotations (`service.beta.kubernetes.io/aws-load-balancer-internal=true`, `service.beta.kubernetes.io/aws-load-balancer-scheme=internal` for the AWS Load Balancer Controller, `networking.gke.io/load-balancer-type=Internal`, `service.beta.kubernetes.io/azure-load-balancer-internal=true`) and ingress class names containing `internal`/`private`. Operators can list additional class names via the `INTERNAL_INGRESS_CLASSES` env var (CSV, case-insensitive exact match — useful for IAP-style classes like `pomerium`).
 - Admin override: `publicly_exposed_is_manual` (Workload) and `exposure_is_manual` (Namespace).
 
 `Namespace.internet_exposed` is an OR-rollup over all its workloads.

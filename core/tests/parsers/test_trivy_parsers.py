@@ -140,9 +140,15 @@ def test_vuln_report_extracts_image_digest_from_artifact():
     obj = _vuln_report(image_digest=digest, vulns=[_vuln("CVE-2024-1234")])
     parsed = trivy.parse_vulnerability_report(obj)
     assert parsed["image_digest"] == digest
-    # _image_ref reads `artifact.registry` (not `report.registry`); fixture
-    # places registry at the report level, so the ref is just repo:tag.
-    assert parsed["image_ref"] == "payments/api:v1.2.3"
+    # Registry lives at `report.registry.server` in the real CRD; the ref
+    # must be fully qualified so it matches the inventory's.
+    assert parsed["image_ref"] == "registry.internal/payments/api:v1.2.3"
+
+
+def test_vuln_report_without_registry_block_falls_back_to_repo_tag():
+    obj = _vuln_report()
+    del obj["report"]["registry"]
+    assert trivy.parse_vulnerability_report(obj)["image_ref"] == "payments/api:v1.2.3"
 
 
 def test_vuln_report_creates_one_finding_per_vulnerability():

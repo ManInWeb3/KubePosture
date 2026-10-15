@@ -200,16 +200,23 @@ def _pod_security_signals(pod_spec: dict | None) -> set[str]:
         return found
     if pod_spec.get("hostNetwork") or pod_spec.get("hostPID") or pod_spec.get("hostIPC"):
         found.add("kyverno:disallow-host-namespaces")
+    # Kyverno semantics (and the registry text): the three "require"
+    # checks fail when the field is false OR unset — a container with no
+    # securityContext at all is the common case and must still signal.
+    # `runAsNonRoot` may be set at pod level and inherited.
+    pod_ctx = pod_spec.get("securityContext") or {}
     for c, _init_container in _containers(pod_spec):
         ctx = c.get("securityContext") or {}
         if ctx.get("privileged") is True:
             found.add("kyverno:disallow-privileged-containers")
-        if ctx.get("allowPrivilegeEscalation") is True:
+        if ctx.get("allowPrivilegeEscalation") is not False:
             found.add("kyverno:disallow-privilege-escalation")
         run_as_non_root = ctx.get("runAsNonRoot")
-        if run_as_non_root is False:
+        if run_as_non_root is None:
+            run_as_non_root = pod_ctx.get("runAsNonRoot")
+        if run_as_non_root is not True:
             found.add("kyverno:require-run-as-nonroot")
-        if ctx.get("readOnlyRootFilesystem") is False:
+        if ctx.get("readOnlyRootFilesystem") is not True:
             found.add("kyverno:require-ro-rootfs")
     for v in pod_spec.get("volumes") or []:
         if v.get("hostPath"):
@@ -221,7 +228,10 @@ def _pod_security_signals(pod_spec: dict | None) -> set[str]:
 # ── Service / Ingress → publicly_exposed derivation ---------------
 
 _INTERNAL_LB_ANNOTATIONS = {
+    # Legacy in-tree AWS controller.
     "service.beta.kubernetes.io/aws-load-balancer-internal": "true",
+    # AWS Load Balancer Controller (the current EKS default).
+    "service.beta.kubernetes.io/aws-load-balancer-scheme": "internal",
     "networking.gke.io/load-balancer-type": "Internal",
     "service.beta.kubernetes.io/azure-load-balancer-internal": "true",
 }

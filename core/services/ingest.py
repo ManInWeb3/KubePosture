@@ -53,9 +53,10 @@ def _get_or_create_image(*, ref: str, digest: str) -> Image | None:
     """Return / create an Image row keyed by digest. Empty digest → None.
 
     Don't overwrite a longer-already-stored ref with a shorter one —
-    the inventory typically has the fully-qualified ref while Trivy's
-    artifact often omits the registry. Same digest, different display
-    forms; we keep the more informative one.
+    the inventory has the fully-qualified ref and so does a Trivy report
+    that carries `report.registry.server`; a report without that block
+    yields just `repo:tag`. Same digest, different display forms; we
+    keep the more informative one.
     """
     if not digest:
         return None
