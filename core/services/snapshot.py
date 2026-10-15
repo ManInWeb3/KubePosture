@@ -11,11 +11,12 @@ from django.db import transaction
 from django.db.models import Count
 
 from core.constants import ImageSetChangeKind, SnapshotScope
-from core.models import Cluster, Namespace, Snapshot, Workload
+from core.models import Cluster, Finding, Namespace, Snapshot, Workload
 from core.services.inventory import (
     default_finding_qs,
     restrict_to_currently_deployed_images,
 )
+from core.urgency import finding_ids, recompute_ids
 
 
 def _severity_counts(qs) -> dict:
@@ -69,6 +70,26 @@ def capture_namespace_snapshot(namespace: Namespace) -> Snapshot:
         total_active=nf.count(),
         change_kind=ImageSetChangeKind.NONE.value,
     )
+
+
+@transaction.atomic
+def bracketed_recompute(cluster: Cluster, mutate, *, namespace: Namespace | None = None) -> int:
+    """Run `mutate()` (a cluster / namespace flag edit) between pre and post
+    Snapshot rows around a whole-cluster priority recompute, so the trend
+    charts show a clean before/after step at the moment of the edit
+    instead of waiting for the next daily heartbeat. Shared by the admin
+    `save_model` hooks and the UI edit views. Returns the number of
+    findings whose band changed.
+    """
+    capture_cluster_snapshot(cluster)
+    if namespace is not None:
+        capture_namespace_snapshot(namespace)
+    mutate()
+    _scanned, updated = recompute_ids(finding_ids(Finding.objects.filter(cluster=cluster)))
+    capture_cluster_snapshot(cluster)
+    if namespace is not None:
+        capture_namespace_snapshot(namespace)
+    return updated
 
 
 @transaction.atomic

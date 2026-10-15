@@ -1,6 +1,5 @@
 """Django admin registration for KubePostureNG models."""
 from django.contrib import admin
-from django.db import transaction
 
 from core.models import (
     Cluster,
@@ -23,11 +22,7 @@ from core.models import (
     WorkloadImageObservation,
     WorkloadSignal,
 )
-from core.services.snapshot import (
-    capture_cluster_snapshot,
-    capture_namespace_snapshot,
-)
-from core.urgency import finding_ids, recompute_ids
+from core.services.snapshot import bracketed_recompute
 
 
 @admin.register(Workload)
@@ -125,13 +120,10 @@ class NamespaceAdmin(admin.ModelAdmin):
             super().save_model(request, obj, form, change)
             return
 
-        with transaction.atomic():
-            capture_cluster_snapshot(obj.cluster)
-            capture_namespace_snapshot(obj)
-            super().save_model(request, obj, form, change)
-            recompute_ids(finding_ids(Finding.objects.filter(cluster=obj.cluster)))
-            capture_cluster_snapshot(obj.cluster)
-            capture_namespace_snapshot(obj)
+        bracketed_recompute(
+            obj.cluster, lambda: super(NamespaceAdmin, self).save_model(request, obj, form, change),
+            namespace=obj,
+        )
 
 
 @admin.register(Cluster)
@@ -149,11 +141,9 @@ class ClusterAdmin(admin.ModelAdmin):
             super().save_model(request, obj, form, change)
             return
 
-        with transaction.atomic():
-            capture_cluster_snapshot(obj)
-            super().save_model(request, obj, form, change)
-            recompute_ids(finding_ids(obj.findings.all()))
-            capture_cluster_snapshot(obj)
+        bracketed_recompute(
+            obj, lambda: super(ClusterAdmin, self).save_model(request, obj, form, change),
+        )
 
 
 @admin.register(Snapshot)

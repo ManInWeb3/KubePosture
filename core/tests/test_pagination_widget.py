@@ -142,3 +142,15 @@ def test_widget_does_not_leak_doc_comment(client, viewer, many_components):
     body = resp.content.decode()
     assert "Shared paginator footer" not in body
     assert "Required context vars" not in body
+
+
+def test_qs_without_page_reencodes_filter_values():
+    """A filter value with `+ & = %` must survive into the page-N link —
+    the old join on decoded values turned `a+b` into `a b` on page 2."""
+    from django.http import QueryDict
+
+    from core.views_ui import _qs_without_page
+
+    qs = _qs_without_page(QueryDict("name=a%2Bb&repo=x%26y%3Dz&page=3&empty="))
+    assert qs == "name=a%2Bb&repo=x%26y%3Dz"
+    assert QueryDict(qs)["name"] == "a+b"

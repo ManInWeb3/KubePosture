@@ -12,10 +12,10 @@ from datetime import timedelta
 from types import SimpleNamespace
 
 from django.contrib import messages
+from django.contrib.auth import update_session_auth_hash
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.contrib.auth.models import Group, User
 from django.core.paginator import Paginator
-from django.db import transaction
 from django.db.models import Count, Q
 from django.http import Http404, HttpResponse, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
@@ -25,7 +25,7 @@ from django.views import View
 from django.views.generic import RedirectView
 
 from core.api.auth import generate_token
-from core.constants import PriorityBand, Source, WorkloadKind
+from core.constants import Environment, PriorityBand, Source, WorkloadKind
 from core.models import Cluster, Finding, Image, IngestToken, Namespace, UserPreference, Workload
 from core.services import hardening_preview
 from core.services.cluster_removal import remove_cluster
@@ -47,11 +47,7 @@ from core.services.inventory import (
     list_workloads,
     workloads_for_kind_name,
 )
-from core.services.snapshot import (
-    capture_cluster_snapshot,
-    capture_namespace_snapshot,
-)
-from core.urgency import finding_ids, recompute_ids
+from core.services.snapshot import bracketed_recompute
 
 
 def _is_admin(user) -> bool:
@@ -63,28 +59,10 @@ def _is_admin(user) -> bool:
     return user.groups.filter(name="admin").exists()
 
 
-def _recompute_cluster(cluster: Cluster) -> int:
-    """Recompute effective_priority for every Finding in `cluster` —
-    streamed + chunked like the management command, never a whole-cluster
-    list in the request. Returns the count whose band changed.
-    """
-    _scanned, updated = recompute_ids(finding_ids(Finding.objects.filter(cluster=cluster)))
-    return updated
-
-
-@transaction.atomic
 def _bracketed_namespace_mutation(ns: Namespace, mutate) -> None:
-    """Wrap a namespace-flag mutation in pre/post cluster + namespace
-    Snapshot rows around a priority recompute, so trend charts show a
-    clean before/after step at the moment of the edit instead of waiting
-    for the next 06:30 daily heartbeat.
-    """
-    capture_cluster_snapshot(ns.cluster)
-    capture_namespace_snapshot(ns)
-    mutate()
-    _recompute_cluster(ns.cluster)
-    capture_cluster_snapshot(ns.cluster)
-    capture_namespace_snapshot(ns)
+    """Namespace-flag edit bracketed by pre/post snapshots — see
+    `core.services.snapshot.bracketed_recompute`."""
+    bracketed_recompute(ns.cluster, mutate, namespace=ns)
 
 
 def _is_htmx(request) -> bool:
@@ -633,9 +611,14 @@ class FindingsListView(LoginRequiredMixin, View):
 
 def _qs_without_page(get_params) -> str:
     """Return URL-encoded querystring excluding the `page` key — used
-    so pagination links can append `?<other_filters>&page=N`."""
-    pairs = [(k, v) for k, v in get_params.items() if k != "page"]
-    return "&".join(f"{k}={v}" for k, v in pairs if v != "")
+    so pagination links can append `?<other_filters>&page=N`. Values are
+    re-encoded: a filter containing `+ & = # %` must survive the round
+    trip into the page-2 link."""
+    qd = get_params.copy()
+    qd.pop("page", None)
+    for key in [k for k, v in qd.items() if v == ""]:
+        qd.pop(key)
+    return qd.urlencode()
 
 
 # ── Finding detail (HTMX fragment for workload-page offcanvas) ────
@@ -895,6 +878,9 @@ class ClusterDetailView(LoginRequiredMixin, View):
 
         changed = []
         env = (request.POST.get("environment") or "").strip()
+        if env and env not in Environment.values:
+            messages.error(request, f"Unknown environment '{env}'.")
+            return redirect("cluster-detail", pk=cluster.pk)
         if env and env != cluster.environment:
             cluster.environment = env
             cluster.environment_is_manual = True
@@ -913,8 +899,11 @@ class ClusterDetailView(LoginRequiredMixin, View):
             changed += ["region", "region_is_manual"]
 
         if changed:
-            cluster.save(update_fields=changed)
-            updated = _recompute_cluster(cluster)
+            # Same snapshot bracketing as the admin's ClusterAdmin.save_model,
+            # so a UI environment flip shows as a step on the trend chart.
+            updated = bracketed_recompute(
+                cluster, lambda: cluster.save(update_fields=changed),
+            )
             messages.success(
                 request,
                 f"Saved {', '.join(c for c in changed if not c.endswith('_is_manual'))}; "
@@ -1240,22 +1229,33 @@ class UserEditView(AdminRequiredMixin, View):
 
     def post(self, request, pk):
         user_obj = get_object_or_404(User, pk=pk)
+        # A group-`admin` (non-superuser) must not be able to take over a
+        # superuser — resetting its password is a path into the Django
+        # admin — nor lock themselves out by demoting / deactivating
+        # their own account (mirrors UserToggleActiveView's self guard).
+        if user_obj.is_superuser and not request.user.is_superuser:
+            return HttpResponseForbidden("Only a superuser can edit a superuser")
+        is_self = user_obj == request.user
+
         user_obj.first_name = (request.POST.get("first_name") or "").strip()
         user_obj.last_name = (request.POST.get("last_name") or "").strip()
         user_obj.email = (request.POST.get("email") or "").strip()
-        user_obj.is_active = request.POST.get("is_active") == "on"
-        user_obj.save(update_fields=[
-            "first_name", "last_name", "email", "is_active",
-        ])
+        update_fields = ["first_name", "last_name", "email"]
+        if not is_self:
+            user_obj.is_active = request.POST.get("is_active") == "on"
+            update_fields.append("is_active")
+        user_obj.save(update_fields=update_fields)
 
         role = (request.POST.get("role") or "").strip()
-        if role in ROLE_GROUPS:
+        if role in ROLE_GROUPS and not is_self:
             user_obj.groups.set(Group.objects.filter(name=role))
 
         new_password = request.POST.get("new_password") or ""
         if new_password:
             user_obj.set_password(new_password)
             user_obj.save(update_fields=["password"])
+            if is_self:
+                update_session_auth_hash(request, user_obj)
 
         messages.success(request, f"User '{user_obj.username}' updated.")
         return redirect("user-list")
