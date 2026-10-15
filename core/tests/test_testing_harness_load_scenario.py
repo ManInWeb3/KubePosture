@@ -20,7 +20,6 @@ def _harness_routes():
 
 INV_ENVELOPE = {
     "cluster_meta": {"name": "c-harness"},
-    "complete_snapshot": True,
     "items": [
         {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "ns"}},
         {
@@ -47,7 +46,7 @@ def test_inline_scenario_stores_bundles_commits_and_drains(client):
     resp = _load(client, {
         "cluster": "c-harness", "import_id": "imp-1",
         "starts": [{"kind": "inventory"}],  # legacy, ignored
-        "payloads": [{"kind": "inventory", "payload": INV_ENVELOPE, "complete_snapshot": True}],
+        "payloads": [{"kind": "inventory", "payload": INV_ENVELOPE}],
         "finishes": [{"kind": "inventory", "observed_count": 1}],
     })
     assert resp.status_code == 200, resp.content
@@ -66,7 +65,7 @@ def test_inline_scenario_stores_bundles_commits_and_drains(client):
 def test_finish_with_zero_count_and_no_payloads_creates_empty_mark(client):
     resp = _load(client, {
         "cluster": "c-harness", "import_id": "imp-1",
-        "payloads": [{"kind": "inventory", "payload": INV_ENVELOPE, "complete_snapshot": True}],
+        "payloads": [{"kind": "inventory", "payload": INV_ENVELOPE}],
         "finishes": [
             {"kind": "inventory", "observed_count": 1},
             {"kind": "trivy.VulnerabilityReport", "observed_count": 0},
@@ -82,7 +81,7 @@ def test_finish_with_zero_count_and_no_payloads_creates_empty_mark(client):
 def test_count_mismatch_in_finish_is_rejected(client):
     resp = _load(client, {
         "cluster": "c-harness", "import_id": "imp-1",
-        "payloads": [{"kind": "inventory", "payload": INV_ENVELOPE, "complete_snapshot": True}],
+        "payloads": [{"kind": "inventory", "payload": INV_ENVELOPE}],
         "finishes": [{"kind": "inventory", "observed_count": 3}],
     })
     assert resp.status_code == 409

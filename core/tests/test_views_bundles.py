@@ -19,7 +19,7 @@ NDJSON = "application/x-ndjson"
 VULN = "trivy.VulnerabilityReport"
 INV = "inventory"
 ITEM = {"kind": "VulnerabilityReport", "metadata": {"name": "x"}, "report": {"vulnerabilities": []}}
-ENVELOPE = {"cluster_meta": {"name": "c-http"}, "complete_snapshot": True, "items": []}
+ENVELOPE = {"cluster_meta": {"name": "c-http"}, "items": []}
 
 
 @pytest.fixture

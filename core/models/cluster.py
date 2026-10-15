@@ -7,11 +7,6 @@ fields (environment, provider, region, k8s_version) come in via
 `/api/v1/cluster-metadata/sync/` and are skipped on subsequent
 detect runs once the corresponding `*_is_manual` flag is set.
 
-`consecutive_incomplete_inventories` is bumped by the inventory reap
-whenever a cycle's mark has no `complete_snapshot=true` payload, and
-reset to 0 on the next successful reap. A non-zero value means the
-tool is preserving stale `deployed` flags — Scan Health surfaces this
-as a data-quality incident past a configurable threshold.
 """
 from django.conf import settings
 from django.db import models
@@ -46,26 +41,16 @@ class Cluster(models.Model):
 
     k8s_version = models.CharField(max_length=32, blank=True)
 
-    consecutive_incomplete_inventories = models.PositiveIntegerField(
-        default=0,
-        help_text=(
-            "Incremented by the inventory reap when complete_snapshot=true is "
-            "absent for a cycle; reset to 0 on a complete reap. Threshold "
-            "crossing emits reap.inventory.persistent_incomplete."
-        ),
-    )
-
     last_complete_inventory_at = models.DateTimeField(
         null=True,
         blank=True,
         help_text=(
-            "`mark.started_at` of the most recent COMPLETE inventory cycle "
-            "(carrying `complete_snapshot=true`). Anchor for "
+            "`mark.started_at` of the most recent reaped inventory cycle. Every "
+            "committed inventory is a complete snapshot (the bundle protocol "
+            "guarantees it); discarded imports never advance this. Anchor for "
             "`Image.objects.currently_running()`: an image observation is "
             "considered current iff its `last_seen_at` is at or after this "
-            "timestamp. NULL until the first complete cycle reaps. Partial "
-            "cycles do NOT advance this field — that's what protects partial "
-            "imports from causing false negatives in image-deployment queries."
+            "timestamp. NULL until the first inventory cycle reaps."
         ),
     )
 

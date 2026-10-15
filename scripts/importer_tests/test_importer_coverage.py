@@ -3,13 +3,10 @@ import json
 import pytest
 from kubeposture_importer import IMPORTER_VERSION
 from kubeposture_importer.coverage import (
-    ENV_CHECK_KINDS,
-    ENV_IGNORE_KINDS,
     ENV_THRESHOLD,
     compute_coverage,
     log_lines,
     manifest_extra,
-    read_kind_set,
     read_threshold,
 )
 from kubeposture_importer.relevance import FilterStats
@@ -49,23 +46,17 @@ def test_ratio_one_when_nothing_expected():
     assert (cov.ratio, cov.status) == (1.0, "ok")
 
 
-def test_error_when_nothing_matched_or_below_half_threshold():
-    assert compute_coverage(VULN, _stats(VULN, digests=0), _idx(5, 0), threshold=0.9).status == "error"
-    assert compute_coverage(VULN, _stats(VULN, digests=4), _idx(10, 0), threshold=0.9).status == "error"
-    assert compute_coverage(VULN, _stats(VULN, digests=5), _idx(10, 0), threshold=0.9).status == "warning"
+def test_nothing_matched_is_a_warning_not_a_failure():
+    """Zero matches is the strongest signal that the filter or the
+    scanner is broken — but still only a warning: the import proceeds."""
+    cov = compute_coverage(VULN, _stats(VULN, digests=0), _idx(5, 0), threshold=0.9)
+    assert (cov.ratio, cov.status) == (0.0, "warning")
 
 
-def test_kyverno_is_info_only_unless_opted_in():
-    stats = _stats(KYVERNO, subjects=1)
-    assert compute_coverage(KYVERNO, stats, _idx(0, 10), threshold=0.9).status == "info"
-    assert compute_coverage(KYVERNO, stats, _idx(0, 10), threshold=0.9,
-                            check_kinds=frozenset({KYVERNO})).status == "error"
-
-
-def test_ignore_kinds_yields_info_with_numbers_still_computed():
-    cov = compute_coverage(VULN, _stats(VULN, digests=1), _idx(10, 0), threshold=0.9,
-                           ignore_kinds=frozenset({VULN}))
+def test_kyverno_is_informational():
+    cov = compute_coverage(KYVERNO, _stats(KYVERNO, subjects=1), _idx(0, 10), threshold=0.9)
     assert (cov.status, cov.expected, cov.matched, cov.threshold) == ("info", 10, 1, None)
+    assert cov.manifest_coverage() == {"expected": 10, "matched": 1}, "numbers still reported"
 
 
 def test_cluster_level_and_inventory_have_no_coverage():
@@ -81,8 +72,6 @@ def test_threshold_env_parsing():
     assert read_threshold({ENV_THRESHOLD: "abc"}, warn=warnings.append) == 0.9
     assert read_threshold({ENV_THRESHOLD: "1.5"}, warn=warnings.append) == 0.9
     assert len(warnings) == 2
-    assert read_kind_set({ENV_IGNORE_KINDS: " a, b ,,"}, ENV_IGNORE_KINDS) == {"a", "b"}
-    assert read_kind_set({}, ENV_CHECK_KINDS) == frozenset()
 
 
 def test_log_lines_levels():
@@ -92,8 +81,10 @@ def test_log_lines_levels():
     lines = log_lines(stats, cov)
     assert lines[0] == ("INFO", "filter kind=trivy.VulnerabilityReport total=3 kept=1 "
                                 "dropped_no_subject=0 dropped_image_not_deployed=2")
-    assert lines[1][0] == "ERROR"
-    assert "ratio=0.10 threshold=0.90 status=error" in lines[1][1]
+    assert lines[1][0] == "WARNING"
+    assert "ratio=0.10 threshold=0.90 status=warning" in lines[1][1]
+    info = log_lines(_stats(KYVERNO, subjects=1), compute_coverage(KYVERNO, _stats(KYVERNO, subjects=1), _idx(0, 10), threshold=0.9))
+    assert info[1][0] == "INFO" and "threshold=- status=info" in info[1][1]
 
 
 @pytest.mark.parametrize("relevance", [True, False])

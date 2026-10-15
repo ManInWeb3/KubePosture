@@ -19,8 +19,7 @@ What gets TRUNCATEd:
   Snapshot
 
 What is PRESERVED:
-  Cluster (incl. manual flags) — `consecutive_incomplete_inventories`
-    is reset to 0
+  Cluster (incl. manual flags)
   IngestToken
   EpssScore, KevEntry
   auth_user, django_session, …
@@ -88,9 +87,6 @@ class Command(BaseCommand):
         with transaction.atomic():
             with connection.cursor() as cur:
                 cur.execute(f"TRUNCATE {quoted} RESTART IDENTITY CASCADE")
-            # Reset per-cluster counter so the next import lands on
-            # a clean baseline.
-            Cluster.objects.update(consecutive_incomplete_inventories=0)
 
         self.stdout.write(self.style.SUCCESS(
             f"Truncated {len(table_names)} tables. Row counts before:"

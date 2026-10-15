@@ -5,7 +5,7 @@ The importer uploads ONE gzip NDJSON bundle per `(import_id, kind)`:
     line 1      {"manifest": {cluster, import_id, kind, count, sha256, ...}}
     line 2..N+1 one CRD JSON object per line
                 (kind `inventory`: exactly one line — the envelope
-                 {cluster_meta, complete_snapshot, items[]})
+                 {cluster_meta, items[]})
 
 then commits the whole import in one call. Three guarantees this module
 provides:
@@ -73,7 +73,9 @@ _SPOOL_MAX_MEMORY = 8 * 1024 * 1024
 _BULK_BATCH = 100
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 # Manifest keys with their own columns / handling; everything else is
-# persisted verbatim in ImportMark.bundle_manifest.
+# persisted verbatim in ImportMark.bundle_manifest. `complete_snapshot`
+# and `item_sha256` are legacy keys an older importer may still send —
+# accepted and ignored, never stored.
 _CORE_MANIFEST_KEYS = frozenset({
     "cluster", "import_id", "kind", "count", "sha256",
     "complete_snapshot", "coverage", "item_sha256",
@@ -120,10 +122,8 @@ class Manifest:
     kind: str
     count: int
     sha256: str
-    complete_snapshot: bool = False
     coverage_expected: int | None = None
     coverage_matched: int | None = None
-    item_sha256: list[str] | None = None
     extra: dict = field(default_factory=dict)
 
 
@@ -226,26 +226,10 @@ def parse_manifest(line: bytes) -> Manifest:
         expected = _opt_int(coverage.get("expected"), field_name="coverage.expected")
         matched = _opt_int(coverage.get("matched"), field_name="coverage.matched")
 
-    item_sha256 = m.get("item_sha256")
-    if item_sha256 is not None:
-        if (
-            not isinstance(item_sha256, list)
-            or any(not isinstance(x, str) or not _HEX64.match(x.lower()) for x in item_sha256)
-        ):
-            raise BundleError("bad_manifest", field="item_sha256", detail="must be a list of 64-hex strings")
-        if len(item_sha256) != count:
-            raise BundleError(
-                "bad_manifest", field="item_sha256",
-                detail=f"has {len(item_sha256)} entries, count is {count}",
-            )
-        item_sha256 = [x.lower() for x in item_sha256]
-
     extra = {k: v for k, v in m.items() if k not in _CORE_MANIFEST_KEYS}
     return Manifest(
         cluster=cluster, import_id=import_id, kind=kind, count=count, sha256=sha,
-        complete_snapshot=bool(m.get("complete_snapshot", False)),
-        coverage_expected=expected, coverage_matched=matched,
-        item_sha256=item_sha256, extra=extra,
+        coverage_expected=expected, coverage_matched=matched, extra=extra,
     )
 
 
@@ -348,12 +332,12 @@ def spool_bundle(stream, *, gzip_encoded: bool, limits: BundleLimits) -> Spooled
 
 
 def verify_bundle(spooled: SpooledBundle, *, limits: BundleLimits) -> None:
-    """Byte-only pass over the item lines: caps, count, sha256 (and the
-    optional per-item hashes). No JSON parsing, no DB — the common
-    mismatch failures never get near a transaction.
+    """Byte-only pass over the item lines: caps, count, sha256. No JSON
+    parsing, no DB — the common mismatch failures never get near a
+    transaction.
 
     `sha256` covers the item lines exactly as sent, each including its
-    trailing newline; `item_sha256[i]` covers line i without it.
+    trailing newline.
     """
     m = spooled.manifest
     if m.count > limits.max_items:
@@ -368,9 +352,6 @@ def verify_bundle(spooled: SpooledBundle, *, limits: BundleLimits) -> None:
             raise BundleError("bundle_too_large", http_status=413, limit="line", line=count,
                               max_bytes=limits.max_line_bytes)
         digest.update(raw)
-        if m.item_sha256 is not None and count <= len(m.item_sha256):
-            if hashlib.sha256(raw.rstrip(b"\n")).hexdigest() != m.item_sha256[count - 1]:
-                raise BundleError("item_sha256_mismatch", line=count)
     if count != m.count:
         raise BundleError("count_mismatch", expected=m.count, actual=count)
     actual = digest.hexdigest()
@@ -431,15 +412,11 @@ def store_bundle(*, cluster: Cluster, spooled: SpooledBundle) -> StoreResult:
             raise BundleError("malformed_line", line=line_no, detail=str(exc)[:200]) from None
         if not isinstance(payload, dict):
             raise BundleError("line_not_object", line=line_no)
-        complete = m.kind == INVENTORY_KIND and (
-            m.complete_snapshot or bool(payload.get("complete_snapshot"))
-        )
         batch.append(IngestQueue(
             cluster_name=cluster.name,
             kind=m.kind,
             import_id=m.import_id,
             raw_json=payload,
-            complete_snapshot=complete,
         ))
         if len(batch) >= _BULK_BATCH:
             IngestQueue.objects.bulk_create(batch)
@@ -466,10 +443,8 @@ def build_ndjson(
     cluster: str,
     import_id: str,
     kind: str,
-    complete_snapshot: bool = False,
     coverage: dict | None = None,
     extra: dict | None = None,
-    with_item_hashes: bool = False,
 ) -> bytes:
     """Serialise items + a matching manifest line. Shared by
     `store_items` (test harness) and the test-suite; the importer has
@@ -482,12 +457,9 @@ def build_ndjson(
         "kind": kind,
         "count": len(lines),
         "sha256": hashlib.sha256(body).hexdigest(),
-        "complete_snapshot": complete_snapshot,
     }
     if coverage is not None:
         manifest["coverage"] = coverage
-    if with_item_hashes:
-        manifest["item_sha256"] = [hashlib.sha256(ln.rstrip(b"\n")).hexdigest() for ln in lines]
     if extra:
         manifest.update(extra)
     return json.dumps({"manifest": manifest}, separators=(",", ":")).encode("utf-8") + b"\n" + body
@@ -499,7 +471,6 @@ def store_items(
     import_id: str,
     kind: str,
     items: list[dict],
-    complete_snapshot: bool = False,
     coverage: dict | None = None,
     extra: dict | None = None,
 ) -> StoreResult:
@@ -507,7 +478,7 @@ def store_items(
     and tests use it so they exercise the exact store path."""
     raw = build_ndjson(
         items, cluster=cluster.name, import_id=import_id, kind=kind,
-        complete_snapshot=complete_snapshot, coverage=coverage, extra=extra,
+        coverage=coverage, extra=extra,
     )
     limits = BundleLimits.from_settings()
     with spool_bundle(io.BytesIO(raw), gzip_encoded=False, limits=limits) as spooled:

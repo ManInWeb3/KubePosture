@@ -129,8 +129,7 @@ def load_scenario(request):
          "cluster": "...",
          "import_id": "...",
          "payloads": [
-            {"kind": "...", "payload": {...}, "complete_snapshot": true,
-             "import_id": "..."?},
+            {"kind": "...", "payload": {...}, "import_id": "..."?},
             ...
          ],
          "finishes": [{"kind": "...", "observed_count": N, "import_id": "..."?}, ...]
@@ -156,16 +155,9 @@ def load_scenario(request):
     finishes = body.get("finishes") or []
 
     grouped: dict[tuple[str, str], list[dict]] = {}
-    complete: dict[tuple[str, str], bool] = {}
     for env in payloads:
         key = (env.get("import_id") or import_id, env["kind"])
-        payload = env.get("payload") or {}
-        grouped.setdefault(key, []).append(payload)
-        flag = env.get("complete_snapshot")
-        if flag is None and isinstance(payload, dict):
-            flag = payload.get("complete_snapshot")
-        if flag:
-            complete[key] = True
+        grouped.setdefault(key, []).append(env.get("payload") or {})
 
     finishes_by_import: dict[str, list[tuple[str, int]]] = {}
     for f in finishes:
@@ -175,10 +167,7 @@ def load_scenario(request):
 
     try:
         for (iid, kind), items in grouped.items():
-            store_items(
-                cluster=cluster, import_id=iid, kind=kind, items=items,
-                complete_snapshot=complete.get((iid, kind), False),
-            )
+            store_items(cluster=cluster, import_id=iid, kind=kind, items=items)
         for iid, kinds in finishes_by_import.items():
             commit_import(cluster=cluster, import_id=iid, kinds=kinds)
     except BundleError as exc:

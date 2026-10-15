@@ -115,38 +115,7 @@ def _reap_inventory(mark: ImportMark) -> dict | None:
 
 def _reap_inventory_body(mark: ImportMark) -> dict:
     cluster = mark.cluster
-    # Did any payload this cycle carry complete_snapshot=true? Read
-    # before `_release_reap` deletes the rows.
-    has_complete = IngestQueue.objects.filter(
-        cluster_name=cluster.name,
-        kind="inventory",
-        import_id=mark.import_id,
-        complete_snapshot=True,
-    ).exists()
-
-    counters: dict = {"complete_snapshot": has_complete}
-    if not has_complete:
-        cluster.consecutive_incomplete_inventories = (
-            cluster.consecutive_incomplete_inventories + 1
-        )
-        cluster.save(update_fields=["consecutive_incomplete_inventories"])
-        log.info(
-            "reap.inventory.incomplete",
-            extra={
-                "cluster": cluster.name,
-                "import_id": mark.import_id,
-                "consecutive": cluster.consecutive_incomplete_inventories,
-            },
-        )
-        if cluster.consecutive_incomplete_inventories >= 3:
-            log.warning(
-                "reap.inventory.persistent_incomplete",
-                extra={
-                    "cluster": cluster.name,
-                    "consecutive": cluster.consecutive_incomplete_inventories,
-                },
-            )
-        return counters
+    counters: dict = {}
 
     # Monotonic guard: a mark can reap late — e.g. its queue drained
     # slowly, or one of its items was reclaimed after a worker was
@@ -173,11 +142,7 @@ def _reap_inventory_body(mark: ImportMark) -> dict:
         )
         return counters
 
-    # Reset the incomplete counter — this cycle was clean.
     update_fields = []
-    if cluster.consecutive_incomplete_inventories != 0:
-        cluster.consecutive_incomplete_inventories = 0
-        update_fields.append("consecutive_incomplete_inventories")
     # Anchor for Image.objects.currently_running() — this is what
     # makes the manager's "is image deployed?" query partial-cycle
     # safe. Only complete cycles advance this; partial cycles leave
@@ -483,13 +448,13 @@ def _signal_ids_for_kind(kind: str) -> set[str]:
 # TTL for an `open` ImportMark before it's presumed abandoned (importer
 # crashed / was killed before `/imports/<id>/commit/`) and the whole
 # import is discarded. Deliberately larger than api.views'
-# IMPORT_LOCK_TIMEOUT (2700s — a read-only gate on starting a NEW cycle,
+# IMPORT_LOCK_TIMEOUT (1200s — a read-only gate on starting a NEW cycle,
 # never mutates a row) — this performs an actual state mutation, which
 # is less reversible. It's also comfortably past the importer Job's own
-# activeDeadlineSeconds (1800s, deploy/charts/kubeposture-import/
+# activeDeadlineSeconds (900s, deploy/charts/kubeposture-import/
 # values.yaml) — by the time this fires, Kubernetes has already
 # SIGKILLed the importer, so "still alive but slow" isn't possible.
-STUCK_OPEN_TIMEOUT_SECONDS = 3600
+STUCK_OPEN_TIMEOUT_SECONDS = 1800
 
 
 @transaction.atomic

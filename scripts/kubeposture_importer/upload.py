@@ -31,35 +31,25 @@ class ImportInterrupted(BaseException):
     server-side before Kubernetes SIGKILLs the pod."""
 
 
-def bundle_headers(meta: BundleMeta) -> dict[str, str]:
-    return {
-        "Content-Type": NDJSON,
-        "Content-Encoding": "gzip",
-        "X-Bundle-Kind": meta.kind,
-        "X-Bundle-Count": str(meta.count),
-        "X-Bundle-Sha256": meta.sha256,
-    }
+BUNDLE_HEADERS = {"Content-Type": NDJSON, "Content-Encoding": "gzip"}
 
 
 def upload_bundle(client: HttpClient, *, import_id: str, meta: BundleMeta) -> dict:
     with open(meta.path, "rb") as fh:
         result = client.post_file(
             f"/api/v1/imports/{import_id}/bundles/{meta.kind}/",
-            fh, content_length=meta.compressed_bytes, headers=bundle_headers(meta),
+            fh, content_length=meta.compressed_bytes, headers=BUNDLE_HEADERS,
         )
     if not result.ok or result.status not in (200, 201):
         raise UploadError("upload", result, kind=meta.kind)
     return result.json() or {}
 
 
-def commit(client: HttpClient, *, import_id: str, cluster: str, kinds: dict[str, int],
-           importer: dict | None = None) -> dict:
+def commit(client: HttpClient, *, import_id: str, cluster: str, kinds: dict[str, int]) -> dict:
     body = {
         "cluster": cluster,
         "kinds": [{"kind": k, "count": n} for k, n in kinds.items()],
     }
-    if importer:
-        body["importer"] = importer
     result = client.post_json(f"/api/v1/imports/{import_id}/commit/", body)
     if not result.ok:
         raise UploadError("commit", result)
@@ -89,7 +79,6 @@ def run_upload_plan(
     import_id: str,
     cluster: str,
     bundles: list[BundleMeta],
-    importer: dict | None = None,
     out: Callable[[str], None] = print,
     err: Callable[[str], None] | None = None,
 ) -> int:
@@ -105,7 +94,7 @@ def run_upload_plan(
                 f"  upload {meta.kind}: {resp.get('status', 'ok')} count={meta.count} "
                 f"bytes={meta.compressed_bytes} (uncompressed {meta.uncompressed_bytes})"
             )
-        resp = commit(client, import_id=import_id, cluster=cluster, kinds=uploaded, importer=importer)
+        resp = commit(client, import_id=import_id, cluster=cluster, kinds=uploaded)
         out(f"COMMITTED import_id={import_id} status={resp.get('status', 'committed')} kinds={len(uploaded)}")
         return 0
     except UploadError as exc:

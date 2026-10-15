@@ -1,68 +1,68 @@
 {
   "inventory": {
-    "compressed_bytes": 10191,
+    "compressed_bytes": 10180,
     "count": 1,
-    "sha256": "76e19f11b0662fbd559b0feafb8418c848b1badfa80c807d6202110ec347d2c5",
-    "uncompressed_bytes": 130150
+    "sha256": "731381d6b2f58ab4ff52432e7d00a294b0d743785bd4f0dd761156c25e0926d9",
+    "uncompressed_bytes": 130100
   },
   "kyverno.ClusterPolicyReport": {
-    "compressed_bytes": 187,
+    "compressed_bytes": 171,
     "count": 0,
     "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "uncompressed_bytes": 205
+    "uncompressed_bytes": 179
   },
   "kyverno.PolicyReport": {
-    "compressed_bytes": 9849,
+    "compressed_bytes": 9829,
     "count": 67,
     "sha256": "88f2bbec277d6e04d49ff5559c4cd1563cc33dff1a050df53e209a12402ba7f6",
-    "uncompressed_bytes": 221191
+    "uncompressed_bytes": 221165
   },
   "trivy.ClusterComplianceReport": {
-    "compressed_bytes": 4748,
+    "compressed_bytes": 4734,
     "count": 5,
     "sha256": "68a7a22c0954371bbc09e61416b7fdd929904a0c2a36d674bd38d44bf6d20d45",
-    "uncompressed_bytes": 28250
+    "uncompressed_bytes": 28224
   },
   "trivy.ClusterRbacAssessmentReport": {
-    "compressed_bytes": 13696,
+    "compressed_bytes": 13674,
     "count": 131,
     "sha256": "ef50dd374ba6a7d78a7901fdd6f152af940a22b6f3e82d652900a95643bce9dd",
-    "uncompressed_bytes": 148351
+    "uncompressed_bytes": 148325
   },
   "trivy.ConfigAuditReport": {
-    "compressed_bytes": 7707,
+    "compressed_bytes": 7691,
     "count": 16,
     "sha256": "9f200959feaaa0da93a004830c9b4486ea6b3ce95965cbaeaf3cced36c1b9ceb",
-    "uncompressed_bytes": 150901
+    "uncompressed_bytes": 150875
   },
   "trivy.ExposedSecretReport": {
-    "compressed_bytes": 3083,
+    "compressed_bytes": 3064,
     "count": 20,
     "sha256": "12ff3054ef23d8498d16042e2025712d7131f57561d035c3537327f1c9dd1e75",
-    "uncompressed_bytes": 21406
+    "uncompressed_bytes": 21380
   },
   "trivy.InfraAssessmentReport": {
-    "compressed_bytes": 2541,
+    "compressed_bytes": 2524,
     "count": 12,
     "sha256": "8f8b9ada088f7cb827a1a2c437c5e6767c6d014c057e80012fe5de793b7f9b77",
-    "uncompressed_bytes": 23865
+    "uncompressed_bytes": 23839
   },
   "trivy.RbacAssessmentReport": {
-    "compressed_bytes": 2874,
+    "compressed_bytes": 2858,
     "count": 17,
     "sha256": "479cbe86b78d91fa3e9eee51bad2e50c21c329b387e9e418501f13266bea8410",
-    "uncompressed_bytes": 19563
+    "uncompressed_bytes": 19537
   },
   "trivy.SbomReport": {
-    "compressed_bytes": 320535,
+    "compressed_bytes": 320522,
     "count": 20,
     "sha256": "cb50d94fc240f2cb774c668de361221b6824016a549cda8dc3b5c7ac86763ec0",
-    "uncompressed_bytes": 3471845
+    "uncompressed_bytes": 3471819
   },
   "trivy.VulnerabilityReport": {
-    "compressed_bytes": 428534,
+    "compressed_bytes": 428517,
     "count": 21,
     "sha256": "cf333f5eb11eb2def6217aa51d1f059b0d24b54496cc2215395b7766d38f714d",
-    "uncompressed_bytes": 4805313
+    "uncompressed_bytes": 4805287
   }
 }

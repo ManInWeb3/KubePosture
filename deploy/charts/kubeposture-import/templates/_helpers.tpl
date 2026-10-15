@@ -106,8 +106,6 @@ Takes a dict: (dict "root" $ "cronjobName" "<name or empty>")
   value: {{ $root.Values.relevanceFilter | quote }}
 - name: KUBEPOSTURE_COVERAGE_MIN_RATIO
   value: {{ $root.Values.coverage.minRatio | quote }}
-- name: KUBEPOSTURE_COVERAGE_IGNORE_KINDS
-  value: {{ join "," $root.Values.coverage.ignoreKinds | quote }}
 - name: KUBEPOSTURE_UPLOAD_DEADLINE_SECONDS
   value: {{ $root.Values.uploadDeadlineSeconds | quote }}
 - name: KUBEPOSTURE_LOG_LEVEL

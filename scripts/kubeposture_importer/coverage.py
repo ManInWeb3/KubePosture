@@ -1,10 +1,14 @@
 """Scan-coverage check — "does every deployed thing have a report?"
 
-Record + alert only: a low ratio prints WARNING/ERROR and is sent to
-the server in the bundle manifest (which stores it and exposes a
-gauge), but the import still proceeds. Trivy lags new pods by minutes
-and some images are never scannable; aborting on a mismatch would
-leave a cluster unimported until someone intervened.
+Record + alert only: a ratio below the threshold prints a WARNING and
+is sent to the server in the bundle manifest (which stores it and
+exposes a gauge), but the import still proceeds. Trivy lags new pods by
+minutes and some images are never scannable; aborting on a mismatch
+would leave a cluster unimported until someone intervened.
+
+Kyverno coverage depends on policy scope and background-scan settings
+too much for a threshold to mean anything, so it is reported as
+informational.
 """
 from __future__ import annotations
 
@@ -18,10 +22,6 @@ from .snapshot_index import SnapshotIndex
 
 DEFAULT_THRESHOLD = 0.9
 ENV_THRESHOLD = "KUBEPOSTURE_COVERAGE_MIN_RATIO"
-ENV_IGNORE_KINDS = "KUBEPOSTURE_COVERAGE_IGNORE_KINDS"
-ENV_CHECK_KINDS = "KUBEPOSTURE_COVERAGE_CHECK_KINDS"
-# Kyverno coverage depends on policy scope / background-scan settings
-# too much for a default threshold — informational unless opted in.
 _INFO_ONLY_KINDS = frozenset({"kyverno.PolicyReport"})
 
 
@@ -32,7 +32,7 @@ class CoverageResult:
     matched: int | None
     ratio: float | None
     threshold: float | None
-    status: str  # "ok" | "warning" | "error" | "info" | "n/a"
+    status: str  # "ok" | "warning" | "info" | "n/a"
 
     def manifest_coverage(self) -> dict | None:
         if self.expected is None or self.matched is None:
@@ -55,20 +55,7 @@ def read_threshold(env: Mapping[str, str], *, warn=None) -> float:
     return value
 
 
-def read_kind_set(env: Mapping[str, str], name: str) -> frozenset[str]:
-    raw = env.get(name) or ""
-    return frozenset(k.strip() for k in raw.split(",") if k.strip())
-
-
-def compute_coverage(
-    kind: str,
-    stats: FilterStats,
-    idx: SnapshotIndex,
-    *,
-    threshold: float,
-    ignore_kinds: frozenset[str] = frozenset(),
-    check_kinds: frozenset[str] = frozenset(),
-) -> CoverageResult:
+def compute_coverage(kind: str, stats: FilterStats, idx: SnapshotIndex, *, threshold: float) -> CoverageResult:
     if kind in IMAGE_KINDS:
         expected = len(idx.deployed_digests)
         matched = len(stats.matched_digests)
@@ -79,19 +66,14 @@ def compute_coverage(
         return CoverageResult(kind, None, None, None, None, "n/a")
 
     ratio = 1.0 if expected == 0 else matched / expected
-    if kind in ignore_kinds or (kind in _INFO_ONLY_KINDS and kind not in check_kinds):
+    if kind in _INFO_ONLY_KINDS:
         return CoverageResult(kind, expected, matched, ratio, None, "info")
-    if expected > 0 and (matched == 0 or ratio < threshold / 2):
-        status = "error"
-    elif ratio < threshold:
-        status = "warning"
-    else:
-        status = "ok"
+    status = "warning" if ratio < threshold else "ok"
     return CoverageResult(kind, expected, matched, ratio, threshold, status)
 
 
 def log_lines(stats: FilterStats, cov: CoverageResult) -> list[tuple[str, str]]:
-    """(level, line) pairs — INFO lines go to stdout, the rest to stderr."""
+    """(level, line) pairs — INFO lines go to stdout, WARNING to stderr."""
     lines = [(
         "INFO",
         f"filter kind={stats.kind} total={stats.total} kept={stats.kept} "
@@ -99,7 +81,7 @@ def log_lines(stats: FilterStats, cov: CoverageResult) -> list[tuple[str, str]]:
         f"dropped_image_not_deployed={stats.dropped_image_not_deployed}",
     )]
     if cov.status != "n/a":
-        level = {"warning": "WARNING", "error": "ERROR"}.get(cov.status, "INFO")
+        level = "WARNING" if cov.status == "warning" else "INFO"
         threshold = "-" if cov.threshold is None else f"{cov.threshold:.2f}"
         lines.append((
             level,

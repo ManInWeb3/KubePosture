@@ -13,10 +13,9 @@ from core.models import Cluster
 from core.parsers import inventory as inv
 
 
-def _envelope(*items: dict, complete: bool = True) -> dict:
+def _envelope(*items: dict) -> dict:
     return {
         "cluster_meta": {"name": "test-cluster"},
-        "complete_snapshot": complete,
         "items": list(items),
     }
 
@@ -221,19 +220,6 @@ def test_standalone_job_no_cronjob_owner_is_a_workload():
     assert job_key in st.workloads
 
 
-def test_complete_snapshot_flag_propagates_to_staging():
-    """complete_snapshot from envelope is reflected on staging."""
-    st_complete = inv.parse_envelope(
-        _envelope(_ns("ns"), _deployment("a", "ns"), complete=True), _cluster()
-    )
-    assert st_complete.complete_snapshot is True
-
-    st_partial = inv.parse_envelope(
-        _envelope(_ns("ns"), _deployment("a", "ns"), complete=False), _cluster()
-    )
-    assert st_partial.complete_snapshot is False
-
-
 def test_cluster_meta_extracted_from_envelope():
     payload = {
         "cluster_meta": {"name": "test", "k8s_version": "v1.30.2", "provider": "aws"},
@@ -248,7 +234,6 @@ def test_empty_envelope_does_not_crash():
     """An empty inventory payload parses to empty staging without raising."""
     st = inv.parse_envelope({}, _cluster())
     assert st.workloads == {}
-    assert st.complete_snapshot is False
 
 
 def test_unknown_kind_silently_skipped():
@@ -361,7 +346,6 @@ def test_items_without_kind_are_counted_not_silently_dropped():
     """
     payload = {
         "cluster_meta": {"name": "test"},
-        "complete_snapshot": True,
         "items": [
             # No `kind` — the exact shape produced by the buggy importer
             {"apiVersion": "v1", "metadata": {"name": "ns1"}},

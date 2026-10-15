@@ -139,9 +139,8 @@ curl -X POST http://localhost:8000/api/v1/testing/load_scenario/ \
   -H 'Content-Type: application/json' -d '{
     "cluster": "prod-payments-1",
     "import_id": "01HW000000000000000000HPPY",
-    "payloads": [{"kind": "inventory", "complete_snapshot": true,
-                  "payload": {"cluster_meta": {"name": "prod-payments-1"},
-                              "complete_snapshot": true, "items": []}}],
+    "payloads": [{"kind": "inventory",
+                  "payload": {"cluster_meta": {"name": "prod-payments-1"}, "items": []}}],
     "finishes": [{"kind": "inventory", "observed_count": 1}]
   }'
 ```
@@ -347,12 +346,12 @@ auto-registered.
 
 | Step | Request | Notes |
 |---|---|---|
-| upload | `POST /api/v1/imports/<import_id>/bundles/<kind>/` — `Content-Type: application/x-ndjson`, `Content-Encoding: gzip` | Body: line 1 is `{"manifest": {cluster, import_id, kind, count, sha256, complete_snapshot?, coverage?, …}}`; then one CRD JSON object per line (kind `inventory`: exactly one line, the envelope). `sha256` covers the item lines as sent, newlines included. The server verifies size caps, count and hash in a byte pass, then inserts the rows **and** the kind's ImportMark (`open`) in one transaction. `201 stored`; re-upload of identical bytes `200 already_uploaded`; different bytes `409 bundle_conflict`; verification failures `400` with an `error` code; caps `413`. |
+| upload | `POST /api/v1/imports/<import_id>/bundles/<kind>/` — `Content-Type: application/x-ndjson`, `Content-Encoding: gzip` | Body: line 1 is `{"manifest": {cluster, import_id, kind, count, sha256, coverage?, …}}`; then one CRD JSON object per line (kind `inventory`: exactly one line, the envelope). `sha256` covers the item lines as sent, newlines included. The server verifies size caps, count and hash in a byte pass, then inserts the rows **and** the kind's ImportMark (`open`) in one transaction. `201 stored`; re-upload of identical bytes `200 already_uploaded`; different bytes `409 bundle_conflict`; verification failures `400` with an `error` code; caps `413`. |
 | commit | `POST /api/v1/imports/<import_id>/commit/` — `{"cluster", "kinds": [{"kind", "count"}, …]}` | Every listed kind must have a mark whose stored row count equals `count`; every uploaded kind must be listed (`409` otherwise). All marks flip to `draining` together — nothing is claimable before this. `count: 0` is legitimate (CRD installed, no objects) and drives the zero-input / outage rule; absent CRDs are simply not listed. Idempotent for an identical retry. |
 | abort | `POST /api/v1/imports/<import_id>/abort/` — `{"cluster"}` | Deletes the import's rows and marks while nothing is committed. The importer calls it when any bundle fails. |
 
 Imports that are never committed are discarded by `reap_safety_net`
-after `STUCK_OPEN_TIMEOUT_SECONDS` (1 h); a failed inventory payload
+after `STUCK_OPEN_TIMEOUT_SECONDS` (30 min); a failed inventory payload
 discards its whole import immediately. Discarded marks are `reaped`
 with `discard_reason` set and never touch `last_complete_inventory_at`.
 Every reap deletes its tuple's queue rows after recording

@@ -918,7 +918,7 @@ def write_golden(out: Path) -> None:
     tmp.mkdir(exist_ok=True)
     try:
         cluster_meta = derive_cluster_meta("fixture", by_kind)
-        with BundleWriter(cluster="fixture", import_id="GOLDEN", kind="inventory", tmp_dir=tmp, complete_snapshot=True) as w:
+        with BundleWriter(cluster="fixture", import_id="GOLDEN", kind="inventory", tmp_dir=tmp) as w:
             w.write_inventory_envelope(cluster_meta, (trim_manifest(it) for k in sorted(INVENTORY_ITEM_KINDS) for it in by_kind.get(k) or []))
             meta = w.finish()
         bundles["inventory"] = {"count": meta.count, "sha256": meta.sha256,

@@ -88,7 +88,6 @@ def test_post_file_sends_gzip_body_with_explicit_content_length_and_headers(tmp_
     assert headers["Content-encoding"] == "gzip"
     assert headers["Content-length"] == str(meta.compressed_bytes) == str(len(body))
     assert headers["Authorization"] == "Bearer tok"
-    assert headers["X-bundle-sha256"] == meta.sha256 and headers["X-bundle-count"] == "2"
     assert gzip.decompress(body).count(b"\n") == 3  # manifest + 2 items
     assert "Transfer-encoding" not in headers
 
@@ -161,14 +160,12 @@ def test_get_uses_short_retry_budget():
 
 def test_commit_body_lists_delivered_counts_including_zero():
     net = FakeNet([_Resp(200, {"status": "committed"})])
-    commit(net.client(), import_id="imp-1", cluster="c", kinds={"inventory": 1, "trivy.SbomReport": 0},
-           importer={"version": "2.0.0"})
+    commit(net.client(), import_id="imp-1", cluster="c", kinds={"inventory": 1, "trivy.SbomReport": 0})
     _, path, headers, body = net.calls[0]
     assert path == "api/v1/imports/imp-1/commit/"
     assert json.loads(body) == {
         "cluster": "c",
         "kinds": [{"kind": "inventory", "count": 1}, {"kind": "trivy.SbomReport", "count": 0}],
-        "importer": {"version": "2.0.0"},
     }
 
 

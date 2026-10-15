@@ -47,7 +47,7 @@ def test_sbom_components_have_purl_and_ecosystem(by_kind):
 
 def test_inventory_envelope_parses_with_no_unknown_kinds(by_kind):
     items = [trim_manifest(it) for k in sorted(INVENTORY_ITEM_KINDS) for it in by_kind.get(k) or []]
-    envelope = {"cluster_meta": {"name": "fixture"}, "complete_snapshot": True, "items": items}
+    envelope = {"cluster_meta": {"name": "fixture"}, "items": items}
     staging = inventory_parser.parse_envelope(envelope, Cluster(name="fixture"))
     assert staging.unknown_kind_skipped == 0
     assert staging.workloads, "a capture without a single workload is not useful"

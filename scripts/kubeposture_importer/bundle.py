@@ -55,12 +55,11 @@ class BundleMeta:
 
 class BundleWriter:
     def __init__(self, *, cluster: str, import_id: str, kind: str, tmp_dir: Path,
-                 complete_snapshot: bool = False, compresslevel: int = 6):
+                 compresslevel: int = 6):
         self.cluster = cluster
         self.import_id = import_id
         self.kind = kind
         self.tmp_dir = Path(tmp_dir)
-        self.complete_snapshot = complete_snapshot
         self.compresslevel = compresslevel
         self.count = 0
         self.item_bytes = 0
@@ -83,12 +82,10 @@ class BundleWriter:
         self.count += 1
 
     def write_inventory_envelope(self, cluster_meta: dict, items: Iterable[dict]) -> None:
-        """Stream `{"cluster_meta":…,"complete_snapshot":…,"items":[…]}` as
+        """Stream `{"cluster_meta":…,"items":[…]}` as
         ONE line without materialising the envelope — byte-identical to
         `json.dumps` of the same dict with that key order."""
-        self._raw(b'{"cluster_meta":' + _dumps(cluster_meta)
-                  + b',"complete_snapshot":' + (b"true" if self.complete_snapshot else b"false")
-                  + b',"items":[')
+        self._raw(b'{"cluster_meta":' + _dumps(cluster_meta) + b',"items":[')
         first = True
         for item in items:
             if not first:
@@ -107,7 +104,6 @@ class BundleWriter:
             "kind": self.kind,
             "count": self.count,
             "sha256": self._sha.hexdigest(),
-            "complete_snapshot": self.complete_snapshot,
         }
         if coverage is not None:
             manifest["coverage"] = coverage

@@ -29,7 +29,6 @@ def test_sha256_and_count_cover_the_item_lines_exactly(tmp_path):
     assert manifest["sha256"] == meta.sha256 == hashlib.sha256(expected_body).hexdigest()
     assert manifest["count"] == meta.count == 5
     assert manifest["cluster"] == "c" and manifest["import_id"] == "imp-1"
-    assert manifest["complete_snapshot"] is False
     assert meta.item_bytes == len(expected_body)
     assert meta.uncompressed_bytes == len(expected_body) + len(json.dumps({"manifest": manifest}, separators=(",", ":")).encode()) + 1
     assert meta.compressed_bytes == meta.path.stat().st_size
@@ -61,23 +60,23 @@ def test_large_single_line_and_embedded_newlines(tmp_path):
 def test_inventory_envelope_streams_as_single_line_identical_to_json_dumps(tmp_path):
     meta_dict = {"name": "c", "k8s_version": "v1.30", "provider": "eks", "region": "eu"}
     items = [{"kind": "Namespace", "metadata": {"name": "ns"}}, {"kind": "Pod", "metadata": {"name": "p"}}]
-    with BundleWriter(cluster="c", import_id="imp-1", kind="inventory", tmp_dir=tmp_path, complete_snapshot=True) as w:
+    with BundleWriter(cluster="c", import_id="imp-1", kind="inventory", tmp_dir=tmp_path) as w:
         w.write_inventory_envelope(meta_dict, iter(items))
         meta = w.finish()
     manifest, body = _read(meta)
-    expected = json.dumps({"cluster_meta": meta_dict, "complete_snapshot": True, "items": items},
+    expected = json.dumps({"cluster_meta": meta_dict, "items": items},
                           separators=(",", ":")).encode() + b"\n"
     assert body == expected
-    assert manifest["count"] == 1 and manifest["complete_snapshot"] is True
+    assert manifest["count"] == 1
     assert manifest["sha256"] == hashlib.sha256(expected).hexdigest()
 
 
 def test_empty_inventory_envelope(tmp_path):
-    with BundleWriter(cluster="c", import_id="imp-1", kind="inventory", tmp_dir=tmp_path, complete_snapshot=True) as w:
+    with BundleWriter(cluster="c", import_id="imp-1", kind="inventory", tmp_dir=tmp_path) as w:
         w.write_inventory_envelope({"name": "c"}, [])
         meta = w.finish()
     _, body = _read(meta)
-    assert json.loads(body) == {"cluster_meta": {"name": "c"}, "complete_snapshot": True, "items": []}
+    assert json.loads(body) == {"cluster_meta": {"name": "c"}, "items": []}
 
 
 def test_manifest_coverage_and_extra_fields(tmp_path):

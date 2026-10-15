@@ -83,9 +83,6 @@ class _InventoryStaging:
     # cluster-meta dict from the envelope (k8s_version, provider, region).
     cluster_meta: dict = field(default_factory=dict)
 
-    # `complete_snapshot` from the payload that carries items we just parsed.
-    complete_snapshot: bool = False
-
     # Items in the envelope whose `kind` field was missing/empty/unknown
     # — these were silently skipped by the dispatch table. A non-zero
     # count signals an upstream bug (e.g., importer didn't stamp kind
@@ -526,7 +523,6 @@ def parse_envelope(payload: dict, cluster: Cluster) -> _InventoryStaging:
     st._pending_pod_observations = {}  # type: ignore[attr-defined]
     st._pending_pod_signals = {}  # type: ignore[attr-defined]
     st.cluster_meta = dict(payload.get("cluster_meta") or {})
-    st.complete_snapshot = bool(payload.get("complete_snapshot"))
 
     items = payload.get("items") or []
     for item in items:
@@ -706,12 +702,13 @@ def persist(st: _InventoryStaging, mark_started_at) -> dict:
         )
         st.namespaces[ns_name] = ns
 
-    # Inactive any namespace not seen in this snapshot (only if complete).
-    if st.complete_snapshot:
-        for ns in Namespace.objects.filter(cluster=cluster, active=True).exclude(name__in=seen_namespaces):
-            ns.active = False
-            ns.deactivated_at = timezone.now()
-            ns.save(update_fields=["active", "deactivated_at"])
+    # Deactivate any namespace not seen in this snapshot. Every committed
+    # inventory is a complete snapshot (the bundle protocol guarantees it),
+    # so "absent" means "gone".
+    for ns in Namespace.objects.filter(cluster=cluster, active=True).exclude(name__in=seen_namespaces):
+        ns.active = False
+        ns.deactivated_at = timezone.now()
+        ns.save(update_fields=["active", "deactivated_at"])
 
     # 3. Implicit Namespaces (referenced by workloads but no Namespace item).
     for (ns_name, _, _) in list(st.workloads.keys()):
@@ -847,16 +844,15 @@ def persist(st: _InventoryStaging, mark_started_at) -> dict:
         st.derived_signals.setdefault((ns_name, wk, wname), set()).update(sigs)
 
     # Now that pod-obs resolution is done, prune stale aliases.
-    if st.complete_snapshot:
-        existing = WorkloadAlias.objects.filter(cluster=cluster).values_list(
-            "id", "namespace_id", "alias_kind", "alias_name"
-        )
-        to_delete = [
-            row_id for (row_id, ns_id, ak, an) in existing
-            if (cluster.id, ns_id, ak, an) not in seen_alias_keys
-        ]
-        if to_delete:
-            WorkloadAlias.objects.filter(id__in=to_delete).delete()
+    existing = WorkloadAlias.objects.filter(cluster=cluster).values_list(
+        "id", "namespace_id", "alias_kind", "alias_name"
+    )
+    to_delete = [
+        row_id for (row_id, ns_id, ak, an) in existing
+        if (cluster.id, ns_id, ak, an) not in seen_alias_keys
+    ]
+    if to_delete:
+        WorkloadAlias.objects.filter(id__in=to_delete).delete()
 
     # 7. Images + WorkloadImageObservation -------------------------------
     image_cache: dict[str, Image] = {}
@@ -984,7 +980,6 @@ def persist(st: _InventoryStaging, mark_started_at) -> dict:
         "namespaces": len(seen_namespaces),
         "workloads": len(persisted_workloads),
         "aliases": len(st.aliases),
-        "complete_snapshot": st.complete_snapshot,
         "unknown_kind_skipped": st.unknown_kind_skipped,
     }
 

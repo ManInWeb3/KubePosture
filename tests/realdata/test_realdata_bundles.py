@@ -24,7 +24,7 @@ def _build(by_kind, tmp_path):
     scan_items = {env_kind: list(by_kind[crd]) for crd, env_kind in SCAN_KINDS if crd in by_kind}
     filtered, _ = apply_relevance_filter(scan_items, idx, enabled=True)
     metas = {}
-    with BundleWriter(cluster="fixture", import_id="GOLDEN", kind="inventory", tmp_dir=tmp_path, complete_snapshot=True) as w:
+    with BundleWriter(cluster="fixture", import_id="GOLDEN", kind="inventory", tmp_dir=tmp_path) as w:
         w.write_inventory_envelope(
             derive_cluster_meta("fixture", by_kind),
             (trim_manifest(it) for k in sorted(INVENTORY_ITEM_KINDS) for it in by_kind.get(k) or []),

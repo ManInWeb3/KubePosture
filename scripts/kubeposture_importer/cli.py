@@ -30,15 +30,7 @@ from pathlib import Path
 
 from . import IMPORTER_VERSION
 from .bundle import BundleMeta, BundleWriter
-from .coverage import (
-    ENV_CHECK_KINDS,
-    ENV_IGNORE_KINDS,
-    compute_coverage,
-    log_lines,
-    manifest_extra,
-    read_kind_set,
-    read_threshold,
-)
+from .coverage import compute_coverage, log_lines, manifest_extra, read_threshold
 from .http import HTTP_RETRY_BASE_DELAY, HTTP_TIMEOUT_DEFAULT, HttpClient
 from .kinds import INVENTORY_ITEM_KINDS, INVENTORY_KIND, SCAN_KINDS
 from .pending import check_pending, clear_pending
@@ -48,7 +40,7 @@ from .sources.folder import collect_from_folder
 from .trim import derive_cluster_meta, trim_manifest
 from .upload import ImportInterrupted, run_upload_plan
 
-UPLOAD_DEADLINE_DEFAULT = 1500  # < kubeposture-import activeDeadlineSeconds (1800)
+UPLOAD_DEADLINE_DEFAULT = 600  # < kubeposture-import activeDeadlineSeconds (900)
 
 _ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
@@ -139,8 +131,6 @@ def parse_args(argv: list[str] | None = None, env=None) -> argparse.Namespace:
     args.coverage_threshold = (
         args.coverage_min_ratio if args.coverage_min_ratio is not None else read_threshold(env, warn=_err)
     )
-    args.coverage_ignore_kinds = read_kind_set(env, ENV_IGNORE_KINDS)
-    args.coverage_check_kinds = read_kind_set(env, ENV_CHECK_KINDS)
     args.tmp_dir = Path(args.tmp_dir or env.get("KUBEPOSTURE_TMP") or tempfile.gettempdir())
     args.upload_deadline = (
         args.upload_deadline_seconds if args.upload_deadline_seconds is not None
@@ -164,8 +154,6 @@ def build_bundles(
     tmp_dir: Path,
     relevance_filter: bool,
     coverage_threshold: float,
-    coverage_ignore_kinds: frozenset[str] = frozenset(),
-    coverage_check_kinds: frozenset[str] = frozenset(),
     debug: bool = False,
     out=print,
     err=_err,
@@ -182,10 +170,7 @@ def build_bundles(
     summary: dict = {"kinds": {}}
     coverage = {}
     for kind in filtered:
-        cov = compute_coverage(
-            kind, stats[kind], idx, threshold=coverage_threshold,
-            ignore_kinds=coverage_ignore_kinds, check_kinds=coverage_check_kinds,
-        )
+        cov = compute_coverage(kind, stats[kind], idx, threshold=coverage_threshold)
         coverage[kind] = cov
         for level, line in log_lines(stats[kind], cov):
             (out if level == "INFO" else err)(line if level == "INFO" else f"{level} {line}")
@@ -207,8 +192,7 @@ def build_bundles(
         inventory_items = (
             trim_manifest(it) for k in sorted(INVENTORY_ITEM_KINDS) for it in (by_kind.get(k) or [])
         )
-        with BundleWriter(cluster=cluster, import_id=import_id, kind=INVENTORY_KIND,
-                          tmp_dir=tmp_dir, complete_snapshot=True) as w:
+        with BundleWriter(cluster=cluster, import_id=import_id, kind=INVENTORY_KIND, tmp_dir=tmp_dir) as w:
             w.write_inventory_envelope(cluster_meta, inventory_items)
             bundles.append(w.finish(extra=manifest_extra(None, relevance_filter=relevance_filter)))
         for kind, items in filtered.items():
@@ -240,7 +224,6 @@ def run_cycle(*, args: argparse.Namespace, by_kind: dict, out=print, err=_err) -
         bundles, built = build_bundles(
             cluster=args.cluster_name, import_id=import_id, by_kind=by_kind, tmp_dir=args.tmp_dir,
             relevance_filter=args.relevance_filter, coverage_threshold=args.coverage_threshold,
-            coverage_ignore_kinds=args.coverage_ignore_kinds, coverage_check_kinds=args.coverage_check_kinds,
             debug=args.log_level == "debug", out=out, err=err,
         )
     except ImportInterrupted:
@@ -254,11 +237,8 @@ def run_cycle(*, args: argparse.Namespace, by_kind: dict, out=print, err=_err) -
         base_delay=args.http_retry_base_delay, deadline_at=started + args.upload_deadline,
     )
     try:
-        rc = run_upload_plan(
-            client, import_id=import_id, cluster=args.cluster_name, bundles=bundles,
-            importer={"version": IMPORTER_VERSION, "relevance_filter": args.relevance_filter},
-            out=out, err=err,
-        )
+        rc = run_upload_plan(client, import_id=import_id, cluster=args.cluster_name, bundles=bundles,
+                             out=out, err=err)
     finally:
         for meta in bundles:
             meta.unlink()

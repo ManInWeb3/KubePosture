@@ -67,19 +67,13 @@ def _auth(token: str) -> dict:
 
 
 def _bundle_bytes(*, cluster: str, import_id: str, kind: str, items: list[dict],
-                  complete_snapshot: bool = False, coverage: dict | None = None) -> bytes:
-    return build_ndjson(
-        items, cluster=cluster, import_id=import_id, kind=kind,
-        complete_snapshot=complete_snapshot, coverage=coverage,
-    )
+                  coverage: dict | None = None) -> bytes:
+    return build_ndjson(items, cluster=cluster, import_id=import_id, kind=kind, coverage=coverage)
 
 
 def _upload_bundle(client, token, *, cluster: str, import_id: str, kind: str, items: list[dict],
-                   complete_snapshot: bool = False, coverage: dict | None = None, expect: int = 201):
-    raw = _bundle_bytes(
-        cluster=cluster, import_id=import_id, kind=kind, items=items,
-        complete_snapshot=complete_snapshot, coverage=coverage,
-    )
+                   coverage: dict | None = None, expect: int = 201):
+    raw = _bundle_bytes(cluster=cluster, import_id=import_id, kind=kind, items=items, coverage=coverage)
     resp = client.post(
         f"/api/v1/imports/{import_id}/bundles/{kind}/",
         data=gzip.compress(raw),
@@ -120,16 +114,15 @@ def _drain():
     return drain_until_empty(limit=100)
 
 
-def _envelope(cluster: str, items: list[dict], *, complete: bool = True) -> dict:
-    return {"cluster_meta": {"name": cluster}, "complete_snapshot": complete, "items": items}
+def _envelope(cluster: str, items: list[dict]) -> dict:
+    return {"cluster_meta": {"name": cluster}, "items": items}
 
 
-def _run_inventory_cycle(client, token, *, cluster: str, import_id: str, items: list[dict],
-                          complete: bool = True):
+def _run_inventory_cycle(client, token, *, cluster: str, import_id: str, items: list[dict]):
     """One full inventory cycle through the real views, then drain."""
     _upload_bundle(
         client, token, cluster=cluster, import_id=import_id, kind="inventory",
-        items=[_envelope(cluster, items, complete=complete)], complete_snapshot=complete,
+        items=[_envelope(cluster, items)],
     )
     _commit(client, token, cluster=cluster, import_id=import_id, kinds={"inventory": 1})
     return _drain()
@@ -140,7 +133,7 @@ def _run_cycle(client, token, *, cluster: str, import_id: str, inv_items: list[d
     """Inventory + any number of scan kinds, one commit, then drain."""
     _upload_bundle(
         client, token, cluster=cluster, import_id=import_id, kind="inventory",
-        items=[_envelope(cluster, inv_items)], complete_snapshot=True,
+        items=[_envelope(cluster, inv_items)],
     )
     kinds = {"inventory": 1}
     for kind, items in scans.items():
@@ -348,7 +341,7 @@ def test_workload_absent_from_next_complete_cycle_becomes_undeployed(client, tok
     # Cycle 2: the Deployment is gone entirely (deleted from the cluster).
     _run_inventory_cycle(
         client, token, cluster="e2e-c2", import_id="imp-2",
-        items=[_ns_manifest("ns")], complete=True,
+        items=[_ns_manifest("ns")],
     )
 
     wl = Workload.objects.get(cluster__name="e2e-c2", name="api")
@@ -432,7 +425,7 @@ def test_vulnerability_report_resolves_to_deployment_via_replicaset_alias(client
     )
     _upload_bundle(client, token, cluster="e2e-c5", import_id="imp-1", kind=VULN, items=[vuln_payload])
     _upload_bundle(client, token, cluster="e2e-c5", import_id="imp-1", kind="inventory",
-                   items=[_envelope("e2e-c5", inv_items)], complete_snapshot=True)
+                   items=[_envelope("e2e-c5", inv_items)])
     _commit(client, token, cluster="e2e-c5", import_id="imp-1", kinds={"inventory": 1, VULN: 1})
     _drain()
 
@@ -624,7 +617,7 @@ def test_abort_leaves_no_rows_or_marks_and_next_import_works(client, token):
     digest = "sha256:" + "7" * 64
     inv_items = [_ns_manifest("ns"), *_deployment_replicaset_pod("api", "ns", digest=digest)]
     _upload_bundle(client, token, cluster="e2e-ci", import_id="imp-1", kind="inventory",
-                   items=[_envelope("e2e-ci", inv_items)], complete_snapshot=True)
+                   items=[_envelope("e2e-ci", inv_items)])
     _upload_bundle(client, token, cluster="e2e-ci", import_id="imp-1", kind=VULN, items=[
         _vuln_report(namespace="ns", workload_kind="ReplicaSet", workload_name="api-7d9f5b6c8d",
                      image_digest=digest, vulns=[_vuln("CVE-2024-9")]),
@@ -651,10 +644,10 @@ def test_reupload_after_lost_response_is_idempotent_end_to_end(client, token):
     inv_items = [_ns_manifest("ns"), *_deployment_replicaset_pod("api", "ns")]
     envelope = [_envelope("e2e-cj", inv_items)]
     _upload_bundle(client, token, cluster="e2e-cj", import_id="imp-1", kind="inventory",
-                   items=envelope, complete_snapshot=True, expect=201)
+                   items=envelope, expect=201)
     # The importer never saw the 201 and retries the identical bytes.
     resp = _upload_bundle(client, token, cluster="e2e-cj", import_id="imp-1", kind="inventory",
-                          items=envelope, complete_snapshot=True, expect=200)
+                          items=envelope, expect=200)
     assert resp.json()["status"] == "already_uploaded"
 
     _commit(client, token, cluster="e2e-cj", import_id="imp-1", kinds={"inventory": 1})
@@ -708,7 +701,7 @@ def test_queue_empty_after_reap_with_failures_recorded_on_the_mark(client, token
 def test_uncommitted_import_is_never_processed_and_is_discarded_by_safety_net(client, token):
     inv_items = [_ns_manifest("ns"), *_deployment_replicaset_pod("api", "ns")]
     _upload_bundle(client, token, cluster="e2e-cl", import_id="imp-1", kind="inventory",
-                   items=[_envelope("e2e-cl", inv_items)], complete_snapshot=True)
+                   items=[_envelope("e2e-cl", inv_items)])
     _upload_bundle(client, token, cluster="e2e-cl", import_id="imp-1", kind=VULN, items=[])
 
     assert _drain()["claimed"] == 0, "open marks are not claimable"

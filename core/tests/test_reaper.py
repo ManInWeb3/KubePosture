@@ -95,10 +95,10 @@ def _mark(
 
 
 def _row(mark: ImportMark, *, status: str = IngestQueueStatus.DONE.value,
-         error: str = "", complete_snapshot: bool = False, kind: str | None = None) -> IngestQueue:
+         error: str = "", kind: str | None = None) -> IngestQueue:
     return IngestQueue.objects.create(
         cluster_name=mark.cluster.name, kind=kind or mark.kind, import_id=mark.import_id,
-        raw_json={}, status=status, error_message=error, complete_snapshot=complete_snapshot,
+        raw_json={}, status=status, error_message=error,
     )
 
 
@@ -209,17 +209,17 @@ def test_reap_scan_two_threads_only_one_applies():
 
 @pytest.mark.django_db
 def test_maybe_reap_dispatches_to_inventory_path_for_inventory_kind():
-    """An inventory-kind mark routes through `_reap_inventory`. The
-    payload had no `complete_snapshot=true` so the consecutive
-    counter bumps, the mark still reaches REAPED, and the row is gone."""
+    """An inventory-kind mark routes through `_reap_inventory`: the
+    cluster anchor advances to the mark's started_at (every committed
+    inventory is a complete snapshot), the mark reaches REAPED, and the
+    row is gone."""
     c = _cluster()
     mark = _mark(c, kind="inventory", import_id="imp-inv")
-    _row(mark, complete_snapshot=False)
+    _row(mark)
     result = maybe_reap(mark)
     assert result is not None
-    assert result.get("complete_snapshot") is False
     c.refresh_from_db()
-    assert c.consecutive_incomplete_inventories == 1
+    assert c.last_complete_inventory_at == mark.started_at
     mark.refresh_from_db()
     assert mark.state == ImportMarkState.REAPED.value
     assert _rows(mark) == 0
@@ -241,7 +241,7 @@ def test_reap_inventory_skips_diff_when_superseded_by_newer_cycle():
         c, kind="inventory", import_id="imp-stale",
         started_at=newer_reap_time - timedelta(minutes=10),
     )
-    _row(stale_mark, complete_snapshot=True)
+    _row(stale_mark)
 
     result = maybe_reap(stale_mark)
 
@@ -295,14 +295,14 @@ def test_reap_keeps_failed_rows_under_debug_flag():
 
 
 @pytest.mark.django_db
-def test_reap_inventory_reads_complete_snapshot_before_deleting_rows():
+def test_reap_inventory_advances_anchor_then_deletes_rows():
     c = _cluster()
     mark = _mark(c, kind="inventory", import_id="imp-c")
-    _row(mark, complete_snapshot=True)
+    _row(mark)
 
     result = maybe_reap(mark)
 
-    assert result["complete_snapshot"] is True
+    assert result is not None
     c.refresh_from_db()
     assert c.last_complete_inventory_at == mark.started_at
     assert _rows(mark) == 0
@@ -704,7 +704,7 @@ def test_reap_stuck_open_discards_rows_and_all_marks_of_the_import():
                 observed_count=None, started_at=_stale())
     vuln = _mark(c, kind="trivy.VulnerabilityReport", import_id="imp-stuck",
                  state=ImportMarkState.OPEN.value, observed_count=None, started_at=_stale())
-    _row(inv, status=IngestQueueStatus.PENDING.value, complete_snapshot=True)
+    _row(inv, status=IngestQueueStatus.PENDING.value)
     _row(vuln, status=IngestQueueStatus.PENDING.value)
     _row(vuln, status=IngestQueueStatus.PENDING.value)
     other = _mark(c, kind="inventory", import_id="imp-other", state=ImportMarkState.OPEN.value,
@@ -725,7 +725,6 @@ def test_reap_stuck_open_discards_rows_and_all_marks_of_the_import():
     assert other.state == ImportMarkState.OPEN.value and _rows(other) == 1
     c.refresh_from_db()
     assert c.last_complete_inventory_at is None
-    assert c.consecutive_incomplete_inventories == 0
 
 
 @pytest.mark.django_db
@@ -863,12 +862,10 @@ def test_inventory_reap_scaled_to_zero_image_not_currently_deployed():
     )
     _bump(obs, last_seen_at=mark.started_at + timedelta(seconds=1))
 
-    # Complete-snapshot payload so the reap runs the deployed diff + mirror.
-    _row(mark, complete_snapshot=True)
+    _row(mark)
 
     result = maybe_reap(mark)
     assert result is not None
-    assert result.get("complete_snapshot") is True
 
     w.refresh_from_db()
     obs.refresh_from_db()

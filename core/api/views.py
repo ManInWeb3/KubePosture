@@ -51,12 +51,12 @@ from core.models import Cluster, ImportMark
 # than this is treated as abandoned (crashed importer), not actively
 # running, so the next on-demand trigger tick can start a fresh import.
 # Configurable via the IMPORT_LOCK_TIMEOUT_SECONDS env var (chart value
-# app.env). Must be >= the importer Job's activeDeadlineSeconds (1800s in
+# app.env). Must be >= the importer Job's activeDeadlineSeconds (900s in
 # deploy/charts/kubeposture-import) so a slow-but-alive import is never
-# raced by a second one, and < reaper.STUCK_OPEN_TIMEOUT_SECONDS (3600s)
+# raced by a second one, and < reaper.STUCK_OPEN_TIMEOUT_SECONDS (1800s)
 # so an abandoned import stops gating new ones before it is discarded.
 IMPORT_LOCK_TIMEOUT = timedelta(
-    seconds=int(os.environ.get("IMPORT_LOCK_TIMEOUT_SECONDS", "2700"))
+    seconds=int(os.environ.get("IMPORT_LOCK_TIMEOUT_SECONDS", "1200"))
 )
 
 

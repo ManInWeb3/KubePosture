@@ -42,7 +42,6 @@ class ClusterSerializer(serializers.ModelSerializer):
             "region",
             "region_is_manual",
             "k8s_version",
-            "consecutive_incomplete_inventories",
             "last_complete_inventory_at",
             "created_at",
             "last_seen_at",

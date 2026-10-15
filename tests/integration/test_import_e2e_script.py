@@ -184,7 +184,7 @@ def test_upload_failure_mid_way_aborts_and_leaves_nothing(live_server, token, ca
 def test_commit_with_wrong_count_is_rejected_then_corrected(live_server, token, scratch):
     client = HttpClient(live_server.url, token, timeout=30)
     with BundleWriter(cluster="e2e-count", import_id="IMPCOUNT0000000000000000001", kind="inventory",
-                      tmp_dir=scratch, complete_snapshot=True) as w:
+                      tmp_dir=scratch) as w:
         w.write_inventory_envelope({"name": "e2e-count"}, [])
         meta = w.finish()
     upload_bundle(client, import_id="IMPCOUNT0000000000000000001", meta=meta)
@@ -200,7 +200,7 @@ def test_commit_with_wrong_count_is_rejected_then_corrected(live_server, token, 
 def test_uncommitted_import_is_discarded_by_the_safety_net(live_server, token, scratch):
     client = HttpClient(live_server.url, token, timeout=30)
     with BundleWriter(cluster="e2e-stuck", import_id="IMPSTUCK0000000000000000001", kind="inventory",
-                      tmp_dir=scratch, complete_snapshot=True) as w:
+                      tmp_dir=scratch) as w:
         w.write_inventory_envelope({"name": "e2e-stuck"}, [])
         meta = w.finish()
     upload_bundle(client, import_id="IMPSTUCK0000000000000000001", meta=meta)

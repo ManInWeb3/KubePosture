@@ -7,8 +7,7 @@ metadata:
 rules:
   # Cluster-metadata auto-detect — feeds /api/v1/cluster-metadata/sync/.
   # Without these the script can't discover K8s version, provider/region,
-  # or per-namespace internet exposure (Services LB/NodePort + Ingresses),
-  # and complete_snapshot stays False (deactivation sweep is skipped).
+  # or per-namespace internet exposure (Services LB/NodePort + Ingresses).
   - apiGroups: [""]
     resources:
       - namespaces

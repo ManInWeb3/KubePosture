@@ -27,7 +27,7 @@ app:
     # DATA_UPLOAD_MAX_MEMORY_SIZE — bound a bundle. A cycle is ~20 MB
     # uncompressed / ~2 MB gzipped today; defaults leave wide headroom.
     IMPORT_BUNDLE_MAX_COMPRESSED_BYTES: "67108864"      # 64 MiB
-    IMPORT_BUNDLE_MAX_UNCOMPRESSED_BYTES: "536870912"   # 512 MiB
+    IMPORT_BUNDLE_MAX_UNCOMPRESSED_BYTES: "134217728"   # 128 MiB — one bundle is one transaction
     IMPORT_BUNDLE_MAX_ITEMS: "50000"
     IMPORT_BUNDLE_MAX_LINE_BYTES: "33554432"            # 32 MiB — the inventory envelope is one line
     # commit logs `import.coverage_low` at ERROR when the importer-reported
@@ -57,11 +57,11 @@ app:
     # TTL for the in-flight-import "lock". An open/draining ImportMark
     # older than this is treated as abandoned (crashed importer) and
     # stops blocking new on-demand imports. Must be >= the importer
-    # Job's activeDeadlineSeconds (1800 in kubeposture-import) so a
+    # Job's activeDeadlineSeconds (900 in kubeposture-import) so a
     # slow-but-alive import is never raced by a second one, and < the
-    # reaper's STUCK_OPEN_TIMEOUT_SECONDS (3600) so an abandoned import
+    # reaper's STUCK_OPEN_TIMEOUT_SECONDS (1800) so an abandoned import
     # stops gating new ones before it is discarded.
-    IMPORT_LOCK_TIMEOUT_SECONDS: "2700"
+    IMPORT_LOCK_TIMEOUT_SECONDS: "1200"
 
 # Compliance framework loading is not implemented in this milestone.
 # The fixtures/ directory holds sample YAMLs but no `load_frameworks`
@@ -411,6 +411,12 @@ monitoring:
 
 podAnnotations: {}
 podLabels: {}
+
+# -- Scratch space (/tmp) for every pod: bundle spooling on the web pods,
+# downloaded feeds in the enrichment jobs. Disk-backed emptyDir; the
+# limit evicts a runaway pod instead of filling the node's disk.
+tmp:
+  sizeLimit: 1Gi
 
 nodeSelector: {}
 tolerations: []

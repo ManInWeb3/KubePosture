@@ -28,7 +28,7 @@ ITEM = {
     "apiVersion": "aquasecurity.github.io/v1alpha1", "kind": "VulnerabilityReport",
     "metadata": {"name": "x"}, "report": {"vulnerabilities": []},
 }
-ENVELOPE = {"cluster_meta": {"name": "c-bundle"}, "complete_snapshot": True, "items": []}
+ENVELOPE = {"cluster_meta": {"name": "c-bundle"}, "items": []}
 
 
 @pytest.fixture
@@ -109,28 +109,6 @@ def test_store_bundle_persists_coverage_and_extra_manifest_fields(cluster):
     assert mark.bundle_manifest == {
         "importer_version": "2.0.0", "relevance_filter": True, "filter": {"total": 5, "kept": 1},
     }
-
-
-@pytest.mark.django_db
-def test_inventory_complete_snapshot_from_manifest_or_payload(cluster):
-    raw = _raw("imp-1", INV, [{**ENVELOPE, "complete_snapshot": False}], complete_snapshot=True)
-    _store(cluster, raw, import_id="imp-1", kind=INV)
-    assert IngestQueue.objects.get(import_id="imp-1").complete_snapshot is True
-
-    raw = _raw("imp-2", INV, [{**ENVELOPE, "complete_snapshot": True}], complete_snapshot=False)
-    _store(cluster, raw, import_id="imp-2", kind=INV)
-    assert IngestQueue.objects.get(import_id="imp-2").complete_snapshot is True
-
-    raw = _raw("imp-3", INV, [{**ENVELOPE, "complete_snapshot": False}], complete_snapshot=False)
-    _store(cluster, raw, import_id="imp-3", kind=INV)
-    assert IngestQueue.objects.get(import_id="imp-3").complete_snapshot is False
-
-
-@pytest.mark.django_db
-def test_complete_snapshot_only_applies_to_inventory_kind(cluster):
-    raw = _raw("imp-1", VULN, [ITEM], complete_snapshot=True)
-    _store(cluster, raw, import_id="imp-1", kind=VULN)
-    assert IngestQueue.objects.get(import_id="imp-1").complete_snapshot is False
 
 
 @pytest.mark.django_db
@@ -235,10 +213,9 @@ def test_corrupt_and_truncated_gzip_rejected():
 
 
 def test_identity_encoding_and_manifest_parsing():
-    raw = _raw("imp-1", VULN, [ITEM], with_item_hashes=True)
+    raw = _raw("imp-1", VULN, [ITEM])
     with _spool(raw, gz=False) as sp:
         assert sp.manifest.count == 1
-        assert sp.manifest.item_sha256 is not None
         assert sp.compressed_bytes == sp.uncompressed_bytes == len(raw)
         bi.verify_bundle(sp, limits=LIMITS)
 
@@ -252,18 +229,15 @@ def test_missing_or_bad_manifest_rejected():
     assert _err(_spool, _tamper(base, sha256="xyz")).detail["field"] == "sha256"
     assert _err(_spool, _tamper(base, cluster="")).detail["field"] == "cluster"
     assert _err(_spool, _tamper(base, coverage="no")).detail["field"] == "coverage"
-    assert _err(_spool, _tamper(base, item_sha256=["a" * 64, "b" * 64])).detail["field"] == "item_sha256"
 
 
-def test_item_sha256_verified_when_present():
-    raw = _raw("imp-1", VULN, [ITEM, {**ITEM, "metadata": {"name": "y"}}], with_item_hashes=True)
-    with _spool(raw) as sp:
-        bi.verify_bundle(sp, limits=LIMITS)
-    head = json.loads(raw.partition(b"\n")[0])["manifest"]
-    bad = _tamper(raw, item_sha256=[head["item_sha256"][0], "f" * 64])
-    with _spool(bad) as sp:
-        err = _err(bi.verify_bundle, sp, limits=LIMITS)
-    assert (err.code, err.detail["line"]) == ("item_sha256_mismatch", 2)
+@pytest.mark.django_db
+def test_legacy_manifest_keys_are_ignored_not_stored(cluster):
+    """An older importer may still send complete_snapshot / item_sha256;
+    they are accepted and dropped, never persisted in bundle_manifest."""
+    raw = _tamper(_raw("imp-1", VULN, [ITEM]), complete_snapshot=True, item_sha256=["a" * 64])
+    mark = _store(cluster, raw, import_id="imp-1", kind=VULN).mark
+    assert mark.bundle_manifest == {}
 
 
 def test_check_manifest_path_mismatch_and_unknown_kind():
@@ -439,12 +413,9 @@ def test_abort_rejected_once_committed_and_unknown_is_not_found(cluster):
 
 @pytest.mark.django_db
 def test_store_items_round_trips_through_the_same_path(cluster):
-    result = bi.store_items(
-        cluster=cluster, import_id="imp-1", kind=INV, items=[ENVELOPE], complete_snapshot=True,
-    )
+    result = bi.store_items(cluster=cluster, import_id="imp-1", kind=INV, items=[ENVELOPE])
     assert result.created and result.rows_inserted == 1
-    row = IngestQueue.objects.get(import_id="imp-1")
-    assert row.raw_json == ENVELOPE and row.complete_snapshot is True
+    assert IngestQueue.objects.get(import_id="imp-1").raw_json == ENVELOPE
     with pytest.raises(BundleError) as excinfo:
         bi.store_items(cluster=cluster, import_id="imp-1", kind="nope", items=[])
     assert excinfo.value.code == "unknown_kind"

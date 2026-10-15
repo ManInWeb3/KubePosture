@@ -33,12 +33,12 @@ def test_scan_bundle_bytes_match(tmp_path):
 
 
 def test_inventory_envelope_bytes_match(tmp_path):
-    with BundleWriter(cluster="c", import_id="imp-1", kind="inventory", tmp_dir=tmp_path, complete_snapshot=True) as w:
+    with BundleWriter(cluster="c", import_id="imp-1", kind="inventory", tmp_dir=tmp_path) as w:
         w.write_inventory_envelope(META, iter(ITEMS))
         meta = w.finish(extra={"importer_version": "2.0.0", "relevance_filter": True})
-    envelope = {"cluster_meta": META, "complete_snapshot": True, "items": ITEMS}
+    envelope = {"cluster_meta": META, "items": ITEMS}
     expected = build_ndjson(
-        [envelope], cluster="c", import_id="imp-1", kind="inventory", complete_snapshot=True,
+        [envelope], cluster="c", import_id="imp-1", kind="inventory",
         extra={"importer_version": "2.0.0", "relevance_filter": True},
     )
     assert gzip.decompress(meta.path.read_bytes()) == expected

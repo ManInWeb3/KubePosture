@@ -31,16 +31,17 @@ initialRun: true
 # -- CronJob schedule (default: every 6 hours)
 schedule: "0 */6 * * *"
 
-# -- Maximum run time for the import job. Must stay <= the central's
-# IMPORT_LOCK_TIMEOUT_SECONDS (2700) so a slow-but-alive import is never
+# -- Maximum run time for the import job. A cycle is ~10 requests and
+# normally finishes in seconds. Must stay <= the central's
+# IMPORT_LOCK_TIMEOUT_SECONDS (1200) so a slow-but-alive import is never
 # raced by a second one.
-activeDeadlineSeconds: 1800
+activeDeadlineSeconds: 900
 
 # -- Wall-clock budget for uploads + commit inside one run. Past it the
 # importer stops retrying and aborts the import server-side, so a clean
 # abort always lands before Kubernetes SIGKILLs the pod at
 # activeDeadlineSeconds. Must be < activeDeadlineSeconds.
-uploadDeadlineSeconds: 1500
+uploadDeadlineSeconds: 600
 
 # -- Relevance filter: drop scan reports for images that are not
 # currently running (Trivy keeps a report for every historical
@@ -50,13 +51,12 @@ uploadDeadlineSeconds: 1500
 # (coverage ratio unexpectedly low) — no central change needed.
 relevanceFilter: true
 
-# -- Scan-coverage check (record + alert, never aborts the import).
+# -- Scan-coverage check (record + alert, never aborts the import): the
+# ratio (matched / expected) below which the importer prints a WARNING
+# and the central logs `import.coverage_low`. Kyverno coverage is always
+# informational.
 coverage:
-  # Ratio (matched / expected) below which the importer prints a WARNING
-  # and the central logs `import.coverage_low`.
   minRatio: 0.9
-  # Kinds to report informationally only, e.g. ["trivy.ExposedSecretReport"].
-  ignoreKinds: []
 
 # -- Importer log verbosity: info | debug (debug lists unmatched digests
 # and every deployed digest with its source — useful once, noisy always).
@@ -102,7 +102,7 @@ trigger:
   # Same deadline as the main job: idle ticks complete in seconds, but
   # when a real import fires it runs the same code path and needs the
   # same budget.
-  activeDeadlineSeconds: 1800
+  activeDeadlineSeconds: 900
 
 # -- Image containing the import script + kubernetes Python client
 image:

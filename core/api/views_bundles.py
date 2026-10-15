@@ -9,7 +9,7 @@ comes from the manifest / body and is auto-registered.
         → 201 stored | 200 already_uploaded | 4xx (see BundleError codes)
 
   POST /api/v1/imports/<import_id>/commit/
-        body: {cluster, kinds: [{kind, count}, ...], importer?: {...}}
+        body: {cluster, kinds: [{kind, count}, ...]}
         → 200 committed | 200 already_committed | 404 | 409
 
   POST /api/v1/imports/<import_id>/abort/
