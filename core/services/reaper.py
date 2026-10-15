@@ -33,11 +33,12 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import defaultdict
 from datetime import timedelta
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import F, Q
 from django.utils import timezone
 
 from core.constants import (
@@ -71,9 +72,9 @@ from core.services.queue import (
     transition_mark_to_reaped,
 )
 from core.services.snapshot import (
-    _priority_counts,
-    _severity_counts,
     capture_cluster_heartbeat,
+    grouped_counts,
+    snapshot_row,
 )
 from core.signals import SIGNALS
 from core.urgency import finding_ids, recompute_ids
@@ -254,74 +255,96 @@ def _reap_inventory_body(mark: ImportMark) -> dict:
     return counters
 
 
-def _write_event_path_workload_snapshots(cluster: Cluster, mark: ImportMark) -> None:
+def _classify_image_set_change(current: set[str], previous: set[str]) -> str:
+    added = current - previous
+    removed = previous - current
+    if added and not removed:
+        return ImageSetChangeKind.ADDED.value
+    if removed and not added:
+        return ImageSetChangeKind.REMOVED.value
+    if len(added) == 1 and len(removed) == 1:
+        return ImageSetChangeKind.REPLACED.value
+    return ImageSetChangeKind.MIXED.value
+
+
+def _write_event_path_workload_snapshots(cluster: Cluster, mark: ImportMark) -> int:
     """For each deployed workload, write a Snapshot iff its image-set
-    changed since the previous snapshot for that workload.
+    changed since the previous snapshot for that workload. Returns the
+    number of rows written.
 
     `current_set` is built from observations marked currently_deployed
     by the reaper's flag diff above — stale rows from prior cycles are
     excluded so they don't contaminate the current image set.
+
+    Set-based: the deployed workloads, their current digest sets, their
+    latest populated snapshot (DISTINCT ON) and the grouped finding
+    counts of the changed ones are each one query, then one bulk insert
+    — this runs inside the reap transaction under the mark lock, so its
+    cost must not grow with the cluster.
     """
-    for wl in cluster.workloads.filter(deployed=True).iterator():
-        current_set = sorted({
-            obs.image.digest
-            for obs in wl.image_observations.select_related("image").filter(
-                currently_deployed=True,
-            )
-        })
-        # Compare against the most recent snapshot whose digest set is
-        # populated. Daily-heartbeat rows (change_kind=none) without
-        # an explicit image_digest_set must not break the diff.
-        previous = (
-            wl.snapshots
-            .exclude(image_digest_set=[])
-            .order_by("-captured_at")
-            .first()
-        )
-        previous_set = sorted(previous.image_digest_set) if previous else None
+    deployed = dict(cluster.workloads.filter(deployed=True).values_list("id", "namespace_id"))
+    if not deployed:
+        return 0
 
-        if previous is None:
-            change_kind = ImageSetChangeKind.FIRST_SEEN.value
-            changed = False
-        elif current_set == previous_set:
-            continue  # No change — daily heartbeat handles continuity.
-        else:
-            cur_s = set(current_set)
-            prev_s = set(previous_set or [])
-            added = cur_s - prev_s
-            removed = prev_s - cur_s
-            if added and not removed:
-                change_kind = ImageSetChangeKind.ADDED.value
-            elif removed and not added:
-                change_kind = ImageSetChangeKind.REMOVED.value
-            elif len(added) == 1 and len(removed) == 1:
-                change_kind = ImageSetChangeKind.REPLACED.value
-            else:
-                change_kind = ImageSetChangeKind.MIXED.value
-            changed = True
+    current: dict[int, set[str]] = defaultdict(set)
+    for workload_id, digest in WorkloadImageObservation.objects.filter(
+        workload__cluster=cluster, workload__deployed=True, currently_deployed=True,
+    ).values_list("workload_id", "image__digest"):
+        current[workload_id].add(digest)
 
-        # Scope to findings on currently-deployed images (or image-less
-        # workload-level findings). Without this, the snapshot captures
-        # findings tied to the just-rolled-out image — Trivy can hold a
-        # stale VulnerabilityReport CRD past Pod deletion, and the
-        # ingest path bumps `last_seen` past `last_complete_inventory_at`,
-        # so `default_finding_qs` alone wouldn't filter them out.
-        wf = restrict_to_currently_deployed_images(
-            default_finding_qs(cluster=cluster).filter(workload=wl)
-        )
-        Snapshot.objects.create(
-            scope_kind=SnapshotScope.WORKLOAD.value,
+    # Newest snapshot per workload whose digest set is populated.
+    # Daily-heartbeat rows (change_kind=none) without an explicit
+    # image_digest_set must not break the diff.
+    previous = dict(
+        Snapshot.objects
+        .filter(workload__cluster=cluster, workload__deployed=True)
+        .exclude(image_digest_set=[])
+        .order_by("workload_id", "-captured_at", "-id")
+        .distinct("workload_id")
+        .values_list("workload_id", "image_digest_set")
+    )
+
+    pending: dict[int, tuple[list[str], str, bool]] = {}
+    for workload_id in deployed:
+        current_set = current.get(workload_id, set())
+        previous_set = previous.get(workload_id)
+        if previous_set is None:
+            pending[workload_id] = (sorted(current_set), ImageSetChangeKind.FIRST_SEEN.value, False)
+        elif current_set != set(previous_set):
+            kind = _classify_image_set_change(current_set, set(previous_set))
+            pending[workload_id] = (sorted(current_set), kind, True)
+        # else: no change — the daily heartbeat handles continuity.
+    if not pending:
+        return 0
+
+    # Scope to findings on currently-deployed images (or image-less
+    # workload-level findings). Without this, the snapshot captures
+    # findings tied to the just-rolled-out image — Trivy can hold a
+    # stale VulnerabilityReport CRD past Pod deletion, and the ingest
+    # path bumps `last_seen` past `last_complete_inventory_at`, so
+    # `default_finding_qs` alone wouldn't filter them out.
+    severity, priority = grouped_counts(
+        restrict_to_currently_deployed_images(
+            default_finding_qs(cluster=cluster).filter(workload_id__in=list(pending)),
+        ),
+        "workload_id",
+    )
+    Snapshot.objects.bulk_create([
+        snapshot_row(
+            SnapshotScope.WORKLOAD.value,
             cluster=cluster,
-            namespace=wl.namespace,
-            workload=wl,
-            severity_counts=_severity_counts(wf),
-            priority_counts=_priority_counts(wf),
-            total_active=wf.count(),
+            namespace_id=deployed[workload_id],
+            workload_id=workload_id,
+            severity_counts=severity.get(workload_id, {}),
+            priority_counts=priority.get(workload_id, {}),
             import_id=mark.import_id,
-            image_digest_set=current_set,
+            image_digest_set=digest_set,
             image_set_changed_from_previous=changed,
-            change_kind=change_kind,
+            change_kind=kind,
         )
+        for workload_id, (digest_set, kind, changed) in pending.items()
+    ])
+    return len(pending)
 
 
 # ── Scan-kind reap (zero-input gate) ------------------------------
@@ -430,34 +453,45 @@ def _write_scan_inconsistencies_for_outage(cluster: Cluster, mark: ImportMark) -
     """One ScanInconsistency row per currently-observed (workload, image)
     pair when a per-image scanner kind reports zero items. Lets Scan
     Health surface a coverage gap for the outage.
+
+    Pairs are deduplicated first: two containers of one workload running
+    the same image are two observation rows but one row here (the unique
+    key is `(cluster, kind, workload, image_digest)`). Known pairs get
+    `consecutive_cycles` bumped in one UPDATE, new ones one bulk insert.
     """
-    obs_qs = (
+    pairs = set(
         WorkloadImageObservation.objects
         .filter(workload__cluster=cluster, workload__deployed=True)
-        .select_related("workload", "image")
+        .values_list("workload_id", "image__digest")
     )
-    for obs in obs_qs:
-        existing = ScanInconsistency.objects.filter(
+    if not pairs:
+        return
+    known = {
+        (workload_id, digest): row_id
+        for row_id, workload_id, digest in ScanInconsistency.objects.filter(
+            cluster=cluster, kind=mark.kind, workload_id__in={w for w, _ in pairs},
+        ).values_list("id", "workload_id", "image_digest")
+        if (workload_id, digest) in pairs
+    }
+    if known:
+        ScanInconsistency.objects.filter(id__in=list(known.values())).update(
+            consecutive_cycles=F("consecutive_cycles") + 1,
+            seen_in_inventory=True,
+            seen_in_scans=False,
+            last_observed_at=timezone.now(),
+        )
+    ScanInconsistency.objects.bulk_create([
+        ScanInconsistency(
             cluster=cluster,
             kind=mark.kind,
-            workload=obs.workload,
-            image_digest=obs.image.digest,
-        ).first()
-        if existing:
-            existing.consecutive_cycles = (existing.consecutive_cycles or 0) + 1
-            existing.seen_in_inventory = True
-            existing.seen_in_scans = False
-            existing.save(update_fields=["consecutive_cycles", "seen_in_inventory", "seen_in_scans", "last_observed_at"])
-        else:
-            ScanInconsistency.objects.create(
-                cluster=cluster,
-                kind=mark.kind,
-                workload=obs.workload,
-                image_digest=obs.image.digest,
-                seen_in_inventory=True,
-                seen_in_scans=False,
-                consecutive_cycles=1,
-            )
+            workload_id=workload_id,
+            image_digest=digest,
+            seen_in_inventory=True,
+            seen_in_scans=False,
+            consecutive_cycles=1,
+        )
+        for workload_id, digest in sorted(pairs - known.keys())
+    ])
 
 
 def _signal_ids_for_kind(kind: str) -> set[str]:

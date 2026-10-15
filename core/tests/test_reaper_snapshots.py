@@ -8,11 +8,14 @@ from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from core.constants import Environment, ImageSetChangeKind, ImportMarkState, SnapshotScope
 from core.models import (
     Cluster,
+    Finding,
     Image,
     ImportMark,
     IngestQueue,
@@ -21,8 +24,13 @@ from core.models import (
     Workload,
     WorkloadImageObservation,
 )
-from core.services.reaper import _reap_inventory, maybe_reap, reap_all_drainable
-from core.services.snapshot import capture_daily_heartbeat
+from core.services.reaper import (
+    _reap_inventory,
+    _write_event_path_workload_snapshots,
+    maybe_reap,
+    reap_all_drainable,
+)
+from core.services.snapshot import capture_cluster_heartbeat, capture_daily_heartbeat
 
 
 def _cluster(name="c-snap"):
@@ -156,3 +164,199 @@ def test_inventory_reap_writes_nothing_when_the_image_set_is_unchanged():
         _reap_inventory(mark)
 
     assert Snapshot.objects.filter(workload=w).count() == before
+
+
+# ── set-based writers: correctness across many workloads, flat query cost ──
+
+
+def _finding(workload, *, severity, hash_code, image=None, cluster=None):
+    return Finding.objects.create(
+        cluster=cluster or workload.cluster, workload=workload, image=image, source="trivy",
+        category="vulnerability", vuln_id=hash_code, title="t", severity=severity, hash_code=hash_code,
+    )
+
+
+def _deployed_workload(cluster, ns, name, *, images, stale_images=(), deployed=True):
+    """A workload whose `images` are currently deployed and whose
+    `stale_images` are retained-but-undeployed observations."""
+    w = Workload.objects.create(cluster=cluster, namespace=ns, kind="Deployment", name=name, deployed=deployed)
+    for ch in images:
+        img, _ = Image.objects.get_or_create(digest=_digest(ch), defaults={"ref": f"img:{ch}"})
+        WorkloadImageObservation.objects.create(workload=w, image=img, container_name=ch, currently_deployed=True)
+    for ch in stale_images:
+        img, _ = Image.objects.get_or_create(digest=_digest(ch), defaults={"ref": f"img:{ch}"})
+        WorkloadImageObservation.objects.create(workload=w, image=img, container_name=ch, currently_deployed=False)
+    return w
+
+
+def _previous_snapshot(w, digests):
+    return Snapshot.objects.create(scope_kind=SnapshotScope.WORKLOAD.value, cluster=w.cluster, namespace=w.namespace,
+                                   workload=w, image_digest_set=[_digest(ch) for ch in digests],
+                                   change_kind=ImageSetChangeKind.FIRST_SEEN.value)
+
+
+def _inventory_mark(cluster, import_id="imp-set"):
+    return ImportMark.objects.create(cluster=cluster, kind="inventory", import_id=import_id,
+                                     state=ImportMarkState.DRAINING.value, started_at=timezone.now())
+
+
+def _n_queries(fn) -> int:
+    with CaptureQueriesContext(connection) as ctx:
+        fn()
+    return len(ctx.captured_queries)
+
+
+@pytest.mark.django_db
+def test_event_snapshots_cover_every_changed_workload_with_its_own_counts():
+    """One reap, four workloads: a first-seen one, an unchanged one, a
+    replaced one and an undeployed one. Rows are written only for the two
+    that changed, each carrying ITS findings (scoped to currently-deployed
+    images, image-less rows included) — not a neighbour's."""
+    c = _cluster()
+    ns = Namespace.objects.create(cluster=c, name="a")
+    mark = _inventory_mark(c)
+    first = _deployed_workload(c, ns, "first", images=["a"])
+    same = _deployed_workload(c, ns, "same", images=["b"])
+    replaced = _deployed_workload(c, ns, "replaced", images=["c"], stale_images=["b"])
+    gone = _deployed_workload(c, ns, "gone", images=["d"], deployed=False)
+    _previous_snapshot(same, ["b"])
+    _previous_snapshot(replaced, ["b"])
+    img_a, img_b, img_c = (Image.objects.get(digest=_digest(ch)) for ch in "abc")
+    _finding(first, severity="critical", hash_code="f1", image=img_a)
+    _finding(first, severity="high", hash_code="f2", image=img_a)
+    _finding(replaced, severity="high", hash_code="r1", image=img_c)
+    _finding(replaced, severity="medium", hash_code="r2", image=img_b)   # stale image: excluded
+    _finding(replaced, severity="low", hash_code="r3")                   # image-less: included
+    _finding(gone, severity="critical", hash_code="g1")
+
+    _write_event_path_workload_snapshots(c, mark)
+
+    rows = {s.workload_id: s for s in Snapshot.objects.filter(import_id="imp-set")}
+    assert set(rows) == {first.id, replaced.id}
+    assert rows[first.id].change_kind == ImageSetChangeKind.FIRST_SEEN.value
+    assert rows[first.id].severity_counts == {"critical": 1, "high": 1}
+    assert rows[first.id].priority_counts == {"scheduled": 2}
+    assert rows[first.id].total_active == 2
+    assert rows[first.id].image_digest_set == [_digest("a")]
+    assert rows[replaced.id].change_kind == ImageSetChangeKind.REPLACED.value
+    assert rows[replaced.id].image_set_changed_from_previous is True
+    assert rows[replaced.id].severity_counts == {"high": 1, "low": 1}
+    assert rows[replaced.id].total_active == 2
+    assert rows[replaced.id].image_digest_set == [_digest("c")]
+    assert rows[replaced.id].namespace_id == ns.id and rows[replaced.id].cluster_id == c.id
+
+
+@pytest.mark.django_db
+def test_event_snapshots_use_the_latest_populated_snapshot_per_workload():
+    """Several historical rows per workload: the diff is against the
+    newest one with a digest set; heartbeat rows (empty set) are skipped
+    even when they are newer."""
+    c = _cluster()
+    ns = Namespace.objects.create(cluster=c, name="a")
+    w = _deployed_workload(c, ns, "api", images=["b"])
+    old = _previous_snapshot(w, ["a"])
+    Snapshot.objects.filter(pk=old.pk).update(captured_at=timezone.now() - timedelta(days=2))
+    newer = _previous_snapshot(w, ["b"])
+    Snapshot.objects.filter(pk=newer.pk).update(captured_at=timezone.now() - timedelta(days=1))
+    Snapshot.objects.create(scope_kind=SnapshotScope.WORKLOAD.value, cluster=c, namespace=ns, workload=w,
+                            image_digest_set=[], change_kind=ImageSetChangeKind.NONE.value)
+
+    _write_event_path_workload_snapshots(c, _inventory_mark(c))
+
+    assert not Snapshot.objects.filter(import_id="imp-set").exists(), "newest populated row is [b] == current"
+
+
+@pytest.mark.django_db
+def test_event_snapshot_query_count_does_not_grow_with_workload_count():
+    def scene(name, n):
+        c = _cluster(name)
+        ns = Namespace.objects.create(cluster=c, name="a")
+        for i in range(n):
+            w = _deployed_workload(c, ns, f"w{i}", images=[chr(ord("a") + i)])
+            _previous_snapshot(w, ["z"])
+            _finding(w, severity="high", hash_code=f"{name}-{i}", image=Image.objects.get(digest=_digest(chr(ord("a") + i))))
+        return c, _inventory_mark(c)
+
+    small = scene("c-small", 2)
+    large = scene("c-large", 8)
+
+    n_small = _n_queries(lambda: _write_event_path_workload_snapshots(*small))
+    n_large = _n_queries(lambda: _write_event_path_workload_snapshots(*large))
+
+    assert Snapshot.objects.filter(cluster=large[0], import_id="imp-set").count() == 8
+    assert n_large == n_small, (n_small, n_large)
+
+
+@pytest.mark.django_db
+def test_daily_heartbeat_counts_every_scope_from_its_own_visible_findings():
+    """Two clusters. Scope rows: one global, one per cluster (including the
+    empty one), one per ACTIVE namespace, one per DEPLOYED workload. Cluster
+    and namespace rows count every visible finding; workload rows are
+    narrowed to currently-deployed images; cluster-scoped findings count
+    only at cluster and global level."""
+    a = _cluster("c-a")
+    ns = Namespace.objects.create(cluster=a, name="live")
+    inactive = Namespace.objects.create(cluster=a, name="old", active=False)
+    w1 = _deployed_workload(a, ns, "w1", images=["x"], stale_images=["y"])
+    w2 = _deployed_workload(a, inactive, "w2", images=["x"], deployed=False)
+    img_x, img_y = (Image.objects.get(digest=_digest(ch)) for ch in "xy")
+    _finding(w1, severity="critical", hash_code="1", image=img_x)
+    _finding(w1, severity="high", hash_code="2", image=img_y)      # stale image: visible, but not for the workload row
+    _finding(w1, severity="low", hash_code="3")                     # image-less
+    _finding(w2, severity="critical", hash_code="4")                # undeployed workload: invisible
+    _finding(None, severity="critical", hash_code="5", cluster=a)   # cluster-scoped
+    _cluster("c-b")
+
+    assert capture_daily_heartbeat() == 5
+
+    by_scope = {}
+    for s in Snapshot.objects.all():
+        by_scope.setdefault(s.scope_kind, []).append(s)
+    g = by_scope["global"][0]
+    assert (g.severity_counts, g.total_active) == ({"critical": 2, "high": 1, "low": 1}, 4)
+    clusters = {s.cluster.name: s for s in by_scope["cluster"]}
+    assert set(clusters) == {"c-a", "c-b"}
+    assert (clusters["c-a"].severity_counts, clusters["c-a"].total_active) == ({"critical": 2, "high": 1, "low": 1}, 4)
+    assert (clusters["c-b"].severity_counts, clusters["c-b"].priority_counts, clusters["c-b"].total_active) == ({}, {}, 0)
+    [n] = by_scope["namespace"]
+    assert n.namespace_id == ns.id and n.cluster_id == a.id
+    assert (n.severity_counts, n.total_active) == ({"critical": 1, "high": 1, "low": 1}, 3)
+    [wl] = by_scope["workload"]
+    assert wl.workload_id == w1.id and wl.namespace_id == ns.id and wl.cluster_id == a.id
+    assert (wl.severity_counts, wl.priority_counts, wl.total_active) == ({"critical": 1, "low": 1}, {"scheduled": 2}, 2)
+    assert wl.change_kind == ImageSetChangeKind.NONE.value and wl.image_digest_set == []
+
+
+@pytest.mark.django_db
+def test_daily_heartbeat_query_count_does_not_grow_with_fleet_size():
+    def grow(name, n_ns, n_wl):
+        c = _cluster(name)
+        for i in range(n_ns):
+            ns = Namespace.objects.create(cluster=c, name=f"ns{i}")
+            for j in range(n_wl):
+                w = _deployed_workload(c, ns, f"w{j}", images=["a"])
+                _finding(w, severity="high", hash_code=f"{name}-{i}-{j}", image=Image.objects.get(digest=_digest("a")))
+
+    grow("c-1", 1, 1)
+    n_small = _n_queries(capture_daily_heartbeat)
+    grow("c-2", 3, 3)
+    grow("c-3", 2, 2)
+    n_large = _n_queries(capture_daily_heartbeat)
+
+    assert n_large == n_small, (n_small, n_large)
+
+
+@pytest.mark.django_db
+def test_cluster_heartbeat_query_count_does_not_grow_with_namespace_count():
+    one = _cluster("c-one")
+    Namespace.objects.create(cluster=one, name="a")
+    many = _cluster("c-many")
+    for i in range(6):
+        Namespace.objects.create(cluster=many, name=f"ns{i}")
+    Namespace.objects.create(cluster=many, name="inactive", active=False)
+
+    n_one = _n_queries(lambda: capture_cluster_heartbeat(one))
+    n_many = _n_queries(lambda: capture_cluster_heartbeat(many))
+
+    assert Snapshot.objects.filter(cluster=many, scope_kind=SnapshotScope.NAMESPACE.value).count() == 6
+    assert n_many == n_one, (n_one, n_many)

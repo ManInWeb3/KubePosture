@@ -37,6 +37,7 @@ import pytest
 from django.core.management import call_command
 from django.db import connection, transaction
 from django.test import override_settings
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from core import urgency
@@ -64,6 +65,7 @@ from core.services.reaper import (
     STUCK_OPEN_TIMEOUT_SECONDS,
     _reap_inventory,
     _reap_scan,
+    _write_scan_inconsistencies_for_outage,
     discard_import_for_failed_inventory,
     discard_inventory_failed_imports,
     maybe_reap,
@@ -401,6 +403,87 @@ def test_reap_scan_zero_input_increments_existing_inconsistency():
     rows = list(ScanInconsistency.objects.all())
     assert len(rows) == 1, "second outage must update, not duplicate"
     assert rows[0].consecutive_cycles == 2
+
+
+@pytest.mark.django_db
+def test_outage_writes_one_row_per_workload_image_pair_even_with_two_containers():
+    """Two containers of one workload running the same image are two
+    observation rows but ONE (cluster, kind, workload, digest) key. A single
+    outage must leave consecutive_cycles at 1 — the row-by-row writer used
+    to create on the first observation and increment on the second."""
+    c = _cluster()
+    w = _workload(c)
+    img = Image.objects.create(digest="sha256:" + "a" * 64, ref="img:v1")
+    for container in ("app", "sidecar"):
+        WorkloadImageObservation.objects.create(
+            workload=w, image=img, container_name=container, currently_deployed=True,
+        )
+    mark = _mark(c, kind="trivy.VulnerabilityReport", observed_count=0)
+
+    _write_scan_inconsistencies_for_outage(c, mark)
+
+    rows = list(ScanInconsistency.objects.all())
+    assert len(rows) == 1 and rows[0].consecutive_cycles == 1
+
+
+@pytest.mark.django_db
+def test_outage_increments_known_pairs_and_creates_new_ones_in_one_pass():
+    c = _cluster()
+    w = _workload(c)
+    old_img = Image.objects.create(digest="sha256:" + "a" * 64, ref="img:v1")
+    new_img = Image.objects.create(digest="sha256:" + "b" * 64, ref="img:v2")
+    for img, name in ((old_img, "app"), (new_img, "sidecar")):
+        WorkloadImageObservation.objects.create(workload=w, image=img, container_name=name, currently_deployed=True)
+    # An unrelated kind's row for the same pair must be left alone.
+    ScanInconsistency.objects.create(cluster=c, kind="trivy.ExposedSecretReport", workload=w,
+                                     image_digest=old_img.digest, seen_in_scans=False)
+    known = ScanInconsistency.objects.create(cluster=c, kind="trivy.VulnerabilityReport", workload=w,
+                                             image_digest=old_img.digest, seen_in_inventory=False,
+                                             seen_in_scans=True, consecutive_cycles=3)
+    stale = timezone.now() - timedelta(days=2)
+    ScanInconsistency.objects.filter(pk=known.pk).update(last_observed_at=stale)
+    mark = _mark(c, kind="trivy.VulnerabilityReport", observed_count=0)
+
+    _write_scan_inconsistencies_for_outage(c, mark)
+
+    known.refresh_from_db()
+    assert known.consecutive_cycles == 4
+    assert (known.seen_in_inventory, known.seen_in_scans) == (True, False)
+    assert known.last_observed_at > stale, "existing row is re-stamped as observed now"
+    created = ScanInconsistency.objects.get(kind="trivy.VulnerabilityReport", image_digest=new_img.digest)
+    assert (created.workload_id, created.consecutive_cycles, created.seen_in_inventory, created.seen_in_scans) == (
+        w.id, 1, True, False,
+    )
+    other = ScanInconsistency.objects.get(kind="trivy.ExposedSecretReport")
+    assert other.consecutive_cycles == 1
+    assert ScanInconsistency.objects.count() == 3
+
+
+@pytest.mark.django_db
+def test_outage_query_count_does_not_grow_with_observation_count():
+    def scene(name, n):
+        c = _cluster(name)
+        w = _workload(c)
+        for i in range(n):
+            img = Image.objects.create(digest="sha256:" + f"{name}{i}".ljust(64, "0"), ref=f"img:{i}")
+            WorkloadImageObservation.objects.create(workload=w, image=img, container_name=f"c{i}",
+                                                    currently_deployed=True)
+            if i % 2:
+                ScanInconsistency.objects.create(cluster=c, kind="trivy.VulnerabilityReport", workload=w,
+                                                 image_digest=img.digest)
+        return c, _mark(c, kind="trivy.VulnerabilityReport", observed_count=0)
+
+    small = scene("c-small", 2)
+    large = scene("c-large", 7)
+
+    def count(args):
+        with CaptureQueriesContext(connection) as ctx:
+            _write_scan_inconsistencies_for_outage(*args)
+        return len(ctx.captured_queries)
+
+    n_small, n_large = count(small), count(large)
+    assert ScanInconsistency.objects.filter(cluster=large[0]).count() == 7
+    assert n_large == n_small, (n_small, n_large)
 
 
 @pytest.mark.django_db
