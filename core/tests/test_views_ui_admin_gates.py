@@ -50,7 +50,8 @@ _IDS = [f"{name}:{method}" for name, _, method, _ in ADMIN_ROUTES]
 
 
 def _snapshot(w) -> tuple:
-    w["cluster"].refresh_from_db(); w["ns"].refresh_from_db(); w["other"].refresh_from_db()
+    for key in ("cluster", "ns", "other"):
+        w[key].refresh_from_db()
     return (
         w["cluster"].environment, w["cluster"].reimport_requested_at, Cluster.objects.count(),
         w["ns"].internet_exposed, w["ns"].exposure_is_manual,

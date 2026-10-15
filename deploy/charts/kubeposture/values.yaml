@@ -275,8 +275,9 @@ worker:
   # -- Pods per job. claim_batch's SKIP LOCKED partitions work safely across
   # them (the k8s "work queue" Job pattern — no `completions` is set, so
   # the Job just runs `parallelism` pods to completion against the shared
-  # queue). Raised from 1 -> 4: cluster-wide capacity is not the
-  # constraint (namespace requests ~5 cores against ~315 free). Raising
+  # queue). Held at 1 for now — one worker at a time until the
+  # non-blocking reap claim has proven itself in prod; 4 was fine
+  # capacity-wise (namespace requests ~5 cores against ~315 free). Raising
   # this alone didn't fix throughput because claim_batch's abandon-sweep
   # was missing SKIP LOCKED (fixed in core/services/queue.py) — that one
   # unprotected statement, run first on every drain_once iteration, could
