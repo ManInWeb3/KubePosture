@@ -76,13 +76,13 @@ def test_process_sbom_upserts_components_in_purl_sorted_order(cluster):
     }
 
     seen_order: list[str] = []
-    real_update_or_create = SbomComponent.objects.update_or_create
+    real_bulk_create = SbomComponent.objects.bulk_create
 
-    def _spy(*, image, purl, defaults):
-        seen_order.append(purl)
-        return real_update_or_create(image=image, purl=purl, defaults=defaults)
+    def _spy(objs, **kwargs):
+        seen_order.extend(o.purl for o in objs)
+        return real_bulk_create(objs, **kwargs)
 
-    with patch.object(SbomComponent.objects, "update_or_create", side_effect=_spy):
+    with patch.object(SbomComponent.objects, "bulk_create", side_effect=_spy):
         result = _process_sbom(item, lambda _raw: parsed)
 
     assert seen_order == sorted(unsorted_purls), (

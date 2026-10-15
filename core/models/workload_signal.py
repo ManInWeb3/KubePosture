@@ -20,6 +20,24 @@ the workload.
 from django.db import models
 
 
+class WorkloadSignalManager(models.Manager):
+    def upsert(self, workload, signal_id: str, *, active: bool = True):
+        """Record that `signal_id` is currently active (or not) on
+        `workload`, creating the row on first sight. An active observation
+        always bumps `last_seen_at` (auto_now); a clearing one only writes
+        when it actually flips the flag, so a signal never seen stays
+        absent. Shared by the inventory parser and the scan ingest path."""
+        obj = self.filter(workload=workload, signal_id=signal_id).first()
+        if obj is None:
+            if not active:
+                return None
+            return self.create(workload=workload, signal_id=signal_id, currently_active=True)
+        if active or obj.currently_active:
+            obj.currently_active = active
+            obj.save(update_fields=["currently_active", "last_seen_at"])
+        return obj
+
+
 class WorkloadSignal(models.Model):
     workload = models.ForeignKey(
         "core.Workload",
@@ -41,6 +59,8 @@ class WorkloadSignal(models.Model):
             "False after the reap observes silence."
         ),
     )
+
+    objects = WorkloadSignalManager()
 
     details = models.JSONField(
         default=dict,

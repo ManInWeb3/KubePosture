@@ -159,7 +159,8 @@ class SnapshotAdmin(admin.ModelAdmin):
         "priority_counts",
         "change_kind",
     )
-    list_filter = ("scope_kind", "cluster", "namespace", "change_kind")
+    # No `namespace` here: the sidebar would list every Namespace row.
+    list_filter = ("scope_kind", "cluster", "change_kind")
     search_fields = (
         "cluster__name",
         "namespace__name",
@@ -217,15 +218,44 @@ class FeedFetchStateAdmin(admin.ModelAdmin):
 
 
 # Bulk-register the rest with default options.
-for _model in (
-    EpssScore,
-    FindingAction,
-    Image,
-    ImportMark,
-    IngestQueue,
-    KevEntry,
-    ScanInconsistency,
-    WorkloadAlias,
-    WorkloadSignal,
-):
+# FK-heavy models get raw_id_fields: a plain <select> would render every
+# Finding / Workload row on the add/change page.
+
+
+@admin.register(FindingAction)
+class FindingActionAdmin(admin.ModelAdmin):
+    raw_id_fields = ("finding", "image", "actor")
+
+
+@admin.register(WorkloadSignal)
+class WorkloadSignalAdmin(admin.ModelAdmin):
+    raw_id_fields = ("workload",)
+    list_select_related = ("workload",)
+
+
+@admin.register(WorkloadAlias)
+class WorkloadAliasAdmin(admin.ModelAdmin):
+    raw_id_fields = ("cluster", "namespace", "target_workload")
+
+
+@admin.register(ScanInconsistency)
+class ScanInconsistencyAdmin(admin.ModelAdmin):
+    raw_id_fields = ("cluster", "workload")
+
+
+@admin.register(ImportMark)
+class ImportMarkAdmin(admin.ModelAdmin):
+    raw_id_fields = ("cluster",)
+    list_select_related = ("cluster",)
+
+
+@admin.register(IngestQueue)
+class IngestQueueAdmin(admin.ModelAdmin):
+    # The changelist's COUNT(*) over the queue table is pointless; the
+    # change form never needs the raw payload rendered.
+    show_full_result_count = False
+    exclude = ("raw_json",)
+
+
+for _model in (EpssScore, Image, KevEntry):
     admin.site.register(_model)

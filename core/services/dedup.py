@@ -66,26 +66,37 @@ def compute_hash(
     return h.hexdigest()
 
 
-def _enrichment_for(vuln_id: str) -> dict:
-    """Look up enrichment values for a fresh Finding upsert.
+def batch_enrichment(vuln_ids):
+    """One query each against EpssScore + KevEntry for a list of CVE ids.
 
-    Returns a dict of fields ready to merge into the Finding defaults.
+    Returns:
+        (epss_map, kev_set)
+        epss_map: {vuln_id: (score, percentile)}
+        kev_set: {vuln_id, ...}
     """
-    out = {
-        "epss_score": None,
-        "epss_percentile": None,
-        "kev_listed": False,
+    cve_ids = [v for v in set(vuln_ids) if v and v.startswith("CVE-")]
+    if not cve_ids:
+        return {}, set()
+    epss_rows = EpssScore.objects.filter(vuln_id__in=cve_ids).values_list(
+        "vuln_id", "score", "percentile",
+    )
+    epss_map = {v: (s, p) for v, s, p in epss_rows}
+    kev_set = set(
+        KevEntry.objects.filter(vuln_id__in=cve_ids).values_list(
+            "vuln_id", flat=True,
+        )
+    )
+    return epss_map, kev_set
+
+
+def _enrichment_fields(vuln_id: str, epss_map: dict, kev_set: set) -> dict:
+    """Finding defaults for one vuln_id from a `batch_enrichment` result."""
+    score, percentile = epss_map.get(vuln_id, (None, None))
+    return {
+        "epss_score": score,
+        "epss_percentile": percentile,
+        "kev_listed": vuln_id in kev_set,
     }
-    if not vuln_id:
-        return out
-    if vuln_id.startswith("CVE-"):
-        epss = EpssScore.objects.filter(vuln_id=vuln_id).first()
-        if epss:
-            out["epss_score"] = epss.score
-            out["epss_percentile"] = epss.percentile
-        if KevEntry.objects.filter(vuln_id=vuln_id).exists():
-            out["kev_listed"] = True
-    return out
 
 
 @transaction.atomic
@@ -107,6 +118,10 @@ def upsert_findings(
     updated = 0
     cluster_name = cluster.name
     processed = 0
+    findings = list(findings)
+    # Two queries for the whole report instead of two per finding — this
+    # runs while the per-row select_for_update locks are held.
+    epss_map, kev_set = batch_enrichment(f.get("vuln_id") or "" for f in findings)
 
     for f in findings:
         hc = compute_hash(
@@ -135,7 +150,7 @@ def upsert_findings(
             "details": f.get("details") or {},
         }
         # Fold in enrichment values.
-        defaults.update(_enrichment_for(defaults["vuln_id"]))
+        defaults.update(_enrichment_fields(defaults["vuln_id"], epss_map, kev_set))
 
         if _upsert_one_finding(
             source=f["source"], hash_code=hc,

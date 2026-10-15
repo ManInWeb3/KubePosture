@@ -912,20 +912,8 @@ def persist(st: _InventoryStaging, mark_started_at) -> dict:
         if wl is None:
             continue
         for sig in signal_ids:
-            if sig not in SIGNALS:
-                continue
-            existing = WorkloadSignal.objects.filter(
-                workload=wl, signal_id=sig
-            ).first()
-            if existing:
-                existing.currently_active = True
-                existing.save(update_fields=["currently_active", "last_seen_at"])
-            else:
-                WorkloadSignal.objects.create(
-                    workload=wl,
-                    signal_id=sig,
-                    currently_active=True,
-                )
+            if sig in SIGNALS:
+                WorkloadSignal.objects.upsert(wl, sig)
 
     # 9. `kp:missing-networkpolicy` per namespace.
     # Fired by the inventory parser when a namespace has zero
@@ -938,23 +926,7 @@ def persist(st: _InventoryStaging, mark_started_at) -> dict:
         for key, wl in persisted_workloads.items():
             if key[0] != ns_name:
                 continue
-            existing = WorkloadSignal.objects.filter(
-                workload=wl, signal_id="kp:missing-networkpolicy"
-            ).first()
-            if not has_netpol:
-                if existing:
-                    existing.currently_active = True
-                    existing.save(update_fields=["currently_active", "last_seen_at"])
-                else:
-                    WorkloadSignal.objects.create(
-                        workload=wl,
-                        signal_id="kp:missing-networkpolicy",
-                        currently_active=True,
-                    )
-            else:
-                if existing and existing.currently_active:
-                    existing.currently_active = False
-                    existing.save(update_fields=["currently_active", "last_seen_at"])
+            WorkloadSignal.objects.upsert(wl, "kp:missing-networkpolicy", active=not has_netpol)
 
     # 10. Namespace internet_exposed rollup ------------------------------
     for ns_name, ns in st.namespaces.items():

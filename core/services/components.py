@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from django.db.models import Count, Q
+from django.db.models import Count, Prefetch, Q
 
 from core.models import (
     Cluster,
@@ -278,24 +278,25 @@ def search_by_purls(
         purl_q |= Q(purl__startswith=prefix)
     qs = qs.filter(purl_q)
 
-    rows = qs.select_related("image").prefetch_related(
-        "image__observations__workload__cluster",
-        "image__observations__workload__namespace",
-    )
-
     obs_filter = Q()
     if not include_inactive:
         obs_filter &= Q(currently_deployed=True)
     if cluster is not None:
         obs_filter &= Q(workload__cluster=cluster)
 
+    # The filter lives in the Prefetch: `.filter()` on the related manager
+    # would bypass the prefetch cache and issue one query per component.
+    rows = qs.select_related("image").prefetch_related(
+        Prefetch(
+            "image__observations",
+            queryset=WorkloadImageObservation.objects.filter(obs_filter)
+            .select_related("workload", "workload__cluster", "workload__namespace"),
+        ),
+    )
+
     out: list[dict] = []
     for comp in rows:
-        observations = (
-            comp.image.observations.filter(obs_filter)
-            .select_related("workload", "workload__cluster", "workload__namespace")
-        )
-        for obs in observations:
+        for obs in comp.image.observations.all():
             w = obs.workload
             out.append({
                 "cluster": w.cluster.name,

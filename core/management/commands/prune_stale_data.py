@@ -11,6 +11,8 @@ This command is a thin wrapper that delegates to those functions.
 """
 from __future__ import annotations
 
+import inspect
+
 from core.management.base import KubePostureCommand
 from core.services.pruning import (
     prune_import_marks,
@@ -20,14 +22,19 @@ from core.services.pruning import (
     prune_stale_sbom_components,
 )
 
-# (option_name, fetcher, days_kwarg, days_default)
+# (option_name, fetcher, days_kwarg); the retention defaults are the
+# pruners' own keyword defaults in core/services/pruning.py.
 _TARGETS = [
-    ("ingest_queue",        prune_ingest_queue,           "ingest_queue_days",         14),
-    ("import_marks",        prune_import_marks,           "import_marks_days",         90),
-    ("scan_inconsistencies",prune_scan_inconsistencies,   "scan_inconsistencies_days", 30),
-    ("findings",            prune_stale_findings,         "findings_days",            180),
-    ("sbom_components",     prune_stale_sbom_components,  "sbom_components_days",      90),
+    ("ingest_queue",        prune_ingest_queue,           "ingest_queue_days"),
+    ("import_marks",        prune_import_marks,           "import_marks_days"),
+    ("scan_inconsistencies", prune_scan_inconsistencies,  "scan_inconsistencies_days"),
+    ("findings",            prune_stale_findings,         "findings_days"),
+    ("sbom_components",     prune_stale_sbom_components,  "sbom_components_days"),
 ]
+
+
+def _default_days(fn) -> int:
+    return inspect.signature(fn).parameters["days"].default
 
 
 class Command(KubePostureCommand):
@@ -38,11 +45,12 @@ class Command(KubePostureCommand):
             "--dry-run", action="store_true",
             help="Count rows that would be deleted without deleting.",
         )
-        for name, _, days_kw, days_default in _TARGETS:
+        for name, fn, _days_kw in _TARGETS:
             parser.add_argument(
                 f"--{name.replace('_', '-')}-days",
-                type=int, default=days_default,
-                help=f"Retention window for the {name} target (days). Default: {days_default}.",
+                type=int, default=None,
+                help=f"Retention window for the {name} target (days). "
+                     f"Default: {_default_days(fn)}.",
             )
             parser.add_argument(
                 f"--skip-{name.replace('_', '-')}",
@@ -52,11 +60,14 @@ class Command(KubePostureCommand):
 
     def handle(self, *args, **options):
         results = []
-        for name, fn, days_kw, _ in _TARGETS:
+        for name, fn, days_kw in _TARGETS:
             if options[f"skip_{name}"]:
                 self.stdout.write(f"  {name}: skipped")
                 continue
-            res = fn(days=options[days_kw], dry_run=options["dry_run"])
+            kwargs = {"dry_run": options["dry_run"]}
+            if options[days_kw] is not None:
+                kwargs["days"] = options[days_kw]
+            res = fn(**kwargs)
             results.append(res)
             self.stdout.write(
                 f"  {res.target}: scanned={res.scanned} deleted={res.deleted}"
