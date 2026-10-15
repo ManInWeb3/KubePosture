@@ -3,9 +3,54 @@
 # Built CONCURRENTLY: core_sbomcomponent is multi-GB in production and a
 # plain CREATE INDEX would block the ingest workers' SBOM upserts for the
 # duration. Non-atomic because CONCURRENTLY cannot run inside a transaction.
+#
+# Idempotent on purpose. Because the migration is non-atomic, the index
+# build commits on its own: a migrate pod killed after CREATE INDEX
+# CONCURRENTLY finished but before Django recorded the migration leaves
+# a valid index behind, and a build interrupted midway leaves an INVALID
+# one. A plain AddIndexConcurrently then fails every retry with
+# `relation "sbomcomp_name_purl" already exists`. This version checks
+# pg_index first: a valid index is kept, an invalid leftover is dropped
+# and rebuilt.
 
-from django.contrib.postgres.operations import AddIndexConcurrently
 from django.db import migrations, models
+
+INDEX_NAME = "sbomcomp_name_purl"
+# Keep in sync with core.models.sbom_component.name_purl_expr.
+INDEX = models.Index(
+    models.Func(
+        models.F("purl"), models.Value("@[^@/]*$"), models.Value(""),
+        function="regexp_replace", output_field=models.CharField(),
+    ),
+    name=INDEX_NAME,
+)
+
+
+def _index_is_valid(connection):
+    """None when the index does not exist, else pg_index.indisvalid."""
+    with connection.cursor() as cur:
+        cur.execute(
+            "SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
+            "WHERE c.relname = %s",
+            [INDEX_NAME],
+        )
+        row = cur.fetchone()
+    return None if row is None else row[0]
+
+
+def ensure_index(apps, schema_editor):
+    model = apps.get_model("core", "SbomComponent")
+    valid = _index_is_valid(schema_editor.connection)
+    if valid is True:
+        return
+    if valid is False:
+        schema_editor.remove_index(model, INDEX, concurrently=True)
+    schema_editor.add_index(model, INDEX, concurrently=True)
+
+
+def drop_index(apps, schema_editor):
+    # DROP INDEX CONCURRENTLY IF EXISTS — safe whether or not it was built.
+    schema_editor.remove_index(apps.get_model("core", "SbomComponent"), INDEX, concurrently=True)
 
 
 class Migration(migrations.Migration):
@@ -17,8 +62,12 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        AddIndexConcurrently(
-            model_name='sbomcomponent',
-            index=models.Index(models.Func(models.F('purl'), models.Value('@[^@/]*$'), models.Value(''), function='regexp_replace', output_field=models.CharField()), name='sbomcomp_name_purl'),
+        migrations.SeparateDatabaseAndState(
+            state_operations=[
+                migrations.AddIndex(model_name="sbomcomponent", index=INDEX),
+            ],
+            database_operations=[
+                migrations.RunPython(ensure_index, drop_index, atomic=False),
+            ],
         ),
     ]
