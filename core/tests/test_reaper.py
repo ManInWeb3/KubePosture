@@ -11,7 +11,12 @@ Covers:
 - `_reap_scan` signal clearing — stale Kyverno/Trivy signals flip
   `currently_active=False` when their `last_seen_at` is older than the
   reap's `started_at`.
-- `transition_mark_to_reaped` idempotence under double-call.
+- `transition_mark_to_reaped` idempotence under double-call, and the
+  non-blocking claim: a mark held by an in-flight reap on another
+  connection is skipped at once instead of waited on.
+- Commit-before-recompute: the reap transaction (claim, body, row
+  deletion) commits before the priority recompute runs; a recompute
+  failure is recorded on the counters, never rolls the reap back.
 - `reap_all_drainable` safety-net sweep over leftover draining marks.
 - Discards: `reap_stuck_open` (never committed) and the inventory-failed
   paths never apply data and never advance the cluster anchor.
@@ -24,23 +29,27 @@ from __future__ import annotations
 
 import io
 import threading
+import time
 from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
 from django.core.management import call_command
-from django.db import connection
+from django.db import connection, transaction
 from django.test import override_settings
 from django.utils import timezone
 
+from core import urgency
 from core.constants import (
     Environment,
     ImportDiscardReason,
     ImportMarkState,
     IngestQueueStatus,
+    Severity,
 )
 from core.models import (
     Cluster,
+    Finding,
     Image,
     ImportMark,
     IngestQueue,
@@ -53,6 +62,7 @@ from core.models import (
 from core.services.queue import transition_mark_to_reaped
 from core.services.reaper import (
     STUCK_OPEN_TIMEOUT_SECONDS,
+    _reap_inventory,
     _reap_scan,
     discard_import_for_failed_inventory,
     discard_inventory_failed_imports,
@@ -874,3 +884,267 @@ def test_inventory_reap_scaled_to_zero_image_not_currently_deployed():
     assert img.digest not in set(
         Image.objects.currently_running(cluster=c).values_list("digest", flat=True)
     )
+
+
+# ── Non-blocking claim + commit-before-recompute ───────────────────
+#
+# Regression tests for the production stall where every worker pod sat
+# at 0 CPU behind one pod's inventory reap: the claim UPDATE blocked on
+# the winner's row lock, which was held for the whole reap including the
+# whole-cluster priority recompute (minutes), until the holder was killed
+# at activeDeadlineSeconds and the next waiter inherited the lock.
+
+
+def _finding(workload: Workload, *, vuln_id: str) -> Finding:
+    return Finding.objects.create(
+        cluster=workload.cluster, workload=workload, source="trivy",
+        category="vulnerability", vuln_id=vuln_id, title="t",
+        severity=Severity.HIGH.value, hash_code=vuln_id,
+    )
+
+
+def _claim_holder(mark: ImportMark, *, lock_acquired: threading.Event,
+                  release_lock: threading.Event, fail: bool = False) -> threading.Thread:
+    """Thread that wins the claim on `mark` on its own connection and keeps
+    that transaction open until `release_lock` is set (then commits, or
+    rolls back when `fail`)."""
+    def run():
+        try:
+            with transaction.atomic():
+                m = ImportMark.objects.select_related("cluster").get(pk=mark.pk)
+                assert transition_mark_to_reaped(m) is True
+                lock_acquired.set()
+                release_lock.wait(timeout=5)
+                if fail:
+                    raise RuntimeError("holder rolled back")
+        except RuntimeError:
+            pass
+        finally:
+            connection.close()
+    return threading.Thread(target=run)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_transition_mark_to_reaped_returns_false_fast_while_another_reaper_holds_the_mark():
+    c = _cluster()
+    mark = _mark(c, kind="inventory")
+    lock_acquired, release_lock = threading.Event(), threading.Event()
+    holder = _claim_holder(mark, lock_acquired=lock_acquired, release_lock=release_lock)
+    holder.start()
+    assert lock_acquired.wait(timeout=5), "holder never won its claim"
+
+    try:
+        started = time.monotonic()
+        won = transition_mark_to_reaped(mark)
+        elapsed = time.monotonic() - started
+        assert won is False
+        assert elapsed < 2.0, f"claim took {elapsed:.2f}s — it waited on the holder's lock"
+        assert ImportMark.objects.get(pk=mark.pk).state == ImportMarkState.DRAINING.value, (
+            "the holder has not committed yet; the loser must not have flipped anything"
+        )
+    finally:
+        release_lock.set()
+        holder.join(timeout=5)
+        connection.close()
+
+    assert ImportMark.objects.get(pk=mark.pk).state == ImportMarkState.REAPED.value, (
+        "exactly one winner: the holder's commit"
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_lost_claim_whose_winner_rolls_back_leaves_the_mark_for_a_later_sweep():
+    c = _cluster()
+    mark = _mark(c, kind="inventory")
+    lock_acquired, release_lock = threading.Event(), threading.Event()
+    holder = _claim_holder(
+        mark, lock_acquired=lock_acquired, release_lock=release_lock, fail=True,
+    )
+    holder.start()
+    assert lock_acquired.wait(timeout=5)
+    try:
+        assert transition_mark_to_reaped(mark) is False
+    finally:
+        release_lock.set()
+        holder.join(timeout=5)
+        connection.close()
+
+    assert ImportMark.objects.get(pk=mark.pk).state == ImportMarkState.DRAINING.value
+    assert transition_mark_to_reaped(mark) is True, "the next sweep claims it"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_maybe_reap_does_not_block_behind_an_in_flight_inventory_reap():
+    """The production scenario: pod A is inside the inventory reap body;
+    pod B's drain finds the same tuple drained and calls maybe_reap. B
+    must get None at once, and A's reap must still complete."""
+    c = _cluster()
+    mark = _mark(c, kind="inventory")
+    _row(mark)
+    body_entered, release_body = threading.Event(), threading.Event()
+    holder_result: list = []
+
+    def slow_body(m):
+        body_entered.set()
+        release_body.wait(timeout=5)
+        return {}
+
+    def hold():
+        try:
+            m = ImportMark.objects.select_related("cluster").get(pk=mark.pk)
+            holder_result.append(_reap_inventory(m))
+        finally:
+            connection.close()
+
+    with patch("core.services.reaper._reap_inventory_body", side_effect=slow_body):
+        holder = threading.Thread(target=hold)
+        holder.start()
+        assert body_entered.wait(timeout=5), "holder never entered the reap body"
+        try:
+            started = time.monotonic()
+            result = maybe_reap(mark)
+            elapsed = time.monotonic() - started
+        finally:
+            release_body.set()
+            holder.join(timeout=5)
+            connection.close()
+
+    assert result is None
+    assert elapsed < 2.0, f"maybe_reap took {elapsed:.2f}s — it blocked on the holder's lock"
+    assert holder_result and holder_result[0] is not None, "the holder's reap completed"
+    assert ImportMark.objects.get(pk=mark.pk).state == ImportMarkState.REAPED.value
+    assert _rows(mark) == 0
+
+
+@pytest.mark.django_db
+def test_inventory_reap_commits_even_when_the_priority_recompute_fails():
+    c = _cluster()
+    mark = _mark(c, kind="inventory")
+    _row(mark)
+    with patch("core.services.reaper.recompute_ids", side_effect=RuntimeError("recompute exploded")), \
+         patch("core.services.reaper._maybe_capture_heartbeat"):
+        result = maybe_reap(mark)
+
+    assert result is not None and result.get("recompute_failed") is True
+    mark.refresh_from_db()
+    c.refresh_from_db()
+    assert mark.state == ImportMarkState.REAPED.value
+    assert c.last_complete_inventory_at == mark.started_at
+    assert _rows(mark) == 0
+
+
+@pytest.mark.django_db(transaction=True)
+def test_inventory_reap_recomputes_after_its_transaction_committed():
+    c = _cluster()
+    w = _workload(c)
+    findings = [_finding(w, vuln_id=f"CVE-2024-{i}") for i in range(3)]
+    mark = _mark(c, kind="inventory")
+    _row(mark)
+    seen: list[list[int]] = []
+
+    def spy(ids):
+        assert connection.in_atomic_block is False, "recompute ran inside the reap transaction"
+        assert ImportMark.objects.get(pk=mark.pk).state == ImportMarkState.REAPED.value, (
+            "the reap must be committed before the recompute starts"
+        )
+        ids = list(ids)
+        seen.append(ids)
+        return urgency.recompute_ids(ids)
+
+    with patch("core.services.reaper.recompute_ids", side_effect=spy), \
+         patch("core.services.reaper._maybe_capture_heartbeat"):
+        result = maybe_reap(mark)
+
+    assert len(seen) == 1 and sorted(seen[0]) == sorted(f.pk for f in findings)
+    assert isinstance(result.get("priorities_recomputed"), int)
+
+
+@pytest.mark.django_db
+def test_superseded_inventory_reap_does_not_recompute():
+    c = _cluster()
+    newer_reap_time = timezone.now()
+    c.last_complete_inventory_at = newer_reap_time
+    c.save(update_fields=["last_complete_inventory_at"])
+    stale_mark = _mark(
+        c, kind="inventory", import_id="imp-stale",
+        started_at=newer_reap_time - timedelta(minutes=10),
+    )
+    _row(stale_mark)
+
+    with patch("core.services.reaper.recompute_ids") as recompute, \
+         patch("core.services.reaper._maybe_capture_heartbeat"):
+        result = maybe_reap(stale_mark)
+
+    recompute.assert_not_called()
+    assert result.get("superseded") is True
+    assert "priorities_recomputed" not in result
+
+
+@pytest.mark.django_db
+def test_scan_reap_commits_signal_clear_even_when_the_recompute_fails():
+    c = _cluster()
+    w = _workload(c)
+    started_at = timezone.now()
+    stale_signal = WorkloadSignal.objects.create(
+        workload=w, signal_id="kyverno:disallow-privileged-containers", currently_active=True,
+    )
+    _bump(stale_signal, last_seen_at=started_at - timedelta(minutes=10))
+    mark = _mark(c, kind="kyverno.PolicyReport", observed_count=5, started_at=started_at)
+
+    with patch("core.services.reaper.recompute_ids", side_effect=RuntimeError("recompute exploded")):
+        result = _reap_scan(mark)
+
+    assert result.get("signals_cleared") == 1
+    assert result.get("recompute_failed") is True
+    stale_signal.refresh_from_db()
+    assert stale_signal.currently_active is False
+    mark.refresh_from_db()
+    assert mark.state == ImportMarkState.REAPED.value
+
+
+@pytest.mark.django_db(transaction=True)
+def test_scan_reap_recomputes_only_the_affected_workloads_after_commit():
+    c = _cluster()
+    w1 = _workload(c)
+    w2 = Workload.objects.create(
+        cluster=c, namespace=w1.namespace, kind="Deployment", name="other", deployed=True,
+    )
+    f1 = _finding(w1, vuln_id="CVE-2024-1")
+    _finding(w2, vuln_id="CVE-2024-2")
+    started_at = timezone.now()
+    stale_signal = WorkloadSignal.objects.create(
+        workload=w1, signal_id="kyverno:disallow-privileged-containers", currently_active=True,
+    )
+    _bump(stale_signal, last_seen_at=started_at - timedelta(minutes=10))
+    mark = _mark(c, kind="kyverno.PolicyReport", observed_count=5, started_at=started_at)
+    seen: list[list[int]] = []
+
+    def spy(ids):
+        assert connection.in_atomic_block is False
+        ids = list(ids)
+        seen.append(ids)
+        return urgency.recompute_ids(ids)
+
+    with patch("core.services.reaper.recompute_ids", side_effect=spy):
+        _reap_scan(mark)
+
+    assert seen == [[f1.pk]]
+
+
+@pytest.mark.django_db
+def test_scan_reap_skips_the_recompute_when_nothing_was_cleared():
+    c = _cluster()
+    w = _workload(c)
+    started_at = timezone.now()
+    stale_signal = WorkloadSignal.objects.create(
+        workload=w, signal_id="kyverno:disallow-privileged-containers", currently_active=True,
+    )
+    _bump(stale_signal, last_seen_at=started_at - timedelta(minutes=10))
+    mark = _mark(c, kind="kyverno.PolicyReport", observed_count=5, started_at=started_at)
+    _row(mark, status=IngestQueueStatus.FAILED.value, error="parser blew up")
+
+    with patch("core.services.reaper.recompute_ids") as recompute:
+        result = _reap_scan(mark)
+
+    recompute.assert_not_called()
+    assert result.get("skipped_partial_failure") is True

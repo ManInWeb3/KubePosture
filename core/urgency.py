@@ -1,8 +1,10 @@
 """Urgency scorer — pure decision tree for Finding.effective_priority.
 
 `score(finding)` is the editable function (decision tree per
-docs/urgency-decision-tree.md). `recompute_batch(findings)` is the
-bulk fan-out path used by enrichment / signal-change triggers.
+docs/urgency-decision-tree.md). `recompute_ids(ids)` is the chunked
+bulk fan-out path used by the reaper, enrichment and the admin /
+management-command triggers; `apply_score` is the in-memory variant
+ingest uses while it upserts a Finding anyway.
 """
 from __future__ import annotations
 
@@ -241,32 +243,31 @@ def compute_priority(finding: Finding) -> PriorityResult:
 RECOMPUTE_CHUNK_SIZE = 5000
 
 
-def recompute_batch(findings: Iterable[Finding]) -> int:
-    """Bulk recompute for Finding objects (only `pk` is read). Delegates to
-    `recompute_ids`; prefer that with a streamed id queryset for large sets.
-
-    Returns the count updated.
-    """
-    return recompute_ids(f.pk for f in findings)
-
-
-def recompute_ids(ids: Iterable[int]) -> int:
+def recompute_ids(ids: Iterable[int]) -> tuple[int, int]:
     """Bulk recompute by id, `RECOMPUTE_CHUNK_SIZE` at a time: each chunk is
     one query pass loading relations, score() in memory, one bulk_update.
-    Pass a `values_list("id", flat=True).iterator()` to stream ids too.
+    Pass a `values_list("id", flat=True).iterator(chunk_size=...)` to
+    stream ids too, so memory stays flat however large the set.
 
-    Returns the count updated.
+    Returns `(scanned, updated)`.
     """
-    total = 0
+    scanned = updated = 0
     chunk: list[int] = []
     for pk in ids:
         chunk.append(pk)
         if len(chunk) >= RECOMPUTE_CHUNK_SIZE:
-            total += _recompute_chunk(chunk)
+            scanned += len(chunk)
+            updated += _recompute_chunk(chunk)
             chunk = []
     if chunk:
-        total += _recompute_chunk(chunk)
-    return total
+        scanned += len(chunk)
+        updated += _recompute_chunk(chunk)
+    return scanned, updated
+
+
+def finding_ids(qs) -> Iterable[int]:
+    """Stream a Finding queryset's ids for `recompute_ids`."""
+    return qs.order_by().values_list("id", flat=True).iterator(chunk_size=RECOMPUTE_CHUNK_SIZE)
 
 
 def _recompute_chunk(pks: list[int]) -> int:

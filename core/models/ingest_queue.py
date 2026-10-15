@@ -35,12 +35,11 @@ class IngestQueue(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     claimed_at = models.DateTimeField(
         null=True, blank=True,
-        help_text="Set when a worker flips this row to 'processing'. Lets "
-                   "reclaim_stale() detect items abandoned by a worker Job "
-                   "killed mid-item (e.g. activeDeadlineSeconds) — claim_batch "
-                   "only ever selects 'pending' rows, so without this a stuck "
-                   "'processing' row (and its ImportMark's reap) would block "
-                   "forever.",
+        help_text="Set when a worker flips this row to 'processing'. "
+                   "claim_batch reclaims a 'processing' row whose claimed_at "
+                   "is older than STALE_PROCESSING_SECONDS (its worker Job was "
+                   "killed mid-item, e.g. activeDeadlineSeconds); without it a "
+                   "stuck row (and its ImportMark's reap) would block forever.",
     )
     processed_at = models.DateTimeField(null=True, blank=True)
 

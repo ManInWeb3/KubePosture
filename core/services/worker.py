@@ -77,10 +77,12 @@ def _process_one(item_id: int) -> tuple[bool, str]:
         try:
             with transaction.atomic():
                 summary = ingest.process_item(item)
-            item.refresh_from_db()
-            item.status = IngestQueueStatus.DONE.value
-            item.processed_at = timezone.now()
-            item.save(update_fields=["status", "processed_at"])
+            # `.update()` rather than refresh + save: a refresh would reload
+            # the full raw_json (tens of MB for an inventory) just to flip
+            # two columns.
+            IngestQueue.objects.filter(id=item_id).update(
+                status=IngestQueueStatus.DONE.value, processed_at=timezone.now(),
+            )
             log.info(
                 "worker.item.done",
                 extra={
@@ -149,13 +151,12 @@ def drain_once(*, limit: int = 100) -> dict:
             failed += 1
 
     for cluster_name, kind, import_id in touched:
-        from core.models import Cluster
-        cluster = Cluster.objects.filter(name=cluster_name).first()
-        if cluster is None:
-            continue
-        mark = ImportMark.objects.filter(
-            cluster=cluster, kind=kind, import_id=import_id
-        ).first()
+        mark = (
+            ImportMark.objects
+            .filter(cluster__name=cluster_name, kind=kind, import_id=import_id)
+            .select_related("cluster")
+            .first()
+        )
         if mark is None:
             continue
         result = reaper.maybe_reap(mark)
@@ -187,28 +188,34 @@ def drain_until_empty(
     started once it is spent, and the final reap sweep is skipped too —
     it is unbounded, and the reap-safety-net CronJob runs the same sweep.
     Set it below the Job's activeDeadlineSeconds so a run exits cleanly
-    instead of being killed (a kill mid-reap rolls the whole reap back).
+    instead of being killed (a kill mid-reap rolls the reap transaction
+    back; the post-commit priority recompute keeps the chunks it
+    committed).
     The pass in flight when the budget runs out still finishes, so leave
     headroom for one slow item plus its reap.
     """
     deadline = time.monotonic() + max_seconds if max_seconds else None
     totals = {"claimed": 0, "ok": 0, "failed": 0, "reaps_fired": 0}
+
+    def budget_spent() -> bool:
+        if deadline is None or time.monotonic() < deadline:
+            return False
+        log.info("worker.drain.time_budget_spent", extra={"max_seconds": max_seconds, **totals})
+        return True
+
     passes = itertools.count() if not max_iterations else range(max_iterations)
     for _ in passes:
-        if deadline is not None and time.monotonic() >= deadline:
-            log.info("worker.drain.time_budget_spent", extra={"max_seconds": max_seconds, **totals})
+        if budget_spent():
             return totals
         round_ = drain_once(limit=limit)
         if round_["claimed"] == 0:
             break
         for k in totals:
             totals[k] += round_[k]
-    if deadline is not None and time.monotonic() >= deadline:
-        log.info("worker.drain.time_budget_spent", extra={"max_seconds": max_seconds, **totals})
+    if budget_spent():
         return totals
     # Final safety-net pass to fire any reap that was eligible after the
     # last drain (e.g. the last item of a tuple, processed in a
     # round that didn't itself claim anything new).
-    leftover = reaper.reap_all_drainable()
-    totals["reaps_fired"] += leftover
+    totals["reaps_fired"] += reaper.reap_all_drainable()
     return totals

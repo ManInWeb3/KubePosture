@@ -51,7 +51,7 @@ from core.services.snapshot import (
     capture_cluster_snapshot,
     capture_namespace_snapshot,
 )
-from core.urgency import recompute_batch
+from core.urgency import finding_ids, recompute_ids
 
 
 def _is_admin(user) -> bool:
@@ -64,12 +64,12 @@ def _is_admin(user) -> bool:
 
 
 def _recompute_cluster(cluster: Cluster) -> int:
-    """Recompute effective_priority for every Finding in `cluster`.
-
-    Wraps the same `recompute_batch` the management command uses.
+    """Recompute effective_priority for every Finding in `cluster` —
+    streamed + chunked like the management command, never a whole-cluster
+    list in the request. Returns the count whose band changed.
     """
-    findings = list(Finding.objects.filter(cluster=cluster).only("id"))
-    return recompute_batch(findings)
+    _scanned, updated = recompute_ids(finding_ids(Finding.objects.filter(cluster=cluster)))
+    return updated
 
 
 @transaction.atomic

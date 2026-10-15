@@ -302,7 +302,8 @@ worker:
   # new passes (and skips the final reap sweep) once that much wall time
   # is spent — keep it below activeDeadlineSeconds with headroom for one
   # slow item + its reap, so a run exits instead of being killed mid-reap
-  # (which rolls the reap back). Each item commits
+  # (which rolls the reap transaction back; the post-commit priority
+  # recompute keeps the chunks it committed). Each item commits
   # independently (see worker._process_one), so a pod hitting
   # activeDeadlineSeconds or its memory limit keeps what it finished and
   # holds at most --limit rows, reclaimed after STALE_PROCESSING_SECONDS.

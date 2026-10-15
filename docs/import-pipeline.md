@@ -104,11 +104,19 @@ captures a heartbeat. A discarded import is `state=reaped` +
 
 ### 2.5 Reaps are claim-first and delete the tuple's rows
 
-Both reaps start with the conditional `transition_mark_to_reaped`
-UPDATE and return `None` if they lose it — two workers (or a worker
-racing the safety net) can never both run a reap body. The body runs
-in the same transaction, so a failure rolls the claim back and the
-mark stays `draining` for the next sweep.
+Both reaps start with the non-blocking `transition_mark_to_reaped`
+claim (`FOR UPDATE SKIP LOCKED`, then the conditional UPDATE) and
+return `None` if they lose it — two workers (or a worker racing the
+safety net) can never both run a reap body, and the loser returns at
+once instead of queueing behind the winner's transaction (which used
+to park every other worker pod at 0 CPU for the length of an inventory
+reap). The claim, the body and the row deletion run in one
+transaction, so a failure rolls the claim back and the mark stays
+`draining` for the next sweep. The priority recompute runs **after**
+that transaction commits, in its own chunked commits: a pod killed
+mid-recompute keeps the chunks it finished and the reap itself stays
+committed; the cluster's next reap (or `recalculate_priorities`)
+repairs any stale priorities.
 
 Once the reap has recorded `failed_count` / `last_error` (newest
 `error_message[:2000]`) on the ImportMark, **all** of the tuple's rows

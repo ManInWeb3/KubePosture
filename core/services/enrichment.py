@@ -37,7 +37,7 @@ from core.models import (
     SupplyChainIoc,
 )
 from core.purl import normalize_purl
-from core.urgency import recompute_batch
+from core.urgency import finding_ids, recompute_ids
 
 log = logging.getLogger("core.enrichment")
 
@@ -224,15 +224,6 @@ _PG_DEADLOCK = "40P01"
 _DEADLOCK_MAX_ATTEMPTS = 5
 _DEADLOCK_BACKOFF_BASE = 0.5
 
-# Findings affected by a feed refresh are recomputed in bounded chunks —
-# `vuln_id__in=seen_ids` (the whole EPSS/KEV catalog, 250k+ CVEs) can match
-# far more Finding rows than the feed has CVEs, since one CVE can hit many
-# Findings org-wide. Materializing them all at once scales memory with
-# total finding count rather than feed size — the actual cause of the
-# enrich-epss OOMs, independent of how large the upstream feed itself is.
-_RECOMPUTE_CHUNK_SIZE = 5000
-
-
 def _exec_with_deadlock_retry(sql: str) -> None:
     """Run `sql` in autocommit mode with a deadlock-detect retry loop.
 
@@ -258,29 +249,18 @@ def _exec_with_deadlock_retry(sql: str) -> None:
 
 
 def _recompute_affected_findings(vuln_ids) -> int:
-    """Recompute priority for every Finding matching `vuln_ids`, in bounded
-    chunks of `_RECOMPUTE_CHUNK_SIZE` ids at a time instead of one
-    `list(...)` over the whole match set. Returns the count updated.
+    """Recompute priority for every Finding matching `vuln_ids`, streamed
+    and chunked by `recompute_ids` — `vuln_id__in=<catalog>` (250k+ CVEs)
+    can match far more Finding rows than the feed has CVEs, and
+    materializing them at once was the cause of the enrich-epss OOMs.
+    Returns the count updated.
 
     `vuln_ids` is a list or a `values("vuln_id")` queryset; the loaders
     pass the latter so the whole catalog (330k ids for EPSS) becomes a
     subquery instead of a Python list shipped as `IN (...)`.
     """
-    total = 0
-    chunk: list[int] = []
-    ids = (
-        Finding.objects.filter(vuln_id__in=vuln_ids)
-        .values_list("id", flat=True)
-        .iterator(chunk_size=_RECOMPUTE_CHUNK_SIZE)
-    )
-    for fid in ids:
-        chunk.append(fid)
-        if len(chunk) >= _RECOMPUTE_CHUNK_SIZE:
-            total += recompute_batch(Finding.objects.filter(pk__in=chunk).only("id"))
-            chunk = []
-    if chunk:
-        total += recompute_batch(Finding.objects.filter(pk__in=chunk).only("id"))
-    return total
+    _scanned, updated = recompute_ids(finding_ids(Finding.objects.filter(vuln_id__in=vuln_ids)))
+    return updated
 
 
 def _refresh_finding_epss_cache() -> None:

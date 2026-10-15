@@ -27,7 +27,7 @@ from core.services.snapshot import (
     capture_cluster_snapshot,
     capture_namespace_snapshot,
 )
-from core.urgency import recompute_batch
+from core.urgency import finding_ids, recompute_ids
 
 
 @admin.register(Workload)
@@ -129,9 +129,7 @@ class NamespaceAdmin(admin.ModelAdmin):
             capture_cluster_snapshot(obj.cluster)
             capture_namespace_snapshot(obj)
             super().save_model(request, obj, form, change)
-            recompute_batch(list(
-                Finding.objects.filter(cluster=obj.cluster).only("id")
-            ))
+            recompute_ids(finding_ids(Finding.objects.filter(cluster=obj.cluster)))
             capture_cluster_snapshot(obj.cluster)
             capture_namespace_snapshot(obj)
 
@@ -154,7 +152,7 @@ class ClusterAdmin(admin.ModelAdmin):
         with transaction.atomic():
             capture_cluster_snapshot(obj)
             super().save_model(request, obj, form, change)
-            recompute_batch(list(obj.findings.all().only("id")))
+            recompute_ids(finding_ids(obj.findings.all()))
             capture_cluster_snapshot(obj)
 
 

@@ -46,24 +46,27 @@ def chunks(monkeypatch):
 def test_recompute_ids_chunks_and_covers_every_id(chunks):
     findings = _findings("a", 5)
 
-    urgency.recompute_ids(f.pk for f in findings)
+    scanned, updated = urgency.recompute_ids(f.pk for f in findings)
 
     assert [len(c) for c in chunks] == [2, 2, 1]
+    assert set().union(*chunks) == {f.pk for f in findings}
+    assert scanned == 5
+    assert updated == 0, "already-scored findings are scanned but not rewritten"
+
+
+@pytest.mark.django_db
+def test_finding_ids_streams_a_queryset(chunks):
+    findings = _findings("a", 3)
+
+    scanned, _ = urgency.recompute_ids(urgency.finding_ids(Finding.objects.all()))
+
+    assert scanned == 3
     assert set().union(*chunks) == {f.pk for f in findings}
 
 
 @pytest.mark.django_db
-def test_recompute_batch_delegates_to_chunks(chunks):
-    findings = _findings("a", 3)
-
-    urgency.recompute_batch(findings)
-
-    assert [len(c) for c in chunks] == [2, 1]
-
-
-@pytest.mark.django_db
 def test_recompute_ids_empty_makes_no_calls(chunks):
-    assert urgency.recompute_ids([]) == 0
+    assert urgency.recompute_ids([]) == (0, 0)
     assert chunks == []
 
 

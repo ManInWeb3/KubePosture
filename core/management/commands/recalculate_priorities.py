@@ -6,7 +6,7 @@ should fan out across existing data.
 
 from core.management.base import KubePostureCommand
 from core.models import Finding
-from core.urgency import RECOMPUTE_CHUNK_SIZE, recompute_ids
+from core.urgency import finding_ids, recompute_ids
 
 
 class Command(KubePostureCommand):
@@ -19,17 +19,9 @@ class Command(KubePostureCommand):
         qs = Finding.objects.all()
         if options["cluster"]:
             qs = qs.filter(cluster__name=options["cluster"])
-        scanned = 0
-
-        def _ids():
-            # Streamed + chunked by recompute_ids: memory stays flat however
-            # big the table is (an unbounded load OOMKilled the CronJob).
-            nonlocal scanned
-            for pk in qs.order_by().values_list("id", flat=True).iterator(chunk_size=RECOMPUTE_CHUNK_SIZE):
-                scanned += 1
-                yield pk
-
-        updated = recompute_ids(_ids())
+        # Streamed + chunked: memory stays flat however big the table is
+        # (an unbounded load OOMKilled the CronJob).
+        scanned, updated = recompute_ids(finding_ids(qs))
         self.stdout.write(self.style.SUCCESS(
             f"recomputed: scanned={scanned} updated={updated}"
         ))

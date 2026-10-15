@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
+from core import urgency
 from core.constants import Environment, Severity
 from core.models import (
     Cluster,
@@ -240,9 +241,9 @@ def test_kev_bulk_refresh_clears_flag_when_cve_drops_from_kev():
 @pytest.mark.django_db
 def test_recompute_affected_findings_covers_every_match_across_chunks(monkeypatch):
     """More matches than one chunk — every one must still be recomputed,
-    split across multiple bounded recompute_batch calls instead of one
-    call over the whole match set."""
-    monkeypatch.setattr(enrichment, "_RECOMPUTE_CHUNK_SIZE", 2)
+    split across multiple bounded chunk loads instead of one load over
+    the whole match set."""
+    monkeypatch.setattr(urgency, "RECOMPUTE_CHUNK_SIZE", 2)
 
     c = _cluster()
     ns = _ns(c)
@@ -251,14 +252,13 @@ def test_recompute_affected_findings_covers_every_match_across_chunks(monkeypatc
     unrelated = _finding(w, "CVE-2024-OTHER", hash_code="h-other")
 
     seen_pks: list[set[int]] = []
-    real_recompute_batch = enrichment.recompute_batch
+    real_chunk = urgency._recompute_chunk
 
-    def _spy(findings):
-        findings = list(findings)
-        seen_pks.append({f.pk for f in findings})
-        return real_recompute_batch(findings)
+    def _spy(pks):
+        seen_pks.append(set(pks))
+        return real_chunk(pks)
 
-    with patch.object(enrichment, "recompute_batch", side_effect=_spy):
+    with patch.object(urgency, "_recompute_chunk", side_effect=_spy):
         enrichment._recompute_affected_findings(["CVE-2024-CHUNK"])
 
     assert len(seen_pks) == 3, "5 matches at chunk size 2 must be 3 calls (2, 2, 1)"
@@ -269,15 +269,13 @@ def test_recompute_affected_findings_covers_every_match_across_chunks(monkeypatc
 
 
 @pytest.mark.django_db
-def test_recompute_affected_findings_handles_no_matches(monkeypatch):
+def test_recompute_affected_findings_handles_no_matches():
     """No Finding matches the given CVEs — must return cleanly without
-    calling recompute_batch at all (empty chunk must not be built)."""
-    monkeypatch.setattr(enrichment, "_RECOMPUTE_CHUNK_SIZE", 2)
-
-    with patch.object(enrichment, "recompute_batch") as mock_recompute:
+    loading any chunk at all (empty chunk must not be built)."""
+    with patch.object(urgency, "_recompute_chunk") as mock_chunk:
         total = enrichment._recompute_affected_findings(["CVE-2024-NO-MATCH"])
 
-    mock_recompute.assert_not_called()
+    mock_chunk.assert_not_called()
     assert total == 0
 
 
@@ -292,17 +290,16 @@ def test_epss_bulk_refresh_recomputes_priority_for_affected_findings():
     _finding(w, "CVE-2024-AAA", hash_code="ha")
 
     with patch.object(
-        enrichment, "recompute_batch", wraps=enrichment.recompute_batch,
-    ) as mock_recompute:
+        urgency, "_recompute_chunk", wraps=urgency._recompute_chunk,
+    ) as mock_chunk:
         path = _write_csv([("CVE-2024-AAA", 0.91, 0.99)])
         try:
             enrichment.load_epss_from_file(path)
         finally:
             Path(path).unlink(missing_ok=True)
 
-    mock_recompute.assert_called_once()
-    recomputed_pks = {f.pk for f in mock_recompute.call_args.args[0]}
-    assert recomputed_pks == {Finding.objects.get(vuln_id="CVE-2024-AAA").pk}
+    mock_chunk.assert_called_once()
+    assert set(mock_chunk.call_args.args[0]) == {Finding.objects.get(vuln_id="CVE-2024-AAA").pk}
 
 
 # ── streaming / chunked feed load ─────────────────────────────────
@@ -475,9 +472,9 @@ def test_recompute_affected_findings_accepts_a_subquery():
     miss = _finding(w, "CVE-2024-MISS", hash_code="h2")
     EpssScore.objects.create(vuln_id="CVE-2024-HIT", score=0.5, percentile=0.5)
 
-    with patch.object(enrichment, "recompute_batch", wraps=enrichment.recompute_batch) as spy:
+    with patch.object(urgency, "_recompute_chunk", wraps=urgency._recompute_chunk) as spy:
         enrichment._recompute_affected_findings(EpssScore.objects.values("vuln_id"))
 
     spy.assert_called_once()
-    assert {f.pk for f in spy.call_args.args[0]} == {hit.pk}
-    assert miss.pk not in {f.pk for f in spy.call_args.args[0]}
+    assert set(spy.call_args.args[0]) == {hit.pk}
+    assert miss.pk not in set(spy.call_args.args[0])

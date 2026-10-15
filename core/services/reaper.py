@@ -2,11 +2,16 @@
 queue drains, plus the two ways an import is *discarded* instead.
 
 **Claim first.** Both reaps begin with `transition_mark_to_reaped` and
-return `None` when they lose that conditional UPDATE — two workers
+return `None` when they lose that non-blocking claim — two workers
 seeing the same drained tuple (or a worker racing the safety net) can
-never both run a reap body. Everything after the claim runs in the same
-transaction, so a failing body rolls the claim back and the mark stays
-`draining` for the next sweep.
+never both run a reap body, and the loser returns at once instead of
+waiting behind the winner's transaction. The claim, the body and the
+row deletion run in one transaction, so a failing body rolls the claim
+back and the mark stays `draining` for the next sweep. The priority
+recompute runs AFTER that transaction commits, in its own chunked
+commits (see `_recompute_after_commit`): it is whole-cluster for
+inventory and can take minutes, and holding the mark + cluster row locks
+for that long is what used to stall every other worker pod.
 
 **Rows go at reap.** Nothing reads `IngestQueue.raw_json` after an item
 is `done`. Once the reap has recorded `failed_count` / `last_error` on
@@ -27,6 +32,7 @@ import forever).
 from __future__ import annotations
 
 import logging
+import time
 from datetime import timedelta
 
 from django.conf import settings
@@ -44,6 +50,7 @@ from core.constants import (
 )
 from core.models import (
     Cluster,
+    Finding,
     ImportMark,
     IngestQueue,
     ScanInconsistency,
@@ -69,7 +76,7 @@ from core.services.snapshot import (
     capture_cluster_heartbeat,
 )
 from core.signals import SIGNALS
-from core.urgency import RECOMPUTE_CHUNK_SIZE, recompute_ids
+from core.urgency import finding_ids, recompute_ids
 
 log = logging.getLogger("core.reaper")
 
@@ -104,13 +111,49 @@ def _release_reap(mark: ImportMark, counters: dict) -> dict:
     return counters
 
 
+def _recompute_after_commit(counters: dict, ids, *, event: str, **extra) -> dict:
+    """Priority recompute for a reap. Runs OUTSIDE the reap transaction:
+    the mark is already `reaped`, its rows deleted, the anchor advanced.
+    It is whole-cluster for inventory and can take minutes, so it must not
+    hold the mark / cluster row locks. `recompute_ids` commits chunk by
+    chunk; a pod killed mid-way keeps the chunks it finished. A failure
+    here is logged and recorded on the counters but never propagated —
+    the reap itself succeeded and cannot be re-run (the mark is terminal);
+    the cluster's next reap or `recalculate_priorities` repairs priorities.
+    """
+    started = time.monotonic()
+    try:
+        scanned, updated = recompute_ids(ids)
+    except Exception:  # noqa: BLE001 - must not undo a committed reap
+        log.exception("%s.failed", event, extra=extra)
+        counters["recompute_failed"] = True
+        return counters
+    counters["priorities_recomputed"] = scanned
+    counters["priorities_changed"] = updated
+    log.info(event, extra={
+        **extra, "findings_recomputed": scanned, "priorities_changed": updated,
+        "seconds": round(time.monotonic() - started, 1),
+    })
+    return counters
+
+
 # ── Inventory reap ------------------------------------------------
 
-@transaction.atomic
 def _reap_inventory(mark: ImportMark) -> dict | None:
-    if not _claim_reap(mark):
-        return None
-    return _release_reap(mark, _reap_inventory_body(mark))
+    with transaction.atomic():
+        if not _claim_reap(mark):
+            return None
+        counters = _release_reap(mark, _reap_inventory_body(mark))
+    if counters.get("superseded"):
+        return counters
+    # Recompute priority for all findings on workloads in this cluster
+    # (publicly_exposed / namespace.internet_exposed may have moved).
+    cluster = mark.cluster
+    return _recompute_after_commit(
+        counters, finding_ids(cluster.findings.all()),
+        event="reap.inventory.recompute",
+        cluster=cluster.name, import_id=mark.import_id,
+    )
 
 
 def _reap_inventory_body(mark: ImportMark) -> dict:
@@ -191,12 +234,8 @@ def _reap_inventory_body(mark: ImportMark) -> dict:
     # currently_deployed flip so the snapshot writer can rely on it.
     _write_event_path_workload_snapshots(cluster, mark)
 
-    # Recompute priority for all findings on workloads in this cluster
-    # (publicly_exposed / namespace.internet_exposed may have moved).
-    recompute_ids(
-        cluster.findings.values_list("id", flat=True).iterator(chunk_size=RECOMPUTE_CHUNK_SIZE)
-    )
-
+    # The whole-cluster priority recompute runs in `_reap_inventory`,
+    # after this transaction has committed.
     log.info("reap.inventory", extra={"cluster": cluster.name, **counters})
     return counters
 
@@ -291,14 +330,26 @@ def _scope_has_items(cluster: Cluster, kind: str) -> bool:
     return cluster.workloads.filter(deployed=True).exists()
 
 
-@transaction.atomic
 def _reap_scan(mark: ImportMark) -> dict | None:
-    if not _claim_reap(mark):
-        return None
-    return _release_reap(mark, _reap_scan_body(mark))
+    with transaction.atomic():
+        if not _claim_reap(mark):
+            return None
+        body, workload_ids = _reap_scan_body(mark)
+        counters = _release_reap(mark, body)
+    if not workload_ids:
+        return counters
+    # Recompute the findings of the workloads whose signals were cleared.
+    return _recompute_after_commit(
+        counters, finding_ids(Finding.objects.filter(workload_id__in=workload_ids)),
+        event="reap.scan.recompute",
+        cluster=mark.cluster.name, kind=mark.kind, import_id=mark.import_id,
+    )
 
 
-def _reap_scan_body(mark: ImportMark) -> dict:
+def _reap_scan_body(mark: ImportMark) -> tuple[dict, set[int]]:
+    """Returns `(counters, workload_ids)` — the ids of workloads whose
+    signals were cleared, for the post-commit recompute (empty on the
+    zero-input / partial-failure / nothing-cleared paths)."""
     cluster = mark.cluster
     counters: dict = {"observed_count": mark.observed_count or 0}
     if (mark.observed_count or 0) == 0 and _scope_has_items(cluster, mark.kind):
@@ -315,7 +366,7 @@ def _reap_scan_body(mark: ImportMark) -> dict:
             "trivy.ExposedSecretReport",
         ):
             _write_scan_inconsistencies_for_outage(cluster, mark)
-        return counters
+        return counters, set()
 
     # Some of this kind's payloads failed to process, so their signals
     # were never bumped this cycle. Clearing "everything not bumped"
@@ -331,7 +382,7 @@ def _reap_scan_body(mark: ImportMark) -> dict:
             },
         )
         counters["skipped_partial_failure"] = True
-        return counters
+        return counters, set()
 
     # Source-specific signal clearing — only Kyverno/Trivy signals seen
     # by this kind get cleared. Per the no-canonical-dedup rule, each
@@ -339,6 +390,7 @@ def _reap_scan_body(mark: ImportMark) -> dict:
     # False on rows whose last_seen_at is older than this mark's
     # started_at (i.e. not bumped this cycle) AND whose signal_id was
     # in scope for this kind.
+    workload_ids: set[int] = set()
     in_scope_signal_ids = _signal_ids_for_kind(mark.kind)
     if in_scope_signal_ids:
         affected = list(
@@ -354,17 +406,10 @@ def _reap_scan_body(mark: ImportMark) -> dict:
         if affected:
             WorkloadSignal.objects.bulk_update(affected, ["currently_active"])
             counters["signals_cleared"] = len(affected)
-            # Recompute the affected workloads' findings.
             workload_ids = {s.workload_id for s in affected}
-            from core.models import Finding
-            recompute_ids(
-                Finding.objects.filter(workload_id__in=workload_ids)
-                .values_list("id", flat=True)
-                .iterator(chunk_size=RECOMPUTE_CHUNK_SIZE)
-            )
 
     log.info("reap.scan", extra={"cluster": cluster.name, "kind": mark.kind, **counters})
-    return counters
+    return counters, workload_ids
 
 
 def _write_scan_inconsistencies_for_outage(cluster: Cluster, mark: ImportMark) -> None:
@@ -471,7 +516,12 @@ def discard_import(
     `reaped` with `discard_reason=reason`, record each tuple's failure
     facts, and delete the import's queue rows. Never advances the
     cluster anchor, never runs a diff, never captures a heartbeat —
-    the cycle simply never happened, except for the audit row."""
+    the cycle simply never happened, except for the audit row.
+
+    The `select_for_update` here deliberately waits (no SKIP LOCKED): a
+    discard must be authoritative over every mark of the import. It can
+    only wait behind an in-flight reap of the *same* import, and that
+    reap's transaction is short now that the recompute runs after it."""
     marks = list(
         ImportMark.objects.select_for_update().filter(
             cluster=cluster, import_id=import_id, state__in=list(from_states),
