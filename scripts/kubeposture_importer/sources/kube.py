@@ -163,6 +163,3 @@ def cleanup_failed_sibling_jobs(client_module, *, namespace: str, cronjob_name: 
             print(f"  cleanup: deleted failed Job {job.metadata.name}")
         except Exception as e:
             print(f"  cleanup: failed to delete Job {job.metadata.name}: {e}", file=sys.stderr)
-
-    if not deleted:
-        print("  cleanup: no failed sibling Jobs to remove")

@@ -1,0 +1,34 @@
+{{- if .Values.cleanupFailedJobsOnSuccess }}
+{{- /*
+cleanupFailedJobsOnSuccess: after a successful run (a full import or an
+idle on-demand tick) the script deletes earlier failed Jobs of its own
+CronJob, so a transient failure stops tripping alerts once it has
+resolved. Deleting is scoped to this release's namespace — reading Jobs
+and CronJobs comes from the ClusterRole.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kubeposture-import.fullname" . }}-job-cleanup
+  labels:
+    {{- include "kubeposture-import.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kubeposture-import.fullname" . }}-job-cleanup
+  labels:
+    {{- include "kubeposture-import.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kubeposture-import.fullname" . }}-job-cleanup
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kubeposture-import.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

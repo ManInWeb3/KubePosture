@@ -88,6 +88,15 @@ WSGI_APPLICATION = "kubeposture.wsgi.application"
 DATABASES = {
     "default": env.db("DATABASE_URL"),
 }
+# Persistent connections: without this every web request pays a fresh
+# TCP + TLS (verify-full) + SCRAM handshake and a Postgres backend fork.
+# One connection per gunicorn thread, so the total count is unchanged.
+# Health checks re-validate a reused connection at the start of each
+# request, so a Postgres restart / failover costs one reconnect instead
+# of an error. Management commands (worker, crons) already hold one
+# connection for their whole run and are unaffected.
+DATABASES["default"]["CONN_MAX_AGE"] = env.int("DB_CONN_MAX_AGE", default=60)
+DATABASES["default"]["CONN_HEALTH_CHECKS"] = env.bool("DB_CONN_HEALTH_CHECKS", default=True)
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 

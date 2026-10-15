@@ -8,12 +8,15 @@ Public entry points:
                           Returns counters {claimed, ok, failed,
                           reaps_fired}.
 
-  drain_until_empty()   — loop drain_once() until no more pending
-                          items satisfy the worker gate. Used by the
-                          synchronous test harness.
+  drain_until_empty()   — loop drain_once() until a pass claims
+                          nothing (queue empty, or everything left is
+                          held by another worker / gated / not yet
+                          committed — a later run picks it up). The
+                          worker CronJob and the test harness.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import time
@@ -167,13 +170,20 @@ def drain_once(*, limit: int = 100) -> dict:
     }
 
 
-def drain_until_empty(*, limit: int = 100, max_iterations: int = 200) -> dict:
-    """Loop `drain_once` until a pass claims zero items. Used by the
-    /api/v1/testing/load_scenario/ harness so a scenario completes
-    synchronously.
+def drain_until_empty(*, limit: int = 100, max_iterations: int | None = 200) -> dict:
+    """Loop `drain_once` until a pass claims zero items.
+
+    `limit` rows are claimed per pass. With `limit=1` (the worker
+    CronJob's default) a pod claims one row, processes it, claims the
+    next — so parallel pods share an import row by row instead of one pod
+    hoarding a batch. A pass that claims nothing ends the loop: the queue
+    is empty, or every remaining row is held by another worker, gated
+    behind its import's inventory, or not committed yet; the next run
+    picks those up. `max_iterations` caps the passes; 0/None = no cap.
     """
     totals = {"claimed": 0, "ok": 0, "failed": 0, "reaps_fired": 0}
-    for _ in range(max_iterations):
+    passes = itertools.count() if not max_iterations else range(max_iterations)
+    for _ in passes:
         round_ = drain_once(limit=limit)
         if round_["claimed"] == 0:
             break

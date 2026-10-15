@@ -71,7 +71,7 @@
     },
     "cleanupFailedJobsOnSuccess": {
       "default": true,
-      "description": "When an import run succeeds, delete previously failed Jobs owned by\nthe same CronJob (main or trigger, whichever just succeeded). Transient\nfailures (connection resets, etc.) that later resolve on their own would\notherwise sit in the Job history and keep tripping failed-job alerts.\nfailedJobsHistoryLimit still applies as a cap for the case where cleanup\nitself can't run (flag disabled, or the delete fails).",
+      "description": "After a successful run, delete previously failed Jobs owned by the\nsame CronJob (main or trigger, whichever just succeeded). For the\ntrigger that includes idle ticks that found nothing pending — a\nsuccessful pending check proves the earlier failure is gone.\nTransient failures (connection resets, etc.) that later resolve on\ntheir own would otherwise sit in the Job history and keep tripping\nfailed-job alerts. Grants `delete` on Jobs in the release namespace\nonly (templates/role.yaml). failedJobsHistoryLimit still applies as a\ncap for the case where cleanup itself can't run.",
       "title": "cleanupFailedJobsOnSuccess",
       "type": "boolean"
     },

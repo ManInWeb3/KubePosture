@@ -292,20 +292,24 @@ worker:
   # @schema
   # $ref: "#/definitions/command"
   # @schema
-  # -- Default mode: drain_once in a loop until the queue is empty (up to
-  # max_iterations=200 rounds of --limit items each) — intentional for
-  # this CronJob, not just the synchronous /testing/load_scenario/
-  # harness. Each item commits independently (see worker._process_one),
-  # so a pod hitting activeDeadlineSeconds or its memory limit mid-loop
-  # still keeps whatever it already finished; the next tick (3 min later,
-  # or another pod in this same Job) picks up where it left off via
-  # claim_batch's stale-processing reclaim.
+  # -- Claim `--limit` rows, process them, claim again — until a pass
+  # claims nothing. With --limit 1 the `parallelism` pods share an import
+  # row by row (a larger batch lets one pod hoard rows the others could
+  # be working on). The run ends when the queue is empty or everything
+  # left is held by another pod, gated behind its import's inventory, or
+  # not committed yet; the next tick picks those up. --max-iterations
+  # caps the passes per run (0 = no cap). Each item commits
+  # independently (see worker._process_one), so a pod hitting
+  # activeDeadlineSeconds or its memory limit keeps what it finished and
+  # holds at most --limit rows, reclaimed after STALE_PROCESSING_SECONDS.
   command:
     - python
     - manage.py
     - process_ingest_queue
     - --limit
-    - "100"
+    - "1"
+    - --max-iterations
+    - "0"
   # @schema
   # $ref: "#/definitions/resources"
   # @schema

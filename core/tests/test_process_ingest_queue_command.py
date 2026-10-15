@@ -365,3 +365,56 @@ def test_command_does_not_retry_a_non_deadlock_failure(cluster):
     assert calls["n"] == 1, "a non-deadlock error must not be retried"
     assert mark.failed_count == 1
     assert "not a deadlock" in mark.last_error
+
+
+# ── claim size / iteration cap ─────────────────────────────────────
+
+
+def test_default_claims_one_row_per_pass_with_no_iteration_cap():
+    with patch("core.services.worker.drain_until_empty", return_value={"claimed": 0}) as drain:
+        call_command("process_ingest_queue", stdout=io.StringIO(), stderr=io.StringIO())
+    drain.assert_called_once_with(limit=1, max_iterations=0)
+
+
+def test_limit_and_max_iterations_flags_reach_the_drain_loop():
+    with patch("core.services.worker.drain_until_empty", return_value={"claimed": 0}) as drain:
+        call_command("process_ingest_queue", "--limit", "5", "--max-iterations", "3",
+                     stdout=io.StringIO(), stderr=io.StringIO())
+    drain.assert_called_once_with(limit=5, max_iterations=3)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_no_iteration_cap_drains_past_200_single_row_passes(cluster):
+    """`--max-iterations 0` must not stop at the old 200-pass cap: 205
+    rows claimed one at a time are all processed in one run."""
+    from core.services import worker
+
+    ImportMark.objects.create(cluster=cluster, kind=_UNKNOWN_KIND, import_id="imp-many",
+                              state=ImportMarkState.DRAINING.value, started_at=timezone.now())
+    IngestQueue.objects.bulk_create([
+        IngestQueue(cluster_name=cluster.name, kind=_UNKNOWN_KIND, import_id="imp-many", raw_json={})
+        for _ in range(205)
+    ])
+    totals = worker.drain_until_empty(limit=1, max_iterations=0)
+    assert totals["claimed"] == totals["ok"] == 205
+    assert IngestQueue.objects.count() == 0, "reaped once the last row was done"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_run_exits_when_only_gated_or_uncommitted_rows_remain(cluster):
+    """No waiting: a pass that claims nothing ends the run even though
+    rows exist — scan rows gated behind an inventory another pod holds,
+    and rows of an import that isn't committed yet. The next tick gets them."""
+    from core.services import worker
+
+    _seed(cluster, kind="inventory", import_id="imp-gated",
+          queue_status=IngestQueueStatus.PROCESSING.value)          # another pod has it
+    IngestQueue.objects.filter(kind="inventory").update(claimed_at=timezone.now())
+    _seed(cluster, kind="trivy.VulnerabilityReport", import_id="imp-gated")  # gated
+    _seed(cluster, import_id="imp-open", mark_state=ImportMarkState.OPEN.value)  # not committed
+
+    started = timezone.now()
+    totals = worker.drain_until_empty(limit=1, max_iterations=0)
+    assert totals["claimed"] == 0
+    assert (timezone.now() - started).total_seconds() < 5
+    assert IngestQueue.objects.filter(status=IngestQueueStatus.PENDING.value).count() == 2

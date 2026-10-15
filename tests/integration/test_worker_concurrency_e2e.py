@@ -172,3 +172,49 @@ def test_parallel_workers_drain_the_backlog_despite_one_locked_poison_item():
         "abandoned or claimed while another transaction still holds it"
     )
     assert poison.attempts == MAX_RECLAIM_ATTEMPTS
+
+
+@pytest.mark.django_db(transaction=True)
+def test_parallel_workers_share_one_import_row_by_row():
+    """The default worker command (`--limit 1`) on ONE committed import:
+    every pod gets a share of the rows instead of the first pod hoarding a
+    batch, and no row is processed twice."""
+    cluster = Cluster.objects.create(name="c-e2e-share")
+    ImportMark.objects.create(cluster=cluster, kind=_UNKNOWN_KIND, import_id="imp-share",
+                              state=ImportMarkState.DRAINING.value, started_at=timezone.now())
+    n_rows = 40
+    IngestQueue.objects.bulk_create([
+        IngestQueue(cluster_name=cluster.name, kind=_UNKNOWN_KIND, import_id="imp-share", raw_json={})
+        for _ in range(n_rows)
+    ])
+
+    from core.services import ingest
+    real_process_item = ingest.process_item
+    processed_by: dict[int, list[int]] = {}
+    lock = threading.Lock()
+
+    def tracking_process_item(item):
+        time.sleep(0.02)  # a little real work, so pods overlap
+        with lock:
+            processed_by.setdefault(threading.get_ident(), []).append(item.id)
+        return real_process_item(item)
+
+    def run_worker():
+        call_command("process_ingest_queue", stdout=io.StringIO(), stderr=io.StringIO())
+        connection.close()
+
+    with patch("core.services.ingest.process_item", side_effect=tracking_process_item):
+        workers = [threading.Thread(target=run_worker) for _ in range(_N_PARALLEL_WORKERS)]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join(timeout=30)
+
+    all_ids = [i for ids in processed_by.values() for i in ids]
+    assert len(all_ids) == n_rows and len(set(all_ids)) == n_rows, "every row exactly once"
+    assert len(processed_by) == _N_PARALLEL_WORKERS, (
+        f"only {len(processed_by)} of {_N_PARALLEL_WORKERS} workers processed anything — "
+        "one pod hoarded the import"
+    )
+    assert IngestQueue.objects.count() == 0
+    assert ImportMark.objects.get(import_id="imp-share").state == ImportMarkState.REAPED.value

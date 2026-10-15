@@ -39,18 +39,14 @@ rules:
       - daemonsets
       - replicasets
     verbs: ["get", "list"]
+  # Read-only, cluster-wide. Deleting this release's own failed Jobs
+  # (cleanupFailedJobsOnSuccess) is granted separately by the namespaced
+  # Role in role.yaml — never in other namespaces.
   - apiGroups: ["batch"]
     resources:
       - cronjobs
-    verbs: ["get", "list"]
-  # `delete` on jobs backs cleanupFailedJobsOnSuccess (values.yaml):
-  # once an import succeeds, the script deletes earlier failed sibling
-  # Jobs owned by the same CronJob so stale failures stop tripping
-  # alerts after the underlying issue has resolved itself.
-  - apiGroups: ["batch"]
-    resources:
       - jobs
-    verbs: ["get", "list", "delete"]
+    verbs: ["get", "list"]
   {{- if .Values.import.trivy }}
   # Trivy Operator CRDs — must match the kinds listed in
   # scripts/import-cluster.py; otherwise the script silently drops

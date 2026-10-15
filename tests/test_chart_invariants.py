@@ -147,3 +147,16 @@ def test_values_schema_is_generated_and_referenced():
     )
     importer = json.loads((IMPORTER / "values.schema.json").read_text())
     assert "clusterName" in importer["required"] and importer["properties"]["clusterName"]["minLength"] == 1
+
+
+def test_importer_can_delete_jobs_only_in_its_own_namespace():
+    """cleanupFailedJobsOnSuccess needs `delete` on Jobs — granted by a
+    namespaced Role, never by the ClusterRole (which would allow deleting
+    Jobs in every namespace of the cluster)."""
+    cluster_role = (IMPORTER / "templates/clusterrole.yaml").read_text()
+    verbs = [ln for ln in cluster_role.splitlines() if ln.strip().startswith("verbs:")]
+    assert verbs and not any("delete" in ln for ln in verbs), "ClusterRole must stay read-only"
+    role = (IMPORTER / "templates/role.yaml").read_text()
+    assert "kind: Role\n" in role and "kind: RoleBinding" in role
+    assert 'resources: ["jobs"]' in role and 'verbs: ["delete"]' in role
+    assert "if .Values.cleanupFailedJobsOnSuccess" in role

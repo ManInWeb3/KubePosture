@@ -262,18 +262,46 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     _install_sigterm_handler()
 
+    rc, kube = _run(args)
+    if rc == 0:
+        _cleanup_failed_jobs(args, kube)
+    return rc
+
+
+def _cleanup_failed_jobs(args: argparse.Namespace, kube) -> None:
+    """After ANY successful run — a full import, or an on-demand tick that
+    found nothing pending — delete earlier failed Jobs of this pod's own
+    CronJob (cleanupFailedJobsOnSuccess). The idle trigger ticks matter
+    most: they are the common case, and a successful pending check is
+    proof the failure that killed an earlier tick (central unreachable,
+    bad token, …) is gone. Best-effort: never changes the exit code."""
+    if not args.cleanup_failed_jobs or args.from_folder:
+        return
+    if not (args.k8s_namespace and args.cronjob_name):
+        _err("  cleanup: KUBEPOSTURE_NAMESPACE/KUBEPOSTURE_CRONJOB_NAME not set, skipping")
+        return
+    from .sources import kube as kube_source
+    try:
+        kube = kube or kube_source.load_kube_config(args.kubeconfig, args.in_cluster)
+        kube_source.cleanup_failed_sibling_jobs(kube, namespace=args.k8s_namespace, cronjob_name=args.cronjob_name)
+    except Exception as e:  # noqa: BLE001 — cleanup must never fail the run
+        _err(f"  cleanup: skipped: {e}")
+
+
+def _run(args: argparse.Namespace) -> tuple[int, object | None]:
+    """One importer run. Returns (rc, kubernetes client module if loaded)."""
     client = HttpClient(args.base_url, args.token, timeout=args.http_timeout)
     requested_at: str | None = None
     if args.on_demand_only:
         info = check_pending(client, cluster=args.cluster_name)
         if info is None:
-            return 1
+            return 1, None
         if not info.get("pending"):
             print(f"on-demand: no pending request for {args.cluster_name}, exiting")
-            return 0
+            return 0, None
         if info.get("in_flight"):
             print(f"on-demand: pending request for {args.cluster_name} but import is already in flight, exiting")
-            return 0
+            return 0, None
         requested_at = info.get("requested_at")
         print(f"on-demand: pending request for {args.cluster_name} (requested_at={requested_at}), running full import")
 
@@ -282,7 +310,7 @@ def main(argv: list[str] | None = None) -> int:
         root = Path(args.from_folder).resolve()
         if not root.is_dir():
             _err(f"error: --from-folder path is not a directory: {root}")
-            return 2
+            return 2, None
         print(f"Reading captured cluster from {root}")
         by_kind = collect_from_folder(root)
     else:
@@ -292,7 +320,7 @@ def main(argv: list[str] | None = None) -> int:
             client_module = load_kube_config(args.kubeconfig, args.in_cluster)
         except Exception as e:
             _err(f"error: failed to load kube config: {e}")
-            return 2
+            return 2, None
         print("Listing from kube-api...")
         by_kind = collect_from_kube_api(client_module)
 
@@ -303,12 +331,4 @@ def main(argv: list[str] | None = None) -> int:
     # mid-import is preserved server-side via the conditional clear.
     if args.on_demand_only and rc == 0 and requested_at:
         clear_pending(client, cluster=args.cluster_name, satisfied_at=requested_at)
-
-    if rc == 0 and client_module is not None and args.cleanup_failed_jobs:
-        from .sources.kube import cleanup_failed_sibling_jobs
-        if args.k8s_namespace and args.cronjob_name:
-            cleanup_failed_sibling_jobs(client_module, namespace=args.k8s_namespace, cronjob_name=args.cronjob_name)
-        else:
-            _err("  cleanup: KUBEPOSTURE_NAMESPACE/KUBEPOSTURE_CRONJOB_NAME not set, skipping")
-
-    return rc
+    return rc, client_module
