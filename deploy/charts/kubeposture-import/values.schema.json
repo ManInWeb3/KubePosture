@@ -1,0 +1,389 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "cronSchedule": {
+      "description": "Cron expression (5 fields) or a @-macro such as @daily.",
+      "pattern": "^(@(yearly|annually|monthly|weekly|daily|midnight|hourly)|(\\S+\\s+){4}\\S+)$",
+      "type": "string"
+    },
+    "quantity": {
+      "description": "Kubernetes resource quantity, e.g. 500m, 1, 1.5, 512Mi, 2Gi.",
+      "pattern": "^[0-9]+(\\.[0-9]+)?(m|k|M|G|T|P|E|Ki|Mi|Gi|Ti|Pi|Ei)?$",
+      "required": [],
+      "type": [
+        "string",
+        "number"
+      ]
+    },
+    "resourceList": {
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {
+          "$ref": "#/definitions/quantity",
+          "required": []
+        },
+        "ephemeral-storage": {
+          "$ref": "#/definitions/quantity",
+          "required": []
+        },
+        "memory": {
+          "$ref": "#/definitions/quantity",
+          "required": []
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "resources": {
+      "additionalProperties": false,
+      "description": "Kubernetes ResourceRequirements.",
+      "properties": {
+        "limits": {
+          "$ref": "#/definitions/resourceList",
+          "required": []
+        },
+        "requests": {
+          "$ref": "#/definitions/resourceList",
+          "required": []
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "stringMap": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Free-form string→string map (labels, annotations, selectors).",
+      "required": [],
+      "type": "object"
+    }
+  },
+  "description": "Imports Trivy / Kyverno CRD data from this cluster into KubePosture. Deploy to EACH cluster that has Trivy Operator and/or Kyverno installed. Creates a CronJob that reads CRDs from the local K8s API, filters them for relevance, uploads one compressed bundle per kind to the KubePosture bundle endpoints and commits the import atomically.",
+  "properties": {
+    "activeDeadlineSeconds": {
+      "default": 900,
+      "description": "Maximum run time for the import job. A cycle is ~10 requests and\nnormally finishes in seconds. Must stay \u003c= the central's\nIMPORT_LOCK_TIMEOUT_SECONDS (1200) so a slow-but-alive import is never\nraced by a second one.",
+      "minimum": 1,
+      "title": "activeDeadlineSeconds",
+      "type": "integer"
+    },
+    "cleanupFailedJobsOnSuccess": {
+      "default": true,
+      "description": "When an import run succeeds, delete previously failed Jobs owned by\nthe same CronJob (main or trigger, whichever just succeeded). Transient\nfailures (connection resets, etc.) that later resolve on their own would\notherwise sit in the Job history and keep tripping failed-job alerts.\nfailedJobsHistoryLimit still applies as a cap for the case where cleanup\nitself can't run (flag disabled, or the delete fails).",
+      "title": "cleanupFailedJobsOnSuccess",
+      "type": "boolean"
+    },
+    "clusterName": {
+      "default": "",
+      "description": "Cluster name as registered in KubePosture (e.g. cluster-name-1, cluster-name-2). Required.",
+      "minLength": 1,
+      "title": "clusterName",
+      "type": "string"
+    },
+    "coverage": {
+      "additionalProperties": false,
+      "description": "Scan-coverage check (record + alert, never aborts the import): the\nratio (matched / expected) below which the importer prints a WARNING\nand the central logs `import.coverage_low`. Kyverno coverage is always\ninformational.",
+      "properties": {
+        "minRatio": {
+          "default": 0.9,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "minRatio",
+          "type": "number"
+        }
+      },
+      "required": [],
+      "title": "coverage",
+      "type": "object"
+    },
+    "fullnameOverride": {
+      "default": "",
+      "description": "Override the full release-qualified resource name.",
+      "title": "fullnameOverride",
+      "type": "string"
+    },
+    "global": {
+      "description": "Global values are values that can be accessed from any chart or subchart by exactly the same name.",
+      "required": [],
+      "title": "global",
+      "type": "object"
+    },
+    "httpTimeoutSeconds": {
+      "default": 60,
+      "description": "Per-request HTTP timeout (seconds) for calls to the KubePosture API.\nA bundle upload is one request; bump this if uploads of SBOM-heavy\nclusters time out through a slow LB/ingress.",
+      "minimum": 1,
+      "title": "httpTimeoutSeconds",
+      "type": "integer"
+    },
+    "image": {
+      "additionalProperties": false,
+      "description": "Image containing the import script + kubernetes Python client",
+      "properties": {
+        "pullPolicy": {
+          "default": "IfNotPresent",
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ],
+          "title": "pullPolicy",
+          "type": "string"
+        },
+        "repository": {
+          "default": "ghcr.io/maninweb3/kubeposture",
+          "minLength": 1,
+          "title": "repository",
+          "type": "string"
+        },
+        "tag": {
+          "default": "",
+          "title": "tag",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tag"
+      ],
+      "title": "image",
+      "type": "object"
+    },
+    "imagePullSecrets": {
+      "description": "Pull secrets, as `- name: \u003csecret\u003e` entries.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "title": "imagePullSecrets",
+      "type": "array"
+    },
+    "import": {
+      "additionalProperties": false,
+      "description": "What to import",
+      "properties": {
+        "kyverno": {
+          "default": true,
+          "title": "kyverno",
+          "type": "boolean"
+        },
+        "trivy": {
+          "default": true,
+          "title": "trivy",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "trivy",
+        "kyverno"
+      ],
+      "title": "import",
+      "type": "object"
+    },
+    "initialRun": {
+      "default": true,
+      "description": "Run the import once on install/upgrade, then follow the schedule.\nSet to false to only run on the schedule.",
+      "title": "initialRun",
+      "type": "boolean"
+    },
+    "jobAnnotations": {
+      "$ref": "#/definitions/stringMap",
+      "required": []
+    },
+    "kubepostureUrl": {
+      "default": "https://kubeposture.central.someorg.xyz",
+      "description": "KubePosture API base URL",
+      "pattern": "^https?://",
+      "title": "kubepostureUrl",
+      "type": "string"
+    },
+    "logLevel": {
+      "default": "info",
+      "description": "Importer log verbosity: info | debug (debug lists unmatched digests\nand every deployed digest with its source — useful once, noisy always).",
+      "enum": [
+        "info",
+        "debug"
+      ],
+      "title": "logLevel",
+      "type": "string"
+    },
+    "nameOverride": {
+      "default": "",
+      "description": "Override the chart name used in resource names.",
+      "title": "nameOverride",
+      "type": "string"
+    },
+    "nodeSelector": {
+      "$ref": "#/definitions/stringMap",
+      "required": []
+    },
+    "relevanceFilter": {
+      "default": true,
+      "description": "Relevance filter: drop scan reports for images that are not\ncurrently running (Trivy keeps a report for every historical\nReplicaSet) and for workloads no longer in the snapshot. The central\nwould skip or hide those anyway; shipping them is pure cost. Set to\nfalse as an escape hatch while investigating a digest mismatch\n(coverage ratio unexpectedly low) — no central change needed.",
+      "title": "relevanceFilter",
+      "type": "boolean"
+    },
+    "resources": {
+      "$ref": "#/definitions/resources",
+      "required": []
+    },
+    "schedule": {
+      "$ref": "#/definitions/cronSchedule",
+      "required": []
+    },
+    "serviceAccount": {
+      "additionalProperties": false,
+      "description": "Service account: needs read access to Trivy and Kyverno CRDs",
+      "properties": {
+        "annotations": {
+          "$ref": "#/definitions/stringMap",
+          "required": []
+        },
+        "automount": {
+          "default": true,
+          "title": "automount",
+          "type": "boolean"
+        },
+        "create": {
+          "default": true,
+          "title": "create",
+          "type": "boolean"
+        },
+        "name": {
+          "default": "",
+          "title": "name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "create",
+        "automount",
+        "name"
+      ],
+      "title": "serviceAccount",
+      "type": "object"
+    },
+    "tmp": {
+      "additionalProperties": false,
+      "description": "Scratch space for building the bundles (one uncompressed pass of\nthe snapshot, ~20 MB for a mid-size cluster, then the gzipped\nbundles). Mounted at /tmp (readOnlyRootFilesystem is on).",
+      "properties": {
+        "sizeLimit": {
+          "$ref": "#/definitions/quantity",
+          "required": []
+        }
+      },
+      "required": [],
+      "title": "tmp",
+      "type": "object"
+    },
+    "token": {
+      "additionalProperties": false,
+      "description": "KubePosture API token — provide either a plaintext value or a secret reference.\nIf secretRef.name is set it takes precedence over value.",
+      "properties": {
+        "secretRef": {
+          "additionalProperties": false,
+          "properties": {
+            "key": {
+              "required": [],
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "required": [],
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [],
+          "title": "secretRef",
+          "type": "object"
+        },
+        "value": {
+          "default": "SomeStrongSecret",
+          "title": "value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "token",
+      "type": "object"
+    },
+    "tolerations": {
+      "description": "Tolerations for the import pods (passed through verbatim).",
+      "items": {
+        "additionalProperties": true,
+        "required": [],
+        "type": "object"
+      },
+      "title": "tolerations",
+      "type": "array"
+    },
+    "trigger": {
+      "additionalProperties": false,
+      "description": "On-demand reimport trigger (pull pattern).\nA second CronJob ticks every minute and only runs the full import when\nan admin has clicked \"Re-import\" in KubePosture. Most ticks just hit\n/api/v1/imports/pending/ and exit immediately. Disable to fall back to\nthe 6-hour cadence above.",
+      "properties": {
+        "activeDeadlineSeconds": {
+          "default": 900,
+          "description": "Same deadline as the main job: idle ticks complete in seconds, but\nwhen a real import fires it runs the same code path and needs the\nsame budget.",
+          "minimum": 1,
+          "title": "activeDeadlineSeconds",
+          "type": "integer"
+        },
+        "enabled": {
+          "default": true,
+          "title": "enabled",
+          "type": "boolean"
+        },
+        "schedule": {
+          "$ref": "#/definitions/cronSchedule",
+          "required": []
+        }
+      },
+      "required": [
+        "enabled"
+      ],
+      "title": "trigger",
+      "type": "object"
+    },
+    "uploadDeadlineSeconds": {
+      "default": 600,
+      "description": "Wall-clock budget for uploads + commit inside one run. Past it the\nimporter stops retrying and aborts the import server-side, so a clean\nabort always lands before Kubernetes SIGKILLs the pod at\nactiveDeadlineSeconds. Must be \u003c activeDeadlineSeconds.",
+      "minimum": 1,
+      "title": "uploadDeadlineSeconds",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "clusterName",
+    "kubepostureUrl",
+    "token",
+    "import",
+    "initialRun",
+    "relevanceFilter",
+    "coverage",
+    "tmp",
+    "cleanupFailedJobsOnSuccess",
+    "trigger",
+    "image",
+    "nameOverride",
+    "fullnameOverride",
+    "serviceAccount"
+  ],
+  "title": "kubeposture-import chart values",
+  "type": "object"
+}

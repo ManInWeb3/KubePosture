@@ -389,6 +389,31 @@ pytest scripts/importer_tests                          # the importer package (n
   `fixtures/real/<alias>/` and the real `scripts/import-cluster.py
   --from-folder`; they skip when no fixture is present.
 - `.github/workflows/test.yml` runs lint, unit and e2e jobs on every PR.
+- `.github/workflows/helm-schema.yml` guards the charts' `values.schema.json`
+  (see below).
+
+### Helm values schema
+
+Both charts ship a `values.schema.json`, so a typo'd key, a wrong type or
+an out-of-range value fails `helm install` / `upgrade` / `lint` /
+`template` before anything is rendered. The schema is **generated** from
+`values.yaml` by [dadav/helm-schema](https://github.com/dadav/helm-schema)
+— the `# @schema … # @schema` comment blocks in `values.yaml` carry the
+constraints inference cannot see (enums, nullables, ranges, free-form
+maps, shared `definitions` such as `resources` and `cronJob`); types,
+defaults and descriptions come from the values and their comments.
+Never edit the JSON by hand:
+
+```bash
+# after changing either values.yaml (same version CI pins):
+helm-schema -c deploy/charts -n -r -a
+# what CI runs — fails when a committed schema is stale:
+helm-schema -c deploy/charts -n -a --check
+```
+
+The workflow also lints a set of deliberately invalid overrides and
+expects them to be rejected, so a loosened annotation is caught in the
+PR rather than by a user at install time.
 
 ---
 
