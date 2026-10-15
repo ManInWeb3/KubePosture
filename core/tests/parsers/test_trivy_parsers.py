@@ -393,3 +393,91 @@ def test_vuln_report_severity_mapping_is_exact():
     assert by_id == {"CVE-CRITICAL": Severity.CRITICAL.value, "CVE-HIGH": Severity.HIGH.value,
                      "CVE-MEDIUM": Severity.MEDIUM.value, "CVE-LOW": Severity.LOW.value,
                      "CVE-UNKNOWN": Severity.UNKNOWN.value, "CVE-WEIRD": Severity.UNKNOWN.value}
+
+
+# ── The four check-list parsers share one finding shape ───────────
+#
+# ConfigAudit / Rbac / ClusterRbac / Infra all walk `report.checks` and
+# differ only in category, in which check fields land in `details`, and in
+# whether failed checks also feed the signal registry. Pinned literally so a
+# consolidation of the four loops cannot drift on a constant column.
+
+
+_FULL_CHECK = {
+    "checkID": "KSV0017", "severity": "MEDIUM", "success": False, "title": "Privileged container",
+    "description": "d", "remediation": "r", "category": "Kubernetes Security Check", "messages": ["m1"],
+}
+
+
+def _expected_check_finding(category: str, details: dict) -> dict:
+    return {
+        "source": Source.TRIVY.value, "category": category, "vuln_id": "AVD-KSV-0017",
+        "pkg_name": "", "installed_version": "", "fixed_version": "",
+        "title": "Privileged container", "severity": Severity.MEDIUM.value,
+        "cvss_score": None, "cvss_vector": "", "details": details,
+    }
+
+
+_BASE_DETAILS = {"description": "d", "remediation": "r", "messages": ["m1"]}
+
+
+@pytest.mark.parametrize(("parser", "category", "details"), [
+    (trivy.parse_config_audit_report, Category.CONFIG.value,
+     {**_BASE_DETAILS, "category": "Kubernetes Security Check"}),
+    (trivy.parse_rbac_assessment_report, Category.RBAC.value, _BASE_DETAILS),
+    (trivy.parse_cluster_rbac_assessment_report, Category.RBAC.value,
+     {**_BASE_DETAILS, "scope": "cluster", "resource_kind": "Role", "resource_name": "deployer"}),
+    (trivy.parse_infra_assessment_report, Category.COMPLIANCE.value, _BASE_DETAILS),
+], ids=["config-audit", "rbac", "cluster-rbac", "infra"])
+def test_check_parsers_emit_the_same_finding_columns(parser, category, details):
+    obj = _check_report("X", resource_kind="Role", resource_name="deployer", namespace="payments",
+                        checks=[_FULL_CHECK, {**_FULL_CHECK, "checkID": "KSV0001", "success": True}])
+    parsed = parser(obj)
+    assert parsed["findings"] == [_expected_check_finding(category, details)]
+    assert (parsed["container_name"], parsed["image_ref"], parsed["image_digest"]) == ("", "", "")
+
+
+@pytest.mark.parametrize("parser", [
+    trivy.parse_config_audit_report, trivy.parse_rbac_assessment_report,
+    trivy.parse_cluster_rbac_assessment_report, trivy.parse_infra_assessment_report,
+], ids=["config-audit", "rbac", "cluster-rbac", "infra"])
+def test_check_parsers_fall_back_to_the_check_id_as_title_and_unknown_severity(parser):
+    parsed = parser(_check_report("X", resource_kind="Role", resource_name="r", namespace="ns",
+                                  checks=[{"checkID": "KSV-0005"}]))
+    [f] = parsed["findings"]
+    assert (f["title"], f["severity"], f["vuln_id"]) == ("KSV-0005", Severity.UNKNOWN.value, "AVD-KSV-0005")
+    assert (f["details"]["description"], f["details"]["remediation"], f["details"]["messages"]) == ("", "", [])
+
+
+def test_only_config_audit_and_rbac_feed_the_signal_registry():
+    _, other_sd = _trivy_signal_ids()
+    rbac_sd, _ = _trivy_signal_ids()
+    checks = [{"checkID": other_sd.matcher, "success": False}, {"checkID": rbac_sd.matcher, "success": False}]
+    obj = _check_report("X", resource_kind="Role", resource_name="r", namespace="ns", checks=checks)
+    both = {other_sd.id, rbac_sd.id}
+    assert trivy.parse_config_audit_report(obj)["signal_ids"] == both
+    assert trivy.parse_rbac_assessment_report(obj)["signal_ids"] == both
+    assert trivy.parse_cluster_rbac_assessment_report(obj)["signal_ids"] == set()
+    assert trivy.parse_infra_assessment_report(obj)["signal_ids"] == set()
+
+
+def test_every_report_parser_returns_the_same_identity_skeleton():
+    """ingest reads namespace / resource_kind / resource_name / container_name /
+    image_ref / image_digest off every parsed report; image-anchored kinds
+    fill the last three, the rest leave them empty."""
+    obj = _vuln_report()
+    skeleton = {"namespace": "payments", "resource_kind": "ReplicaSet", "resource_name": "api-server-7d9f5b6c8d"}
+    image_kinds = {"trivy.VulnerabilityReport", "trivy.ExposedSecretReport", "trivy.SbomReport"}
+    for kind, parser in trivy.PARSERS_BY_KIND.items():
+        parsed = parser(obj)
+        expected_kind = "trivy.InfraAssessmentReport" if kind == "trivy.ClusterComplianceReport" else kind
+        assert parsed["kind"] == expected_kind, kind
+        if kind == "trivy.ClusterRbacAssessmentReport":
+            assert parsed["namespace"] == "" and parsed["cluster_scoped"] is True
+        else:
+            assert {k: parsed[k] for k in skeleton} == skeleton, kind
+        if kind in image_kinds:
+            assert (parsed["container_name"], parsed["image_ref"], parsed["image_digest"]) == (
+                "app", "registry.internal/payments/api:v1.2.3", "sha256:" + "a" * 64), kind
+        else:
+            assert (parsed["container_name"], parsed["image_ref"], parsed["image_digest"]) == ("", "", ""), kind
