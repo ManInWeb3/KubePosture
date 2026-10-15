@@ -1,12 +1,58 @@
-# -- kubeposture-import: imports Trivy/Kyverno CRD data from this cluster into KubePosture
+# yaml-language-server: $schema=values.schema.json
 #
-# Deploy this chart to EACH cluster that has Trivy Operator and/or Kyverno installed.
-# It creates a CronJob that reads CRDs from the local K8s API and POSTs them to the
-# KubePosture ingest endpoint.
+# values.schema.json is GENERATED from this file by dadav/helm-schema —
+# never edit it by hand. The `# @schema … # @schema` blocks carry the
+# constraints the generator cannot infer; types, defaults and
+# descriptions come from the values and the comments above them.
+#
+#   helm-schema -c deploy/charts -n -r -a        # regenerate both charts
+#   helm-schema -c deploy/charts -n --check      # what CI runs
 
-# -- Cluster name as registered in KubePosture (e.g. cluster-name-1, cluster-name-2)
+# @schema.root
+# title: kubeposture-import chart values
+# description: Imports Trivy / Kyverno CRD data from this cluster into KubePosture. Deploy to EACH cluster that has Trivy Operator and/or Kyverno installed. Creates a CronJob that reads CRDs from the local K8s API, filters them for relevance, uploads one compressed bundle per kind to the KubePosture bundle endpoints and commits the import atomically.
+# definitions:
+#   quantity:
+#     description: Kubernetes resource quantity, e.g. 500m, 1, 1.5, 512Mi, 2Gi.
+#     type: [string, number]
+#     pattern: '^[0-9]+(\.[0-9]+)?(m|k|M|G|T|P|E|Ki|Mi|Gi|Ti|Pi|Ei)?$'
+#   resourceList:
+#     type: object
+#     additionalProperties: false
+#     properties:
+#       cpu: {$ref: "#/definitions/quantity"}
+#       memory: {$ref: "#/definitions/quantity"}
+#       ephemeral-storage: {$ref: "#/definitions/quantity"}
+#   resources:
+#     description: Kubernetes ResourceRequirements.
+#     type: object
+#     additionalProperties: false
+#     properties:
+#       requests: {$ref: "#/definitions/resourceList"}
+#       limits: {$ref: "#/definitions/resourceList"}
+#   cronSchedule:
+#     description: Cron expression (5 fields) or a @-macro such as @daily.
+#     type: string
+#     pattern: '^(@(yearly|annually|monthly|weekly|daily|midnight|hourly)|(\S+\s+){4}\S+)$'
+#   stringMap:
+#     description: Free-form string→string map (labels, annotations, selectors).
+#     type: object
+#     additionalProperties: {type: string}
+# @schema.root
+
+# @schema
+# type: string
+# minLength: 1
+# required: true
+# @schema
+# -- Cluster name as registered in KubePosture (e.g. cluster-name-1, cluster-name-2). Required.
 clusterName: ""
 
+# @schema
+# type: string
+# pattern: '^https?://'
+# required: true
+# @schema
 # -- KubePosture API base URL
 kubepostureUrl: "https://kubeposture.central.someorg.xyz"
 
@@ -14,6 +60,13 @@ kubepostureUrl: "https://kubeposture.central.someorg.xyz"
 # If secretRef.name is set it takes precedence over value.
 token:
   value: "SomeStrongSecret"               # plaintext value (default)
+  # @schema
+  # type: object
+  # additionalProperties: false
+  # properties:
+  #   name: {type: [string, "null"]}
+  #   key: {type: [string, "null"]}
+  # @schema
   secretRef:
     name: null                            # if set, takes precedence over value
     key: null
@@ -27,11 +80,68 @@ import:
 # Set to false to only run on the schedule.
 initialRun: true
 
+# @schema
+# $ref: "#/definitions/cronSchedule"
+# @schema
 # -- CronJob schedule (default: every 6 hours)
 schedule: "0 */6 * * *"
 
-# -- Maximum run time for the import job
-activeDeadlineSeconds: 1800
+# @schema
+# type: integer
+# minimum: 1
+# @schema
+# -- Maximum run time for the import job. A cycle is ~10 requests and
+# normally finishes in seconds. Must stay <= the central's
+# IMPORT_LOCK_TIMEOUT_SECONDS (1200) so a slow-but-alive import is never
+# raced by a second one.
+activeDeadlineSeconds: 900
+
+# @schema
+# type: integer
+# minimum: 1
+# @schema
+# -- Wall-clock budget for uploads + commit inside one run. Past it the
+# importer stops retrying and aborts the import server-side, so a clean
+# abort always lands before Kubernetes SIGKILLs the pod at
+# activeDeadlineSeconds. Must be < activeDeadlineSeconds.
+uploadDeadlineSeconds: 600
+
+# -- Relevance filter: drop scan reports for images that are not
+# currently running (Trivy keeps a report for every historical
+# ReplicaSet) and for workloads no longer in the snapshot. The central
+# would skip or hide those anyway; shipping them is pure cost. Set to
+# false as an escape hatch while investigating a digest mismatch
+# (coverage ratio unexpectedly low) — no central change needed.
+relevanceFilter: true
+
+# -- Scan-coverage check (record + alert, never aborts the import): the
+# ratio (matched / expected) below which the importer prints a WARNING
+# and the central logs `import.coverage_low`. Kyverno coverage is always
+# informational.
+coverage:
+  # @schema
+  # type: number
+  # minimum: 0
+  # maximum: 1
+  # @schema
+  minRatio: 0.9
+
+# @schema
+# type: string
+# enum: [info, debug]
+# @schema
+# -- Importer log verbosity: info | debug (debug lists unmatched digests
+# and every deployed digest with its source — useful once, noisy always).
+logLevel: info
+
+# -- Scratch space for building the bundles (one uncompressed pass of
+# the snapshot, ~20 MB for a mid-size cluster, then the gzipped
+# bundles). Mounted at /tmp (readOnlyRootFilesystem is on).
+tmp:
+  # @schema
+  # $ref: "#/definitions/quantity"
+  # @schema
+  sizeLimit: 256Mi
 
 # -- When an import run succeeds, delete previously failed Jobs owned by
 # the same CronJob (main or trigger, whichever just succeeded). Transient
@@ -41,12 +151,18 @@ activeDeadlineSeconds: 1800
 # itself can't run (flag disabled, or the delete fails).
 cleanupFailedJobsOnSuccess: true
 
-# -- Per-request HTTP timeout (seconds) for POSTs to the KubePosture API.
-# Bump this if your import job sees intermittent connection-reset failures
-# during long ingest cycles — the central server can occasionally take
-# >30s to respond under burst load via an LB/ingress.
+# @schema
+# type: integer
+# minimum: 1
+# @schema
+# -- Per-request HTTP timeout (seconds) for calls to the KubePosture API.
+# A bundle upload is one request; bump this if uploads of SBOM-heavy
+# clusters time out through a slow LB/ingress.
 httpTimeoutSeconds: 60
 
+# @schema
+# $ref: "#/definitions/stringMap"
+# @schema
 # -- Extra annotations on the install/upgrade Job (NOT the CronJob).
 # The Job is rendered as a regular resource (no helm.sh/hook), so under
 # plain Helm or ArgoCD it's only created/replaced when its spec changes.
@@ -64,39 +180,84 @@ jobAnnotations: {}
 # the 6-hour cadence above.
 trigger:
   enabled: true
+  # @schema
+  # $ref: "#/definitions/cronSchedule"
+  # @schema
   schedule: "* * * * *"
-  # Tighter deadline than the main job: idle ticks complete in seconds.
-  # When a real import fires it inherits the main `activeDeadlineSeconds`
-  # because the on-demand job runs the same code path.
-  activeDeadlineSeconds: 1800
+  # @schema
+  # type: integer
+  # minimum: 1
+  # @schema
+  # -- Same deadline as the main job: idle ticks complete in seconds, but
+  # when a real import fires it runs the same code path and needs the
+  # same budget.
+  activeDeadlineSeconds: 900
 
 # -- Image containing the import script + kubernetes Python client
 image:
+  # @schema
+  # type: string
+  # minLength: 1
+  # @schema
   repository: ghcr.io/maninweb3/kubeposture   # same image as the main app
+  # @schema
+  # type: string
+  # enum: [Always, IfNotPresent, Never]
+  # @schema
   pullPolicy: IfNotPresent
   tag: ""                                     # empty = use Chart.yaml appVersion
 
+# @schema
+# type: array
+# items:
+#   type: object
+#   additionalProperties: false
+#   required: [name]
+#   properties:
+#     name: {type: string, minLength: 1}
+# @schema
+# -- Pull secrets, as `- name: <secret>` entries.
 imagePullSecrets: []
 
-# -- Resources for the import job
+# @schema
+# $ref: "#/definitions/resources"
+# @schema
+# -- Resources for the import job. The kubernetes client's typed objects
+# for a full cluster listing dominate RSS; the bundle path itself streams
+# and adds no large in-memory copies.
 resources:
   requests:
     cpu: 1
-    memory: 128Mi
+    memory: 256Mi
   limits:
     cpu: 2
     memory: 512Mi
 
-# -- Naming
+# -- Override the chart name used in resource names.
 nameOverride: ""
+# -- Override the full release-qualified resource name.
 fullnameOverride: ""
 
 # -- Service account: needs read access to Trivy and Kyverno CRDs
 serviceAccount:
   create: true
   automount: true
+  # @schema
+  # $ref: "#/definitions/stringMap"
+  # @schema
   annotations: {}
   name: ""
 
+# @schema
+# $ref: "#/definitions/stringMap"
+# @schema
+# -- Node selector for the import pods.
 nodeSelector: {}
+# @schema
+# type: array
+# items:
+#   type: object
+#   additionalProperties: true
+# @schema
+# -- Tolerations for the import pods (passed through verbatim).
 tolerations: []

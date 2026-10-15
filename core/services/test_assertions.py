@@ -16,8 +16,8 @@ from core.models import (
     Cluster,
     EpssScore,
     Finding,
-    ImportMark,
     Image,
+    ImportMark,
     IngestQueue,
     KevEntry,
     Namespace,
@@ -28,7 +28,6 @@ from core.models import (
     WorkloadImageObservation,
     WorkloadSignal,
 )
-
 
 # ── Label normalisers --------------------------------------------
 
@@ -164,7 +163,7 @@ def _cluster_exists(a):
     if not cluster:
         return False, {"reason": "no cluster"}
     failures = {}
-    for field in ("environment", "provider", "region", "consecutive_incomplete_inventories"):
+    for field in ("environment", "provider", "region"):
         if field in a:
             actual = getattr(cluster, field)
             if actual != a[field]:
@@ -561,20 +560,6 @@ def _import_mark_count(a):
         qs = qs.filter(kind=mark_kind)
     if (state := f.get("state")):
         qs = qs.filter(state=state)
-    if "complete_snapshot_received" in f:
-        wanted = bool(f["complete_snapshot_received"])
-        # Subquery: marks with at least one IngestQueue row whose
-        # complete_snapshot=true.
-        complete_iids = set(
-            IngestQueue.objects
-            .filter(complete_snapshot=True)
-            .values_list("import_id", flat=True)
-            .distinct()
-        )
-        if wanted:
-            qs = qs.filter(import_id__in=complete_iids)
-        else:
-            qs = qs.exclude(import_id__in=complete_iids)
     actual = qs.count()
     return actual == a["expect"], {"actual": actual, "expected": a["expect"]}
 

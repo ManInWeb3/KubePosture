@@ -182,7 +182,14 @@ jobs:
           mkdir -p /tmp/helm-packages
           for chart in kubeposture kubeposture-import; do
             echo "==> ${chart}"
-            helm lint "deploy/charts/${chart}"
+            # values.schema.json makes clusterName (minLength 1) a lint
+            # error for the importer chart, so lint it the way a user
+            # installs it.
+            if [ "${chart}" = "kubeposture-import" ]; then
+              helm lint "deploy/charts/${chart}" --set clusterName=release-lint
+            else
+              helm lint "deploy/charts/${chart}"
+            fi
             helm package "deploy/charts/${chart}" \
               --version     "${VERSION}" \
               --app-version "${VERSION}" \

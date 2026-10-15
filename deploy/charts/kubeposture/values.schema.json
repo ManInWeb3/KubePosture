@@ -1,0 +1,832 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "command": {
+      "description": "Container command (argv). One string per element.",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "cronJob": {
+      "additionalProperties": false,
+      "description": "One batch CronJob. Rendered by templates/cronjobs.yaml (+ a one-shot Job on install/upgrade when initialRun is true).",
+      "properties": {
+        "activeDeadlineSeconds": {
+          "default": 300,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "command": {
+          "$ref": "#/definitions/command",
+          "required": []
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "initialRun": {
+          "default": false,
+          "description": "Also run once as a post-install/upgrade Job.",
+          "type": "boolean"
+        },
+        "resources": {
+          "$ref": "#/definitions/resources",
+          "required": []
+        },
+        "schedule": {
+          "$ref": "#/definitions/cronSchedule",
+          "required": []
+        }
+      },
+      "required": [
+        "schedule",
+        "command"
+      ],
+      "type": "object"
+    },
+    "cronSchedule": {
+      "description": "Cron expression (5 fields) or a @-macro such as @daily.",
+      "pattern": "^(@(yearly|annually|monthly|weekly|daily|midnight|hourly)|(\\S+\\s+){4}\\S+)$",
+      "type": "string"
+    },
+    "quantity": {
+      "description": "Kubernetes resource quantity, e.g. 500m, 1, 1.5, 512Mi, 2Gi.",
+      "pattern": "^[0-9]+(\\.[0-9]+)?(m|k|M|G|T|P|E|Ki|Mi|Gi|Ti|Pi|Ei)?$",
+      "required": [],
+      "type": [
+        "string",
+        "number"
+      ]
+    },
+    "resourceList": {
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {
+          "$ref": "#/definitions/quantity",
+          "required": []
+        },
+        "ephemeral-storage": {
+          "$ref": "#/definitions/quantity",
+          "required": []
+        },
+        "memory": {
+          "$ref": "#/definitions/quantity",
+          "required": []
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "resources": {
+      "additionalProperties": false,
+      "description": "Kubernetes ResourceRequirements. Batch jobs run with requests == limits (Guaranteed QoS) — see docs/operations/batch-jobs-memory.md.",
+      "properties": {
+        "limits": {
+          "$ref": "#/definitions/resourceList",
+          "required": []
+        },
+        "requests": {
+          "$ref": "#/definitions/resourceList",
+          "required": []
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "secretRef": {
+      "additionalProperties": false,
+      "description": "Reference to a key in an existing Secret. Both fields null → the plaintext `value` is used instead.",
+      "properties": {
+        "key": {
+          "required": [],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "required": [],
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "stringMap": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Free-form string→string map (labels, annotations, selectors).",
+      "required": [],
+      "type": "object"
+    }
+  },
+  "description": "Central KubePosture deployment — web, queue worker, batch CronJobs. The database is NOT included; use CNPG or any external PostgreSQL 16+.",
+  "properties": {
+    "adminUser": {
+      "additionalProperties": false,
+      "description": "Default admin user (created on first install, skipped if it exists).",
+      "properties": {
+        "email": {
+          "default": "admin@kubeposture.local",
+          "title": "email",
+          "type": "string"
+        },
+        "password": {
+          "default": "admin",
+          "title": "password",
+          "type": "string"
+        },
+        "username": {
+          "default": "admin",
+          "minLength": 1,
+          "title": "username",
+          "type": "string"
+        }
+      },
+      "required": [
+        "password",
+        "email"
+      ],
+      "title": "adminUser",
+      "type": "object"
+    },
+    "affinity": {
+      "additionalProperties": true,
+      "description": "Affinity for the web Deployment (passed through verbatim).",
+      "required": [],
+      "title": "affinity",
+      "type": "object"
+    },
+    "app": {
+      "additionalProperties": false,
+      "description": "Application environment variables (non-sensitive)",
+      "properties": {
+        "env": {
+          "additionalProperties": {
+            "type": [
+              "string",
+              "number",
+              "boolean"
+            ]
+          },
+          "description": "Rendered 1:1 as container env vars (values are quoted, so numbers and\nbooleans are accepted). Any key may be added; the ones below are the\nsettings the app reads — see kubeposture/settings.py.",
+          "required": [],
+          "title": "env",
+          "type": "object"
+        }
+      },
+      "required": [],
+      "title": "app",
+      "type": "object"
+    },
+    "cronJobs": {
+      "additionalProperties": {
+        "$ref": "#/definitions/cronJob"
+      },
+      "description": "Batch CronJobs, keyed by name (kebab-cased into the resource name).\nExtra entries may be added; each one follows the `cronJob` definition.\n\nCrons with initialRun: true also run once as a post-install/upgrade Job —\nused for seeding EPSS/KEV data immediately instead of waiting for the next tick.\nCrons without initialRun only run on their schedule.\n\nBatch jobs run with requests == limits (Guaranteed QoS): a job is then\nnever evicted or OOM-killed because a *neighbour* spiked, only when it\nexceeds its own limit. Every command logs `command.finished ...\npeak_rss_mb=` on exit — size `memory` from those lines, not by guess\n(EPSS/KEV are sized already; the rest still carry their old 2Gi limit\nas the request until a few runs have been read), and keep /tmp on the\ndisk-backed emptyDir (`tmp.sizeLimit`), never `medium: Memory`, so a\nrunaway download evicts the pod instead of counting against its memory\nlimit.",
+      "properties": {
+        "enrichEpss": {
+          "$ref": "#/definitions/cronJob",
+          "required": []
+        },
+        "enrichKev": {
+          "$ref": "#/definitions/cronJob",
+          "required": []
+        },
+        "enrichOsvSupplyChain": {
+          "$ref": "#/definitions/cronJob",
+          "required": []
+        },
+        "pruneSnapshots": {
+          "$ref": "#/definitions/cronJob",
+          "required": []
+        },
+        "pruneStaleData": {
+          "$ref": "#/definitions/cronJob",
+          "required": []
+        },
+        "reapSafetyNet": {
+          "$ref": "#/definitions/cronJob",
+          "required": []
+        },
+        "recalculatePriorities": {
+          "$ref": "#/definitions/cronJob",
+          "required": []
+        },
+        "snapshotCapture": {
+          "$ref": "#/definitions/cronJob",
+          "required": []
+        }
+      },
+      "required": [],
+      "title": "cronJobs",
+      "type": "object"
+    },
+    "db": {
+      "additionalProperties": false,
+      "description": "Database URL secret (e.g. CNPG-generated secret)",
+      "properties": {
+        "secretName": {
+          "default": "kubeposture-secret",
+          "minLength": 1,
+          "title": "secretName",
+          "type": "string"
+        },
+        "urlKey": {
+          "default": "DATABASE_URL",
+          "minLength": 1,
+          "title": "urlKey",
+          "type": "string"
+        }
+      },
+      "required": [
+        "secretName",
+        "urlKey"
+      ],
+      "title": "db",
+      "type": "object"
+    },
+    "fullnameOverride": {
+      "default": "",
+      "description": "Override the full release-qualified resource name.",
+      "title": "fullnameOverride",
+      "type": "string"
+    },
+    "global": {
+      "description": "Global values are values that can be accessed from any chart or subchart by exactly the same name.",
+      "required": [],
+      "title": "global",
+      "type": "object"
+    },
+    "image": {
+      "additionalProperties": false,
+      "description": "Container image for every pod (web, worker, jobs).",
+      "properties": {
+        "pullPolicy": {
+          "default": "IfNotPresent",
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ],
+          "title": "pullPolicy",
+          "type": "string"
+        },
+        "repository": {
+          "default": "ghcr.io/maninweb3/kubeposture",
+          "minLength": 1,
+          "title": "repository",
+          "type": "string"
+        },
+        "tag": {
+          "default": "",
+          "title": "tag",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tag"
+      ],
+      "title": "image",
+      "type": "object"
+    },
+    "imagePullSecrets": {
+      "description": "Pull secrets, as `- name: \u003csecret\u003e` entries.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "title": "imagePullSecrets",
+      "type": "array"
+    },
+    "ingress": {
+      "additionalProperties": false,
+      "description": "Ingress for the web Service.",
+      "properties": {
+        "annotations": {
+          "$ref": "#/definitions/stringMap",
+          "required": []
+        },
+        "className": {
+          "default": "",
+          "title": "className",
+          "type": "string"
+        },
+        "enabled": {
+          "default": false,
+          "title": "enabled",
+          "type": "boolean"
+        },
+        "hosts": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "host": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "paths": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "pathType": {
+                      "enum": [
+                        "Prefix",
+                        "Exact",
+                        "ImplementationSpecific"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "pathType"
+                  ],
+                  "type": "object"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "host",
+              "paths"
+            ],
+            "type": "object"
+          },
+          "title": "hosts",
+          "type": "array"
+        },
+        "tls": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "hosts": {
+                "items": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "secretName": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          },
+          "title": "tls",
+          "type": "array"
+        }
+      },
+      "required": [
+        "enabled",
+        "className"
+      ],
+      "title": "ingress",
+      "type": "object"
+    },
+    "migration": {
+      "additionalProperties": false,
+      "description": "The migrate init container of the setup Job.",
+      "properties": {
+        "resources": {
+          "$ref": "#/definitions/resources",
+          "required": []
+        }
+      },
+      "required": [],
+      "title": "migration",
+      "type": "object"
+    },
+    "monitoring": {
+      "additionalProperties": false,
+      "description": "/metrics is always exposed. Setting `enabled: true` renders a\nServiceMonitor for the Prometheus Operator (gated on the CRD being\npresent in the cluster — bare clusters without the operator install\nfine with the flag set, the template just renders empty).",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "enabled",
+          "type": "boolean"
+        },
+        "serviceMonitor": {
+          "additionalProperties": false,
+          "properties": {
+            "interval": {
+              "default": "30s",
+              "pattern": "^[0-9]+(ms|s|m|h)$",
+              "title": "interval",
+              "type": "string"
+            },
+            "labels": {
+              "$ref": "#/definitions/stringMap",
+              "required": []
+            },
+            "scrapeTimeout": {
+              "default": "10s",
+              "pattern": "^[0-9]+(ms|s|m|h)$",
+              "title": "scrapeTimeout",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "title": "serviceMonitor",
+          "type": "object"
+        }
+      },
+      "required": [
+        "enabled",
+        "serviceMonitor"
+      ],
+      "title": "monitoring",
+      "type": "object"
+    },
+    "nameOverride": {
+      "default": "",
+      "description": "Override the chart name used in resource names.",
+      "title": "nameOverride",
+      "type": "string"
+    },
+    "nodeSelector": {
+      "$ref": "#/definitions/stringMap",
+      "required": []
+    },
+    "podAnnotations": {
+      "$ref": "#/definitions/stringMap",
+      "required": []
+    },
+    "podLabels": {
+      "$ref": "#/definitions/stringMap",
+      "required": []
+    },
+    "secretKey": {
+      "additionalProperties": false,
+      "description": "Django SECRET_KEY — provide either a plaintext value or a secret reference.\nIf secretRef is set it takes precedence over value.",
+      "properties": {
+        "secretRef": {
+          "$ref": "#/definitions/secretRef",
+          "required": []
+        },
+        "value": {
+          "default": "SomeStrongSecret",
+          "title": "value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "secretKey",
+      "type": "object"
+    },
+    "service": {
+      "additionalProperties": false,
+      "description": "Service in front of the web Deployment.",
+      "properties": {
+        "port": {
+          "default": 8000,
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "port",
+          "type": "integer"
+        },
+        "type": {
+          "default": "ClusterIP",
+          "enum": [
+            "ClusterIP",
+            "NodePort",
+            "LoadBalancer"
+          ],
+          "title": "type",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "title": "service",
+      "type": "object"
+    },
+    "serviceAccount": {
+      "additionalProperties": false,
+      "description": "ServiceAccount for all pods.",
+      "properties": {
+        "annotations": {
+          "$ref": "#/definitions/stringMap",
+          "required": []
+        },
+        "automount": {
+          "default": true,
+          "title": "automount",
+          "type": "boolean"
+        },
+        "create": {
+          "default": true,
+          "title": "create",
+          "type": "boolean"
+        },
+        "name": {
+          "default": "",
+          "title": "name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "create",
+        "automount",
+        "name"
+      ],
+      "title": "serviceAccount",
+      "type": "object"
+    },
+    "setupJob": {
+      "additionalProperties": false,
+      "description": "Post-install/upgrade setup Job: migrate, setup_rbac, createsuperuser\n(all idempotent — the superuser step uses `|| true` so a re-run after\nthe user exists is a no-op).",
+      "properties": {
+        "annotations": {
+          "$ref": "#/definitions/stringMap",
+          "required": []
+        },
+        "resources": {
+          "$ref": "#/definitions/resources",
+          "required": []
+        }
+      },
+      "required": [],
+      "title": "setupJob",
+      "type": "object"
+    },
+    "tmp": {
+      "additionalProperties": false,
+      "description": "Scratch space (/tmp) for every pod: bundle spooling on the web pods,\ndownloaded feeds in the enrichment jobs. Disk-backed emptyDir; the\nlimit evicts a runaway pod instead of filling the node's disk.",
+      "properties": {
+        "sizeLimit": {
+          "$ref": "#/definitions/quantity",
+          "required": []
+        }
+      },
+      "required": [],
+      "title": "tmp",
+      "type": "object"
+    },
+    "tolerations": {
+      "description": "Tolerations for every pod (passed through verbatim).",
+      "items": {
+        "additionalProperties": true,
+        "required": [],
+        "type": "object"
+      },
+      "title": "tolerations",
+      "type": "array"
+    },
+    "web": {
+      "additionalProperties": false,
+      "description": "The Django web Deployment (gunicorn).",
+      "properties": {
+        "autoscaling": {
+          "additionalProperties": false,
+          "description": "HorizontalPodAutoscaler for the web Deployment.",
+          "properties": {
+            "enabled": {
+              "default": false,
+              "title": "enabled",
+              "type": "boolean"
+            },
+            "maxReplicas": {
+              "default": 6,
+              "minimum": 1,
+              "title": "maxReplicas",
+              "type": "integer"
+            },
+            "minReplicas": {
+              "default": 2,
+              "minimum": 1,
+              "title": "minReplicas",
+              "type": "integer"
+            },
+            "targetCPUUtilizationPercentage": {
+              "default": 80,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "targetCPUUtilizationPercentage",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "enabled"
+          ],
+          "title": "autoscaling",
+          "type": "object"
+        },
+        "command": {
+          "$ref": "#/definitions/command",
+          "required": []
+        },
+        "livenessProbe": {
+          "additionalProperties": true,
+          "description": "Liveness probe (passed through verbatim). /healthz = process up.",
+          "properties": {
+            "httpGet": {
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "default": "/healthz",
+                  "title": "path",
+                  "type": "string"
+                },
+                "port": {
+                  "default": "http",
+                  "title": "port",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "port"
+              ],
+              "title": "httpGet",
+              "type": "object"
+            },
+            "initialDelaySeconds": {
+              "default": 5,
+              "title": "initialDelaySeconds",
+              "type": "integer"
+            },
+            "periodSeconds": {
+              "default": 15,
+              "title": "periodSeconds",
+              "type": "integer"
+            },
+            "timeoutSeconds": {
+              "default": 3,
+              "title": "timeoutSeconds",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "httpGet",
+            "initialDelaySeconds",
+            "periodSeconds",
+            "timeoutSeconds"
+          ],
+          "title": "livenessProbe",
+          "type": "object"
+        },
+        "readinessProbe": {
+          "additionalProperties": true,
+          "description": "Readiness probe (passed through verbatim). /readyz = DB reachable.",
+          "properties": {
+            "httpGet": {
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "default": "/readyz",
+                  "title": "path",
+                  "type": "string"
+                },
+                "port": {
+                  "default": "http",
+                  "title": "port",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "port"
+              ],
+              "title": "httpGet",
+              "type": "object"
+            },
+            "initialDelaySeconds": {
+              "default": 3,
+              "title": "initialDelaySeconds",
+              "type": "integer"
+            },
+            "periodSeconds": {
+              "default": 10,
+              "title": "periodSeconds",
+              "type": "integer"
+            },
+            "timeoutSeconds": {
+              "default": 3,
+              "title": "timeoutSeconds",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "httpGet",
+            "initialDelaySeconds",
+            "periodSeconds",
+            "timeoutSeconds"
+          ],
+          "title": "readinessProbe",
+          "type": "object"
+        },
+        "replicaCount": {
+          "default": 2,
+          "minimum": 0,
+          "title": "replicaCount",
+          "type": "integer"
+        },
+        "resources": {
+          "$ref": "#/definitions/resources",
+          "required": []
+        }
+      },
+      "required": [
+        "autoscaling"
+      ],
+      "title": "web",
+      "type": "object"
+    },
+    "worker": {
+      "additionalProperties": false,
+      "description": "The ingest-queue worker CronJob (process_ingest_queue).",
+      "properties": {
+        "activeDeadlineSeconds": {
+          "default": 300,
+          "minimum": 1,
+          "title": "activeDeadlineSeconds",
+          "type": "integer"
+        },
+        "command": {
+          "$ref": "#/definitions/command",
+          "required": []
+        },
+        "concurrencyPolicy": {
+          "default": "Allow",
+          "enum": [
+            "Allow",
+            "Forbid",
+            "Replace"
+          ],
+          "title": "concurrencyPolicy",
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "title": "enabled",
+          "type": "boolean"
+        },
+        "parallelism": {
+          "default": 4,
+          "description": "Pods per job. claim_batch's SKIP LOCKED partitions work safely across\nthem (the k8s \"work queue\" Job pattern — no `completions` is set, so\nthe Job just runs `parallelism` pods to completion against the shared\nqueue). Raised from 1 -\u003e 4: cluster-wide capacity is not the\nconstraint (namespace requests ~5 cores against ~315 free). Raising\nthis alone didn't fix throughput because claim_batch's abandon-sweep\nwas missing SKIP LOCKED (fixed in core/services/queue.py) — that one\nunprotected statement, run first on every drain_once iteration, could\nblock an entire pod on a lock held by an unrelated in-flight worker.",
+          "minimum": 1,
+          "title": "parallelism",
+          "type": "integer"
+        },
+        "resources": {
+          "$ref": "#/definitions/resources",
+          "required": []
+        },
+        "schedule": {
+          "$ref": "#/definitions/cronSchedule",
+          "required": []
+        }
+      },
+      "required": [
+        "enabled"
+      ],
+      "title": "worker",
+      "type": "object"
+    }
+  },
+  "required": [
+    "secretKey",
+    "db",
+    "app",
+    "web",
+    "worker",
+    "migration",
+    "adminUser",
+    "setupJob",
+    "image",
+    "nameOverride",
+    "fullnameOverride",
+    "serviceAccount",
+    "service",
+    "ingress",
+    "monitoring",
+    "tmp"
+  ],
+  "title": "KubePosture chart values",
+  "type": "object"
+}

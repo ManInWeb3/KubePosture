@@ -2,15 +2,16 @@
 from django.conf import settings
 from django.urls import path
 
-from core.api import testing_views, views, views_read, views_snapshot
+from core.api import testing_views, views, views_bundles, views_read, views_snapshot
 
 urlpatterns = [
-    # Ingest (bearer-token auth)
-    path("imports/start/", views.imports_start),
-    path("imports/finish/", views.imports_finish),
+    # Ingest (bearer-token auth). The literal `imports/pending/…` routes
+    # must precede the `imports/<import_id>/…` ones.
     path("imports/pending/", views.imports_pending),
     path("imports/pending/clear/", views.imports_pending_clear),
-    path("ingest/", views.ingest),
+    path("imports/<str:import_id>/bundles/<str:kind>/", views_bundles.bundle_upload),
+    path("imports/<str:import_id>/commit/", views_bundles.import_commit),
+    path("imports/<str:import_id>/abort/", views_bundles.import_abort),
     path("cluster-metadata/sync/", views.cluster_metadata_sync),
 
     # Read API (session auth — IsAuthenticated default)

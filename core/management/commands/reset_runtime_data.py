@@ -19,15 +19,14 @@ What gets TRUNCATEd:
   Snapshot
 
 What is PRESERVED:
-  Cluster (incl. manual flags) — `consecutive_incomplete_inventories`
-    is reset to 0
+  Cluster (incl. manual flags)
   IngestToken
   EpssScore, KevEntry
   auth_user, django_session, …
 """
-from django.core.management.base import BaseCommand
 from django.db import connection, transaction
 
+from core.management.base import KubePostureCommand
 from core.models import (
     Cluster,
     Finding,
@@ -43,7 +42,6 @@ from core.models import (
     WorkloadImageObservation,
     WorkloadSignal,
 )
-
 
 _RUNTIME_TABLES = [
     Finding,
@@ -61,7 +59,7 @@ _RUNTIME_TABLES = [
 ]
 
 
-class Command(BaseCommand):
+class Command(KubePostureCommand):
     help = "Wipe runtime data; preserve EPSS/KEV, Cluster, IngestToken."
 
     def add_arguments(self, parser):
@@ -89,9 +87,6 @@ class Command(BaseCommand):
         with transaction.atomic():
             with connection.cursor() as cur:
                 cur.execute(f"TRUNCATE {quoted} RESTART IDENTITY CASCADE")
-            # Reset per-cluster counter so the next import lands on
-            # a clean baseline.
-            Cluster.objects.update(consecutive_incomplete_inventories=0)
 
         self.stdout.write(self.style.SUCCESS(
             f"Truncated {len(table_names)} tables. Row counts before:"

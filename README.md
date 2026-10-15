@@ -117,19 +117,19 @@ re-run it whenever you've ingested new data.
 
 Three ways, in order from cheapest to most-realistic:
 
-### Option A — Replay a scenario fixture (no cluster needed)
+### Option A — Replay the e2e fixtures (no cluster needed)
 
 Useful for sanity-checking the pipeline end-to-end without any K8s
 plumbing.
 
 ```bash
-TESTING_HARNESS_ENABLED=true \
-DJANGO_SETTINGS_MODULE=kubeposture.settings \
-pytest tests/scenario_runner/   # iterates Architecture/mock_tests/<NN-…>/ dirs
+pytest tests/integration/test_import_e2e.py   # synthetic cycles through the real endpoints
+pytest -m realdata                            # anonymised real-cluster capture under fixtures/real/
 ```
 
-That populates a throwaway test DB. To populate your real dev DB
-from a fixture, use the harness endpoint:
+Those populate a throwaway test DB. To populate your real dev DB with
+inline payloads, use the harness endpoint — it stores one bundle per
+`(import_id, kind)` and commits, exactly like a real upload:
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/testing/reset/ \
@@ -139,11 +139,15 @@ curl -X POST http://localhost:8000/api/v1/testing/load_scenario/ \
   -H 'Content-Type: application/json' -d '{
     "cluster": "prod-payments-1",
     "import_id": "01HW000000000000000000HPPY",
-    "scenario_dir": "/abs/path/to/Architecture/mock_tests/01-happy-path"
+    "payloads": [{"kind": "inventory",
+                  "payload": {"cluster_meta": {"name": "prod-payments-1"}, "items": []}}],
+    "finishes": [{"kind": "inventory", "observed_count": 1}]
   }'
 ```
 
-(Server must have been started with `TESTING_HARNESS_ENABLED=true`.)
+(Server must have been started with `TESTING_HARNESS_ENABLED=true`.
+`observed_count` must equal the number of payloads for that kind — a
+real commit is strict about it.)
 
 ### Option B — Replay a captured `kubectl get -o json` dump
 
@@ -181,13 +185,18 @@ kubectl get clusterpolicyreports -o json      > /tmp/kp-snap/kyverno/clusterpoli
 #    Tokens are NOT cluster-bound; the name is just a human label.
 TOKEN=$(python manage.py create_ingest_token my-laptop | tail -1)
 
-# 3. Replay the capture into your local central.
+# 3. Replay the capture into your local central. The importer uploads
+#    one gzip bundle per kind, then commits the import atomically —
+#    nothing is queued unless every bundle verified.
 KUBEPOSTURE_URL=http://localhost:8000 KUBEPOSTURE_TOKEN=$TOKEN \
   python scripts/import-cluster.py <cluster-name> --from-folder /tmp/kp-snap
 
 # 4. Drain the queue.
 python manage.py process_ingest_queue
 ```
+
+`scripts/capture-cluster-fixture.sh /tmp/kp-snap` runs the capture
+block above for you (and skips CRDs the cluster doesn't have).
 
 ### Option C — Live cluster import
 
@@ -220,7 +229,12 @@ python manage.py enrich_fetch --source epss   # ~330k rows, ~3 min
 ```
 
 Failures are non-fatal: the loaders honour the universal zero-input
-no-op rule (empty/failed fetch leaves existing rows alone).
+no-op rule (empty/failed fetch leaves existing rows alone — including
+a stream that dies mid-body). EPSS is streamed straight from the HTTP
+response into 5k-row upserts, so the job's memory is one chunk, not
+the feed; every command logs `command.finished … peak_rss_mb=` on
+exit, which is what the chart's memory sizes come from
+([docs/operations/batch-jobs-memory.md](docs/operations/batch-jobs-memory.md)).
 
 In production both run as daily CronJobs. Locally, re-run when you
 want fresh threat-intel.
@@ -298,14 +312,14 @@ re-run on the same triggers (or just on demand).
 | `migrate` | once per release | Code/schema change |
 | `setup_rbac` | once + idempotent re-run | Install or after RBAC group rename |
 | `createsuperuser` | once per env | Initial admin |
-| `process_ingest_queue` | every 1–3 min (continuous) | Drains `IngestQueue`; reaps inline as marks finish draining |
+| `process_ingest_queue` | every 1–3 min (continuous) | Drains `IngestQueue`; reaps inline as marks finish draining (the reap deletes the tuple's rows — the queue only ever holds in-flight work) |
 | `enrich_fetch --source kev` | daily | CISA KEV catalog refresh |
-| `enrich_fetch --source epss` | daily | first.org EPSS publishes daily |
+| `enrich_fetch --source epss` | daily | first.org EPSS publishes daily; streamed gzip CSV → chunked upserts, stale rows swept by `fetched_at` watermark |
 | `enrich_fetch --source osv-supply-chain` | hourly | OSV.dev per-ecosystem bulk-zip snapshots; conditional GET keeps off-cycle ticks cheap; streams each zip to disk so memory stays flat; calls the matcher inline |
 | `match_supply_chain` | on-demand | Re-run matcher without re-fetching feeds (after seeding test IoCs, or after a matching-logic change) |
-| `reap_safety_net` | hourly | Catches stuck `state=draining` ImportMarks the inline reaper missed, and promotes marks abandoned in `state=open` (importer crashed before `/imports/finish/`) so their queue tuples stop being permanently unclaimable |
+| `reap_safety_net` | hourly | Catches stuck `state=draining` ImportMarks the inline reaper missed; discards imports that can never complete — marks abandoned in `state=open` (importer died before `/imports/<id>/commit/`) and imports whose inventory payload failed — deleting their rows and marking them `reaped` with a `discard_reason` |
 | `snapshot_capture` | daily (after enrichment + reaper) | End-of-day heartbeat at global / cluster / namespace / workload scopes; feeds trend charts |
-| `prune_stale_data` | daily | DB hygiene — prunes `IngestQueue` (14d), `ImportMark` REAPED (90d), `ScanInconsistency` (30d), stale `Finding` rows (180d), `SbomComponent` on long-undeployed images (90d). Configurable per target. |
+| `prune_stale_data` | daily | DB hygiene — prunes `IngestQueue` leftovers (14d; normally empty, see [docs/pruning.md](docs/pruning.md)), `ImportMark` REAPED (90d), `ScanInconsistency` (30d), stale `Finding` rows (180d), `SbomComponent` on long-undeployed images (90d). Configurable per target. |
 | `prune_snapshots` | daily or weekly | Deletes Snapshot rows older than `SNAPSHOT_RETENTION_DAYS` (default 365) |
 | `recalculate_priorities` | on-demand or weekly | After a scoring tweak in `core/urgency.py`, or after a bulk enrichment refresh |
 | `reset_runtime_data --yes` | manual only | Wipe runtime tables (workloads / findings / queue / marks / snapshots) while preserving Cluster + IngestToken + EPSS/KEV |
@@ -327,26 +341,79 @@ scopes.
 
 ---
 
-## Running the scenario suite
+## Import API contract
 
-The scenario harness drives the scenarios under
-`Architecture/mock_tests/` end-to-end against the testing endpoints.
-It's the canonical regression suite for the ingest pipeline.
+The importer (`scripts/import-cluster.py`, deployed by the
+`kubeposture-import` chart) talks to the central over three bearer-
+authenticated endpoints. One `import_id` (a ULID minted per cycle)
+groups everything; the cluster comes from the manifest / body and is
+auto-registered.
+
+| Step | Request | Notes |
+|---|---|---|
+| upload | `POST /api/v1/imports/<import_id>/bundles/<kind>/` — `Content-Type: application/x-ndjson`, `Content-Encoding: gzip` | Body: line 1 is `{"manifest": {cluster, import_id, kind, count, sha256, coverage?, …}}`; then one CRD JSON object per line (kind `inventory`: exactly one line, the envelope). `sha256` covers the item lines as sent, newlines included. The server verifies size caps, count and hash in a byte pass, then inserts the rows **and** the kind's ImportMark (`open`) in one transaction. `201 stored`; re-upload of identical bytes `200 already_uploaded`; different bytes `409 bundle_conflict`; verification failures `400` with an `error` code; caps `413`. |
+| commit | `POST /api/v1/imports/<import_id>/commit/` — `{"cluster", "kinds": [{"kind", "count"}, …]}` | Every listed kind must have a mark whose stored row count equals `count`; every uploaded kind must be listed (`409` otherwise). All marks flip to `draining` together — nothing is claimable before this. `count: 0` is legitimate (CRD installed, no objects) and drives the zero-input / outage rule; absent CRDs are simply not listed. Idempotent for an identical retry. |
+| abort | `POST /api/v1/imports/<import_id>/abort/` — `{"cluster"}` | Deletes the import's rows and marks while nothing is committed. The importer calls it when any bundle fails. |
+
+Imports that are never committed are discarded by `reap_safety_net`
+after `STUCK_OPEN_TIMEOUT_SECONDS` (30 min); a failed inventory payload
+discards its whole import immediately. Discarded marks are `reaped`
+with `discard_reason` set and never touch `last_complete_inventory_at`.
+Every reap deletes its tuple's queue rows after recording
+`failed_count` / `last_error` on the mark.
+
+Side endpoints: `GET /api/v1/imports/pending/?cluster=`,
+`POST /api/v1/imports/pending/clear/`, `POST /api/v1/cluster-metadata/sync/`.
+
+The decisions behind this protocol (why bundles, why discard instead
+of promote, why relevance and not age, timer ordering, why
+`complete_snapshot` is gone) are recorded in
+[docs/import-pipeline.md](docs/import-pipeline.md).
+
+---
+
+## Running the tests
 
 ```bash
-TESTING_HARNESS_ENABLED=true LOG_LEVEL=ERROR \
-  pytest tests/scenario_runner/
+docker compose up -d db                       # Postgres (SKIP LOCKED, TRUNCATE … need the real thing)
+pytest -m "not e2e and not realdata"          # unit + service + HTTP contract tests
+pytest -m "e2e or realdata"                   # real endpoints → drain → ORM assertions; real-data fixtures
+pytest scripts/importer_tests                          # the importer package (no DB, no Django)
 ```
 
-Each scenario:
+- `tests/integration/test_import_e2e.py` drives the bundle endpoints
+  with synthetic clusters (deploy tracking, image upgrade, alias
+  resolution, scanner outage, abort, re-upload, stuck-open discard, …).
+- `tests/realdata/` and `tests/integration/test_import_e2e_realdata.py`
+  run against the anonymised real-cluster capture under
+  `fixtures/real/<alias>/` and the real `scripts/import-cluster.py
+  --from-folder`; they skip when no fixture is present.
+- `.github/workflows/test.yml` runs lint, unit and e2e jobs on every PR.
+- `.github/workflows/helm-schema.yml` guards the charts' `values.schema.json`
+  (see below).
 
-1. Truncates the test DB (`/api/v1/testing/reset/`).
-2. Posts the scenario's `imports/*.json` files via
-   `/api/v1/testing/load_scenario/`, which drains the queue and fires
-   reaps inline.
-3. Evaluates `assertions.yaml` via
-   `/api/v1/testing/assert_batch/` — ~25 assertion kinds covering
-   workloads, findings, signals, snapshots, marks.
+### Helm values schema
+
+Both charts ship a `values.schema.json`, so a typo'd key, a wrong type or
+an out-of-range value fails `helm install` / `upgrade` / `lint` /
+`template` before anything is rendered. The schema is **generated** from
+`values.yaml` by [dadav/helm-schema](https://github.com/dadav/helm-schema)
+— the `# @schema … # @schema` comment blocks in `values.yaml` carry the
+constraints inference cannot see (enums, nullables, ranges, free-form
+maps, shared `definitions` such as `resources` and `cronJob`); types,
+defaults and descriptions come from the values and their comments.
+Never edit the JSON by hand:
+
+```bash
+# after changing either values.yaml (same version CI pins):
+helm-schema -c deploy/charts -n -r -a
+# what CI runs — fails when a committed schema is stale:
+helm-schema -c deploy/charts -n -a --check
+```
+
+The workflow also lints a set of deliberately invalid overrides and
+expects them to be rejected, so a loosened annotation is caught in the
+PR rather than by a user at install time.
 
 ---
 
@@ -394,17 +461,24 @@ core/
     snapshot.py          # daily-heartbeat capture
     enrichment.py        # file + HTTP loaders for EPSS + KEV
     worker.py            # claim → process → reap loop
-    test_assertions.py   # scenario-runner assertion evaluator
+    bundle_ingest.py     # bundle spool/verify/store, commit, abort
+    reaper.py            # claim-first reaps, delete-at-reap, discards
+    test_assertions.py   # assertion DSL (harness + real-data e2e)
   api/
-    auth.py              # bearer-token auth + ClusterToken hashing
-    views.py             # /api/v1/imports/*  /ingest/  /cluster-metadata/sync/
+    auth.py              # bearer-token auth + IngestToken hashing
+    views.py             # /api/v1/imports/pending/*  /cluster-metadata/sync/
+    views_bundles.py     # /api/v1/imports/<id>/bundles/<kind>/  commit/  abort/
     testing_views.py     # /api/v1/testing/*  (gated on settings flag)
   signals.py             # signal registry (kyverno: / ksv: / kp: IDs)
   urgency.py             # pure decision tree → effective_priority
   management/commands/   # process_ingest_queue, enrich_fetch, …
 
-scripts/import-cluster.py        # the importer (live and --from-folder modes)
-tests/scenario_runner/           # pytest plugin walking Architecture/mock_tests/
+scripts/import-cluster.py        # the importer entry point (shim over scripts/kubeposture_importer/)
+scripts/kubeposture_importer/    # collect → relevance filter → coverage → bundles → upload/commit
+scripts/capture-cluster-fixture.sh, scripts/anonymize-fixture.py   # real-data fixture tooling
+fixtures/real/<alias>/           # anonymised real-cluster capture + golden expectations
+tests/integration/               # e2e through the real endpoints (+ realdata variant)
+tests/realdata/                  # parser / filter / bundle checks over fixtures/real
 ```
 
 ---
@@ -415,7 +489,7 @@ tests/scenario_runner/           # pytest plugin walking Architecture/mock_tests
 - PostgreSQL 16 (JSONB on `Finding.details` + `Snapshot.*`)
 - Whitenoise (static), gunicorn (WSGI)
 - DB-backed ingest queue — no Redis / Celery
-- pytest + pytest-django for unit tests + scenario suite
+- pytest + pytest-django for unit, e2e and real-data suites
 
 ---
 
@@ -423,10 +497,9 @@ tests/scenario_runner/           # pytest plugin walking Architecture/mock_tests
 
 - No custom UI. Django admin only.
 - No live `--in-cluster` / `--kubeconfig` smoke test against a real
-  cluster recorded yet — only `--from-folder` is verified end-to-end.
+  cluster recorded yet — `--from-folder` is verified end-to-end (the
+  real-data e2e runs the actual script against a live test server).
 - VEX ingest deferred. Applicability checks are manual against
   upstream sources; see [docs/operations/handling-vulnerable-images.md](docs/operations/handling-vulnerable-images.md#step-1--applicability-check)
   for the GHSA / OSV.dev / Chainguard recipes. Record applicability
   decisions as `FindingAction.FALSE_POSITIVE` overlays.
-- Helm chart for the central + importer not yet bumped to the new
-  endpoint contract — local dev only for now.

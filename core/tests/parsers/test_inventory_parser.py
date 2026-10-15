@@ -8,15 +8,14 @@ from __future__ import annotations
 
 import pytest
 
+from core.constants import WorkloadKind
 from core.models import Cluster
 from core.parsers import inventory as inv
-from core.constants import WorkloadKind
 
 
-def _envelope(*items: dict, complete: bool = True) -> dict:
+def _envelope(*items: dict) -> dict:
     return {
         "cluster_meta": {"name": "test-cluster"},
-        "complete_snapshot": complete,
         "items": list(items),
     }
 
@@ -221,19 +220,6 @@ def test_standalone_job_no_cronjob_owner_is_a_workload():
     assert job_key in st.workloads
 
 
-def test_complete_snapshot_flag_propagates_to_staging():
-    """complete_snapshot from envelope is reflected on staging."""
-    st_complete = inv.parse_envelope(
-        _envelope(_ns("ns"), _deployment("a", "ns"), complete=True), _cluster()
-    )
-    assert st_complete.complete_snapshot is True
-
-    st_partial = inv.parse_envelope(
-        _envelope(_ns("ns"), _deployment("a", "ns"), complete=False), _cluster()
-    )
-    assert st_partial.complete_snapshot is False
-
-
 def test_cluster_meta_extracted_from_envelope():
     payload = {
         "cluster_meta": {"name": "test", "k8s_version": "v1.30.2", "provider": "aws"},
@@ -248,7 +234,6 @@ def test_empty_envelope_does_not_crash():
     """An empty inventory payload parses to empty staging without raising."""
     st = inv.parse_envelope({}, _cluster())
     assert st.workloads == {}
-    assert st.complete_snapshot is False
 
 
 def test_unknown_kind_silently_skipped():
@@ -290,9 +275,16 @@ def test_image_currently_running_anchored_on_cluster_last_complete_inventory():
     (the scenario 5 / 6 semantic) so prior observations stay valid.
     """
     from datetime import timedelta
+
     from django.utils import timezone
+
     from core.models import (
-        Cluster as ClusterM, Image, Namespace, Workload,
+        Cluster as ClusterM,
+    )
+    from core.models import (
+        Image,
+        Namespace,
+        Workload,
         WorkloadImageObservation,
     )
 
@@ -354,7 +346,6 @@ def test_items_without_kind_are_counted_not_silently_dropped():
     """
     payload = {
         "cluster_meta": {"name": "test"},
-        "complete_snapshot": True,
         "items": [
             # No `kind` — the exact shape produced by the buggy importer
             {"apiVersion": "v1", "metadata": {"name": "ns1"}},
@@ -447,7 +438,9 @@ def test_persist_marks_scaled_to_zero_workload_not_deployed():
     pods → persisted deployed=False. replicas>=1 and replicas=None
     (standalone Pod / DaemonSet) stay deployed."""
     from django.utils import timezone
-    from core.models import Cluster as ClusterM, Workload
+
+    from core.models import Cluster as ClusterM
+    from core.models import Workload
 
     cluster = ClusterM.objects.create(name="scale-persist")
     dep0 = _deployment("scaled-down", "ns")
@@ -471,7 +464,9 @@ def test_scaled_to_zero_exposed_workload_does_not_mark_namespace_exposed():
     """A replicas=0 workload behind a LoadBalancer has no endpoints, so
     it must not flip namespace.internet_exposed."""
     from django.utils import timezone
-    from core.models import Cluster as ClusterM, Namespace, Workload
+
+    from core.models import Cluster as ClusterM
+    from core.models import Namespace, Workload
 
     cluster = ClusterM.objects.create(name="scale-expose")
     dep0 = _deployment("front", "ns")
@@ -500,8 +495,11 @@ def test_reap_inventory_diff_scaled_to_zero_not_deployed():
     the snapshot (last_inventory_at bumped) but must still end
     deployed=False. NULL-replica workloads (DaemonSet) stay deployed."""
     from datetime import timedelta
+
     from django.utils import timezone
-    from core.models import Cluster as ClusterM, Namespace, Workload
+
+    from core.models import Cluster as ClusterM
+    from core.models import Namespace, Workload
 
     cluster = ClusterM.objects.create(name="reap-scale")
     ns = Namespace.objects.create(cluster=cluster, name="ns")
@@ -551,7 +549,9 @@ def test_persist_creates_pod_alias_direct_to_deployment():
     """Deployment -> ReplicaSet -> Pod: the Pod gets its OWN WorkloadAlias
     row pointing directly at the Deployment, not just the ReplicaSet."""
     from django.utils import timezone
-    from core.models import Cluster as ClusterM, WorkloadAlias
+
+    from core.models import Cluster as ClusterM
+    from core.models import WorkloadAlias
 
     cluster = ClusterM.objects.create(name="pod-alias-dep")
     rs_owner = {
@@ -588,7 +588,9 @@ def test_persist_creates_pod_alias_direct_to_cronjob():
     pointing directly at the CronJob, even though the owning Job is
     never itself a persisted Workload."""
     from django.utils import timezone
-    from core.models import Cluster as ClusterM, WorkloadAlias
+
+    from core.models import Cluster as ClusterM
+    from core.models import WorkloadAlias
 
     cluster = ClusterM.objects.create(name="pod-alias-cj")
     job_owner = {
@@ -621,6 +623,7 @@ def test_resolve_workload_finds_deployment_via_persisted_pod_alias():
     cycle (no in-memory staging involved, matching how a real Kyverno
     ingest call looks up a workload days after the inventory cycle ran)."""
     from django.utils import timezone
+
     from core.models import Cluster as ClusterM
     from core.services.ingest import _resolve_workload
 

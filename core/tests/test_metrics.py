@@ -117,10 +117,10 @@ def test_workloads_total_filters_to_deployed(
         if line.startswith("kubeposture_workloads_total{")
     ]
     # The deployed workload contributes one series with value 1.0.
-    deployed_lines = [l for l in lines if 'cluster="prod-east"' in l]
+    deployed_lines = [ln for ln in lines if 'cluster="prod-east"' in ln]
     assert deployed_lines, f"expected deployed workload in metric, got {lines}"
     # Sum of values should be 1 (only the deployed one).
-    total = sum(float(l.rsplit(" ", 1)[1]) for l in deployed_lines)
+    total = sum(float(ln.rsplit(" ", 1)[1]) for ln in deployed_lines)
     assert total == 1.0
 
 
@@ -130,12 +130,12 @@ def test_workloads_publicly_exposed(
     body = client.get("/metrics").content.decode()
     assert "kubeposture_workloads_publicly_exposed" in body
     exposed_lines = [
-        l for l in body.splitlines()
-        if l.startswith("kubeposture_workloads_publicly_exposed{")
-        and 'cluster="prod-east"' in l
+        ln for ln in body.splitlines()
+        if ln.startswith("kubeposture_workloads_publicly_exposed{")
+        and 'cluster="prod-east"' in ln
     ]
     assert exposed_lines
-    total = sum(float(l.rsplit(" ", 1)[1]) for l in exposed_lines)
+    total = sum(float(ln.rsplit(" ", 1)[1]) for ln in exposed_lines)
     assert total == 1.0
 
 
@@ -147,10 +147,10 @@ def test_namespaces_total_only_active(
     )
     body = client.get("/metrics").content.decode()
     lines = [
-        l for l in body.splitlines()
-        if l.startswith("kubeposture_namespaces_total{")
+        ln for ln in body.splitlines()
+        if ln.startswith("kubeposture_namespaces_total{")
     ]
-    total = sum(float(l.rsplit(" ", 1)[1]) for l in lines)
+    total = sum(float(ln.rsplit(" ", 1)[1]) for ln in lines)
     assert total == 1.0
 
 
@@ -172,10 +172,10 @@ def test_metrics_endpoint_excluded_from_request_counter(client, db):
     body = client.get("/metrics").content.decode()
     # No counter entry should mention the metrics view.
     metric_lines = [
-        l for l in body.splitlines()
-        if l.startswith("django_http_requests_total{")
+        ln for ln in body.splitlines()
+        if ln.startswith("django_http_requests_total{")
     ]
-    assert not any("metrics" in l.lower() for l in metric_lines)
+    assert not any("metrics" in ln.lower() for ln in metric_lines)
 
 
 # ── TTL cache ────────────────────────────────────────────────────
@@ -204,10 +204,10 @@ def test_collector_cache_serves_stale_within_ttl(
     # Pull all immediate-priority lines and sum values.
     def _sum_immediate(body: str) -> float:
         return sum(
-            float(l.rsplit(" ", 1)[1])
-            for l in body.splitlines()
-            if l.startswith("kubeposture_findings_open{")
-            and 'effective_priority="immediate"' in l
+            float(ln.rsplit(" ", 1)[1])
+            for ln in body.splitlines()
+            if ln.startswith("kubeposture_findings_open{")
+            and 'effective_priority="immediate"' in ln
         )
 
     assert _sum_immediate(body1) == _sum_immediate(body2), (

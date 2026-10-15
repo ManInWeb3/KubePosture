@@ -27,7 +27,6 @@ from core.services.components import (
     search_by_purls,
 )
 
-
 # ── Fixtures ────────────────────────────────────────────────────
 
 

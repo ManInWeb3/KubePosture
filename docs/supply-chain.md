@@ -102,8 +102,9 @@ today — it is a public, no-auth source that works out of the box.
   `zipfile` decompresses one advisory at a time off disk. The payload
   is never held in RAM as one object — the npm `all.zip` is hundreds
   of MB, and an earlier `resp.read()` + `io.BytesIO` copy spiked ~2×
-  that and got the cron OOMKilled. Peak memory is now flat regardless
-  of zip size.
+  that and got the cron OOMKilled. The other large allocation of this
+  job was in the matcher (see §4). The rules for every batch job are
+  in [operations/batch-jobs-memory.md](operations/batch-jobs-memory.md).
 - **Cadence.** ~hourly. Conditional GET keeps off-cycle ticks cheap;
   in practice only npm re-downloads most ticks (its ETag changes
   almost hourly), the rest return 304.
@@ -131,9 +132,16 @@ performs the join `SupplyChainIoc × SbomComponent × WorkloadImageObservation(c
 
 The matcher is intentionally:
 
-- **Pure-ORM, no SQL.** Three sequential queries: load IoCs grouped
-  by purl, load SbomComponents matching those purls, load deployed
-  observations per image.
+- **Pure-ORM, set operations in the database.** The IoC query is
+  restricted to purls a deployed component carries, and that
+  intersection is computed by Postgres: incremental mode sends
+  `touched_purls` in chunks of 5,000 `IN (...)` lookups
+  (`_deployed_among`), a full re-scan uses a semi-join
+  (`purl__in=SbomComponent.objects.values("purl")`). It used to load
+  every distinct purl of the SBOM table into a Python set each hourly
+  run — the largest allocation of the OSV job. Then: load matching
+  IoCs grouped by purl (`raw` deferred), load SbomComponents for those
+  purls, load deployed observations per image.
 - **Workload-fanned.** A bad purl present in one image deployed to N
   workloads produces N findings (one per workload). Sidecar pattern
   (one workload, two images, both with the same bad purl) likewise

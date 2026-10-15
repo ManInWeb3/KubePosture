@@ -13,7 +13,7 @@ from datetime import timedelta
 import pytest
 from django.utils import timezone
 
-from core.constants import Category, IngestQueueStatus, Severity, Source
+from core.constants import Category, Severity, Source
 from core.models import (
     Cluster,
     Finding,

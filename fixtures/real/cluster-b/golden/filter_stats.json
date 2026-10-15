@@ -1,0 +1,96 @@
+{
+  "controllers": 15,
+  "deployed_digests": 26,
+  "kinds": {
+    "kyverno.ClusterPolicyReport": {
+      "count": 0,
+      "dropped_image_not_deployed": 0,
+      "dropped_no_subject": 0,
+      "expected": null,
+      "kept": 0,
+      "matched": null,
+      "total": 0
+    },
+    "kyverno.PolicyReport": {
+      "count": 67,
+      "dropped_image_not_deployed": 0,
+      "dropped_no_subject": 38,
+      "expected": 15,
+      "kept": 67,
+      "matched": 15,
+      "total": 105
+    },
+    "trivy.ClusterComplianceReport": {
+      "count": 5,
+      "dropped_image_not_deployed": 0,
+      "dropped_no_subject": 0,
+      "expected": null,
+      "kept": 5,
+      "matched": null,
+      "total": 5
+    },
+    "trivy.ClusterRbacAssessmentReport": {
+      "count": 131,
+      "dropped_image_not_deployed": 0,
+      "dropped_no_subject": 0,
+      "expected": null,
+      "kept": 131,
+      "matched": null,
+      "total": 131
+    },
+    "trivy.ConfigAuditReport": {
+      "count": 16,
+      "dropped_image_not_deployed": 0,
+      "dropped_no_subject": 43,
+      "expected": 15,
+      "kept": 16,
+      "matched": 15,
+      "total": 59
+    },
+    "trivy.ExposedSecretReport": {
+      "count": 20,
+      "dropped_image_not_deployed": 25,
+      "dropped_no_subject": 0,
+      "expected": 26,
+      "kept": 20,
+      "matched": 13,
+      "total": 45
+    },
+    "trivy.InfraAssessmentReport": {
+      "count": 12,
+      "dropped_image_not_deployed": 0,
+      "dropped_no_subject": 0,
+      "expected": null,
+      "kept": 12,
+      "matched": null,
+      "total": 12
+    },
+    "trivy.RbacAssessmentReport": {
+      "count": 17,
+      "dropped_image_not_deployed": 0,
+      "dropped_no_subject": 0,
+      "expected": null,
+      "kept": 17,
+      "matched": null,
+      "total": 17
+    },
+    "trivy.SbomReport": {
+      "count": 20,
+      "dropped_image_not_deployed": 20,
+      "dropped_no_subject": 0,
+      "expected": 26,
+      "kept": 20,
+      "matched": 13,
+      "total": 40
+    },
+    "trivy.VulnerabilityReport": {
+      "count": 21,
+      "dropped_image_not_deployed": 21,
+      "dropped_no_subject": 0,
+      "expected": 26,
+      "kept": 21,
+      "matched": 14,
+      "total": 42
+    }
+  }
+}

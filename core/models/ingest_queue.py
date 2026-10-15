@@ -23,10 +23,6 @@ class IngestQueue(models.Model):
     kind = models.CharField(max_length=64)
     import_id = models.CharField(max_length=32)
     raw_json = models.JSONField()
-    complete_snapshot = models.BooleanField(
-        default=False,
-        help_text="Set by the importer on the final inventory payload of a cycle.",
-    )
 
     status = models.CharField(
         max_length=16,

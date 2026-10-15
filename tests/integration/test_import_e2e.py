@@ -1,18 +1,13 @@
 """End-to-end import lifecycle tests — real HTTP views, real queue drain.
 
 Unlike every other "integration" test in this repo, these drive the
-actual production entry points: `POST /api/v1/imports/start/` ->
-`POST /api/v1/ingest/` -> `POST /api/v1/imports/finish/` (bearer-token
-auth included), then `core.services.worker.drain_until_empty()` (the
-same call `manage.py process_ingest_queue` makes) — not direct ORM
-seeding, and not the `core/api/testing_views.py` harness (which bypasses
-the views entirely via `ImportMark.open()` / `queue.enqueue()` calls).
-`tests/scenario_runner/test_scenarios.py` was meant to cover this via
-mocked import fixtures, but its `Architecture/mock_tests/` fixture tree
-is gitignored and absent from this checkout — it can't even be
-collected here. This module exists to give the import pipeline *some*
-real, HTTP-driven, DB-asserting coverage in a checkout without that
-fixture data.
+actual production entry points: `POST /api/v1/imports/<id>/bundles/<kind>/`
+(gzip NDJSON, bearer-token auth) -> `POST /api/v1/imports/<id>/commit/`,
+then `core.services.worker.drain_until_empty()` (the same call
+`manage.py process_ingest_queue` makes) — not direct ORM seeding, and
+not the `core/api/testing_views.py` harness. The bundle bytes are built
+with `core.services.bundle_ingest.build_ndjson`, which produces the same
+format the importer's streaming writer emits.
 
 Each test asserts on the actual downstream state the pipeline exists to
 maintain: `Workload.deployed`, `WorkloadImageObservation.currently_deployed`
@@ -21,18 +16,22 @@ and `SbomComponent` — not just "the queue drained without error".
 """
 from __future__ import annotations
 
+import gzip
 import json
 from datetime import timedelta
+from unittest.mock import patch
 
 import pytest
+from django.core.management import call_command
 from django.utils import timezone
 
 from core.api.auth import generate_token
-from core.constants import IngestQueueStatus
+from core.constants import ImportDiscardReason, ImportMarkState
 from core.models import (
-    Cluster,
     Finding,
     Image,
+    ImportMark,
+    IngestQueue,
     IngestToken,
     SbomComponent,
     ScanInconsistency,
@@ -40,8 +39,17 @@ from core.models import (
     WorkloadImageObservation,
     WorkloadSignal,
 )
+from core.services import ingest as ingest_service
+from core.services.bundle_ingest import build_ndjson
 from core.services.inventory import default_finding_qs, restrict_to_currently_deployed_images
+from core.services.reaper import STUCK_OPEN_TIMEOUT_SECONDS
 from core.services.worker import drain_until_empty
+
+VULN = "trivy.VulnerabilityReport"
+SBOM = "trivy.SbomReport"
+KYVERNO = "kyverno.PolicyReport"
+
+pytestmark = pytest.mark.e2e
 
 
 # ── HTTP + drain helpers ─────────────────────────────────────────
@@ -58,43 +66,47 @@ def _auth(token: str) -> dict:
     return {"HTTP_AUTHORIZATION": f"Bearer {token}"}
 
 
-def _start(client, token, *, cluster: str, kind: str, import_id: str):
+def _bundle_bytes(*, cluster: str, import_id: str, kind: str, items: list[dict],
+                  coverage: dict | None = None) -> bytes:
+    return build_ndjson(items, cluster=cluster, import_id=import_id, kind=kind, coverage=coverage)
+
+
+def _upload_bundle(client, token, *, cluster: str, import_id: str, kind: str, items: list[dict],
+                   coverage: dict | None = None, expect: int = 201):
+    raw = _bundle_bytes(cluster=cluster, import_id=import_id, kind=kind, items=items, coverage=coverage)
     resp = client.post(
-        "/api/v1/imports/start/",
-        data=json.dumps({"cluster": cluster, "kind": kind, "import_id": import_id}),
-        content_type="application/json",
+        f"/api/v1/imports/{import_id}/bundles/{kind}/",
+        data=gzip.compress(raw),
+        content_type="application/x-ndjson",
+        HTTP_CONTENT_ENCODING="gzip",
         **_auth(token),
     )
-    assert resp.status_code in (200, 201), resp.content
+    assert resp.status_code == expect, resp.content
     return resp
 
 
-def _ingest(client, token, *, cluster: str, kind: str, import_id: str, payload: dict,
-            complete_snapshot: bool = False):
+def _commit(client, token, *, cluster: str, import_id: str, kinds: dict[str, int], expect: int = 200):
     resp = client.post(
-        "/api/v1/ingest/",
+        f"/api/v1/imports/{import_id}/commit/",
         data=json.dumps({
-            "cluster": cluster, "kind": kind, "import_id": import_id,
-            "payload": payload, "complete_snapshot": complete_snapshot,
+            "cluster": cluster,
+            "kinds": [{"kind": k, "count": n} for k, n in kinds.items()],
         }),
         content_type="application/json",
         **_auth(token),
     )
-    assert resp.status_code == 202, resp.content
+    assert resp.status_code == expect, resp.content
     return resp
 
 
-def _finish(client, token, *, cluster: str, kind: str, import_id: str, observed_count: int):
+def _abort(client, token, *, cluster: str, import_id: str, expect: int = 200):
     resp = client.post(
-        "/api/v1/imports/finish/",
-        data=json.dumps({
-            "cluster": cluster, "kind": kind, "import_id": import_id,
-            "observed_count": observed_count,
-        }),
+        f"/api/v1/imports/{import_id}/abort/",
+        data=json.dumps({"cluster": cluster}),
         content_type="application/json",
         **_auth(token),
     )
-    assert resp.status_code == 200, resp.content
+    assert resp.status_code == expect, resp.content
     return resp
 
 
@@ -102,23 +114,32 @@ def _drain():
     return drain_until_empty(limit=100)
 
 
-def _run_inventory_cycle(client, token, *, cluster: str, import_id: str, items: list[dict],
-                          complete: bool = True):
+def _envelope(cluster: str, items: list[dict]) -> dict:
+    return {"cluster_meta": {"name": cluster}, "items": items}
+
+
+def _run_inventory_cycle(client, token, *, cluster: str, import_id: str, items: list[dict]):
     """One full inventory cycle through the real views, then drain."""
-    _start(client, token, cluster=cluster, kind="inventory", import_id=import_id)
-    envelope = {
-        "cluster_meta": {"name": cluster},
-        "complete_snapshot": complete,
-        "items": items,
-    }
-    _ingest(
-        client, token, cluster=cluster, kind="inventory", import_id=import_id,
-        payload=envelope, complete_snapshot=complete,
+    _upload_bundle(
+        client, token, cluster=cluster, import_id=import_id, kind="inventory",
+        items=[_envelope(cluster, items)],
     )
-    _finish(
-        client, token, cluster=cluster, kind="inventory", import_id=import_id,
-        observed_count=len(items),
+    _commit(client, token, cluster=cluster, import_id=import_id, kinds={"inventory": 1})
+    return _drain()
+
+
+def _run_cycle(client, token, *, cluster: str, import_id: str, inv_items: list[dict],
+               scans: dict[str, list[dict]]):
+    """Inventory + any number of scan kinds, one commit, then drain."""
+    _upload_bundle(
+        client, token, cluster=cluster, import_id=import_id, kind="inventory",
+        items=[_envelope(cluster, inv_items)],
     )
+    kinds = {"inventory": 1}
+    for kind, items in scans.items():
+        _upload_bundle(client, token, cluster=cluster, import_id=import_id, kind=kind, items=items)
+        kinds[kind] = len(items)
+    _commit(client, token, cluster=cluster, import_id=import_id, kinds=kinds)
     return _drain()
 
 
@@ -304,6 +325,10 @@ def test_full_inventory_cycle_marks_workload_and_image_deployed(client, token):
     obs = WorkloadImageObservation.objects.get(workload=wl, image=image)
     assert obs.currently_deployed is True
 
+    mark = ImportMark.objects.get(cluster__name="e2e-c1", kind="inventory", import_id="imp-1")
+    assert mark.state == ImportMarkState.REAPED.value
+    assert wl.cluster.last_complete_inventory_at == mark.started_at
+
 
 # ── B. Removed vs. scaled-to-zero ─────────────────────────────────
 
@@ -316,7 +341,7 @@ def test_workload_absent_from_next_complete_cycle_becomes_undeployed(client, tok
     # Cycle 2: the Deployment is gone entirely (deleted from the cluster).
     _run_inventory_cycle(
         client, token, cluster="e2e-c2", import_id="imp-2",
-        items=[_ns_manifest("ns")], complete=True,
+        items=[_ns_manifest("ns")],
     )
 
     wl = Workload.objects.get(cluster__name="e2e-c2", name="api")
@@ -388,29 +413,20 @@ def test_image_upgrade_flips_currently_deployed_from_old_to_new(client, token):
 @pytest.mark.django_db(transaction=True)
 def test_vulnerability_report_resolves_to_deployment_via_replicaset_alias(client, token):
     """Trivy labels the report with the ReplicaSet it actually scanned —
-    the finding must still land on the Deployment, not the ReplicaSet."""
+    the finding must still land on the Deployment, not the ReplicaSet.
+    The scan bundle is uploaded BEFORE inventory, as the importer does."""
     digest = "sha256:" + "d" * 64
     inv_items = [_ns_manifest("ns"), *_deployment_replicaset_pod(
         "api", "ns", image="registry.x/app:1", digest=digest,
     )]
-    _start(client, token, cluster="e2e-c5", kind="inventory", import_id="imp-1")
-    _start(client, token, cluster="e2e-c5", kind="trivy.VulnerabilityReport", import_id="imp-1")
-
-    envelope = {"cluster_meta": {"name": "e2e-c5"}, "complete_snapshot": True, "items": inv_items}
-    _ingest(client, token, cluster="e2e-c5", kind="inventory", import_id="imp-1",
-            payload=envelope, complete_snapshot=True)
-
     vuln_payload = _vuln_report(
         namespace="ns", workload_kind="ReplicaSet", workload_name="api-7d9f5b6c8d",
         image_digest=digest, vulns=[_vuln("CVE-2024-1")],
     )
-    _ingest(client, token, cluster="e2e-c5", kind="trivy.VulnerabilityReport", import_id="imp-1",
-            payload=vuln_payload)
-
-    _finish(client, token, cluster="e2e-c5", kind="inventory", import_id="imp-1",
-            observed_count=len(inv_items))
-    _finish(client, token, cluster="e2e-c5", kind="trivy.VulnerabilityReport", import_id="imp-1",
-            observed_count=1)
+    _upload_bundle(client, token, cluster="e2e-c5", import_id="imp-1", kind=VULN, items=[vuln_payload])
+    _upload_bundle(client, token, cluster="e2e-c5", import_id="imp-1", kind="inventory",
+                   items=[_envelope("e2e-c5", inv_items)])
+    _commit(client, token, cluster="e2e-c5", import_id="imp-1", kinds={"inventory": 1, VULN: 1})
     _drain()
 
     wl = Workload.objects.get(cluster__name="e2e-c5", kind="Deployment", name="api")
@@ -419,6 +435,10 @@ def test_vulnerability_report_resolves_to_deployment_via_replicaset_alias(client
 
     visible = restrict_to_currently_deployed_images(default_finding_qs()).filter(pk=finding.pk)
     assert visible.exists()
+    # Import-wide started_at: the scan rows were created before the
+    # inventory bundle existed, yet the finding is not hidden behind the
+    # anchor the inventory reap advanced to.
+    assert finding.last_seen >= wl.cluster.last_complete_inventory_at
 
 
 @pytest.mark.django_db(transaction=True)
@@ -433,22 +453,12 @@ def test_finding_no_longer_visible_once_its_image_is_replaced(client, token):
         inv_items = [_ns_manifest("ns"), *_deployment_replicaset_pod(
             "api", "ns", image=f"registry.x/app:{image_tag}", digest=digest,
         )]
-        _start(client, token, cluster="e2e-c6", kind="inventory", import_id=import_id)
-        _start(client, token, cluster="e2e-c6", kind="trivy.VulnerabilityReport", import_id=import_id)
-        envelope = {"cluster_meta": {"name": "e2e-c6"}, "complete_snapshot": True, "items": inv_items}
-        _ingest(client, token, cluster="e2e-c6", kind="inventory", import_id=import_id,
-                payload=envelope, complete_snapshot=True)
         vuln_payload = _vuln_report(
             namespace="ns", workload_kind="ReplicaSet", workload_name="api-7d9f5b6c8d",
             image_digest=digest, image_tag=image_tag, vulns=vulns,
         )
-        _ingest(client, token, cluster="e2e-c6", kind="trivy.VulnerabilityReport", import_id=import_id,
-                payload=vuln_payload)
-        _finish(client, token, cluster="e2e-c6", kind="inventory", import_id=import_id,
-                observed_count=len(inv_items))
-        _finish(client, token, cluster="e2e-c6", kind="trivy.VulnerabilityReport", import_id=import_id,
-                observed_count=1)
-        _drain()
+        _run_cycle(client, token, cluster="e2e-c6", import_id=import_id,
+                   inv_items=inv_items, scans={VULN: [vuln_payload]})
 
     _cycle("imp-1", "1", digest_a, [_vuln("CVE-2024-2")])
     old_finding = Finding.objects.get(vuln_id="CVE-2024-2")
@@ -469,46 +479,29 @@ def test_finding_no_longer_visible_once_its_image_is_replaced(client, token):
 
 @pytest.mark.django_db(transaction=True)
 def test_scanner_outage_does_not_hide_existing_finding(client, token):
-    """A VulnerabilityReport outage (observed_count=0 for a still-deployed
-    image) must not make the existing finding disappear — even after a
-    LATER complete inventory cycle advances the cluster's watermark past
-    the finding's frozen last_seen."""
+    """A VulnerabilityReport outage — the importer uploads an EMPTY
+    bundle (count 0) for a still-deployed image — must not make the
+    existing finding disappear, even after a LATER complete inventory
+    cycle advances the cluster's watermark past the finding's frozen
+    last_seen."""
     digest = "sha256:" + "3" * 64
     inv_items = [_ns_manifest("ns"), *_deployment_replicaset_pod(
         "api", "ns", image="registry.x/app:1", digest=digest,
     )]
-    _start(client, token, cluster="e2e-c7", kind="inventory", import_id="imp-1")
-    _start(client, token, cluster="e2e-c7", kind="trivy.VulnerabilityReport", import_id="imp-1")
-    envelope = {"cluster_meta": {"name": "e2e-c7"}, "complete_snapshot": True, "items": inv_items}
-    _ingest(client, token, cluster="e2e-c7", kind="inventory", import_id="imp-1",
-            payload=envelope, complete_snapshot=True)
     vuln_payload = _vuln_report(
         namespace="ns", workload_kind="ReplicaSet", workload_name="api-7d9f5b6c8d",
         image_digest=digest, vulns=[_vuln("CVE-2024-3")],
     )
-    _ingest(client, token, cluster="e2e-c7", kind="trivy.VulnerabilityReport", import_id="imp-1",
-            payload=vuln_payload)
-    _finish(client, token, cluster="e2e-c7", kind="inventory", import_id="imp-1",
-            observed_count=len(inv_items))
-    _finish(client, token, cluster="e2e-c7", kind="trivy.VulnerabilityReport", import_id="imp-1",
-            observed_count=1)
-    _drain()
-
+    _run_cycle(client, token, cluster="e2e-c7", import_id="imp-1",
+               inv_items=inv_items, scans={VULN: [vuln_payload]})
     finding = Finding.objects.get(vuln_id="CVE-2024-3")
 
     # Cycle 2: same inventory (workload still deployed on the same image),
-    # but Trivy itself goes down — zero VulnerabilityReport items posted.
-    _start(client, token, cluster="e2e-c7", kind="inventory", import_id="imp-2")
-    _start(client, token, cluster="e2e-c7", kind="trivy.VulnerabilityReport", import_id="imp-2")
-    envelope2 = {"cluster_meta": {"name": "e2e-c7"}, "complete_snapshot": True, "items": inv_items}
-    _ingest(client, token, cluster="e2e-c7", kind="inventory", import_id="imp-2",
-            payload=envelope2, complete_snapshot=True)
-    _finish(client, token, cluster="e2e-c7", kind="inventory", import_id="imp-2",
-            observed_count=len(inv_items))
-    _finish(client, token, cluster="e2e-c7", kind="trivy.VulnerabilityReport", import_id="imp-2",
-            observed_count=0)  # outage: nothing reported
-    _drain()
+    # but Trivy itself goes down — zero VulnerabilityReport items.
+    _run_cycle(client, token, cluster="e2e-c7", import_id="imp-2",
+               inv_items=inv_items, scans={VULN: []})
 
+    assert ImportMark.objects.get(cluster__name="e2e-c7", kind=VULN, import_id="imp-2").observed_count == 0
     assert ScanInconsistency.objects.filter(
         cluster__name="e2e-c7", image_digest=digest, seen_in_scans=False,
     ).exists()
@@ -529,12 +522,6 @@ def test_sbom_report_persists_components_and_truncates_oversized_fields(client, 
     inv_items = [_ns_manifest("ns"), *_deployment_replicaset_pod(
         "api", "ns", image="registry.x/app:1", digest=digest,
     )]
-    _start(client, token, cluster="e2e-c8", kind="inventory", import_id="imp-1")
-    _start(client, token, cluster="e2e-c8", kind="trivy.SbomReport", import_id="imp-1")
-    envelope = {"cluster_meta": {"name": "e2e-c8"}, "complete_snapshot": True, "items": inv_items}
-    _ingest(client, token, cluster="e2e-c8", kind="inventory", import_id="imp-1",
-            payload=envelope, complete_snapshot=True)
-
     oversized_name = "x" * 400  # SbomComponent.name is max_length=255
     sbom_payload = _sbom_report(
         namespace="ns", workload_kind="ReplicaSet", workload_name="api-7d9f5b6c8d",
@@ -547,14 +534,8 @@ def test_sbom_report_persists_components_and_truncates_oversized_fields(client, 
             "properties": [],
         }],
     )
-    _ingest(client, token, cluster="e2e-c8", kind="trivy.SbomReport", import_id="imp-1",
-            payload=sbom_payload)
-
-    _finish(client, token, cluster="e2e-c8", kind="inventory", import_id="imp-1",
-            observed_count=len(inv_items))
-    _finish(client, token, cluster="e2e-c8", kind="trivy.SbomReport", import_id="imp-1",
-            observed_count=1)
-    totals = _drain()
+    totals = _run_cycle(client, token, cluster="e2e-c8", import_id="imp-1",
+                        inv_items=inv_items, scans={SBOM: [sbom_payload]})
 
     assert totals["failed"] == 0, "oversized SBOM field must be truncated, not crash the item"
     component = SbomComponent.objects.get(purl="pkg:generic/oversized@1.0")
@@ -581,23 +562,11 @@ def test_kyverno_pod_scoped_result_resolves_to_deployment_via_alias(client, toke
             "apiVersion": "apps/v1", "kind": "ReplicaSet", "name": rs_name, "controller": True,
         }),
     ]
-    _start(client, token, cluster="e2e-c9", kind="inventory", import_id="imp-1")
-    _start(client, token, cluster="e2e-c9", kind="kyverno.PolicyReport", import_id="imp-1")
-    envelope = {"cluster_meta": {"name": "e2e-c9"}, "complete_snapshot": True, "items": inv_items}
-    _ingest(client, token, cluster="e2e-c9", kind="inventory", import_id="imp-1",
-            payload=envelope, complete_snapshot=True)
-
     policy_payload = _policy_report(namespace="ns", results=[
         _kyverno_result(subject_kind="Pod", subject_name=pod_name, subject_namespace="ns"),
     ])
-    _ingest(client, token, cluster="e2e-c9", kind="kyverno.PolicyReport", import_id="imp-1",
-            payload=policy_payload)
-
-    _finish(client, token, cluster="e2e-c9", kind="inventory", import_id="imp-1",
-            observed_count=len(inv_items))
-    _finish(client, token, cluster="e2e-c9", kind="kyverno.PolicyReport", import_id="imp-1",
-            observed_count=1)
-    totals = _drain()
+    totals = _run_cycle(client, token, cluster="e2e-c9", import_id="imp-1",
+                        inv_items=inv_items, scans={KYVERNO: [policy_payload]})
 
     assert totals["failed"] == 0
 
@@ -638,3 +607,123 @@ def test_two_clusters_do_not_cross_contaminate(client, token):
     assert not Image.objects.currently_running(cluster=wl_a.cluster).filter(pk=image_b.pk).exists()
     assert Image.objects.currently_running(cluster=wl_b.cluster).filter(pk=image_b.pk).exists()
     assert not Image.objects.currently_running(cluster=wl_b.cluster).filter(pk=image_a.pk).exists()
+
+
+# ── I. Abort leaves nothing behind ────────────────────────────────
+
+
+@pytest.mark.django_db(transaction=True)
+def test_abort_leaves_no_rows_or_marks_and_next_import_works(client, token):
+    digest = "sha256:" + "7" * 64
+    inv_items = [_ns_manifest("ns"), *_deployment_replicaset_pod("api", "ns", digest=digest)]
+    _upload_bundle(client, token, cluster="e2e-ci", import_id="imp-1", kind="inventory",
+                   items=[_envelope("e2e-ci", inv_items)])
+    _upload_bundle(client, token, cluster="e2e-ci", import_id="imp-1", kind=VULN, items=[
+        _vuln_report(namespace="ns", workload_kind="ReplicaSet", workload_name="api-7d9f5b6c8d",
+                     image_digest=digest, vulns=[_vuln("CVE-2024-9")]),
+    ])
+
+    _abort(client, token, cluster="e2e-ci", import_id="imp-1")
+    totals = _drain()
+
+    assert totals["claimed"] == 0
+    assert not ImportMark.objects.filter(cluster__name="e2e-ci").exists()
+    assert not IngestQueue.objects.filter(cluster_name="e2e-ci").exists()
+    assert not Workload.objects.filter(cluster__name="e2e-ci").exists()
+    assert not Finding.objects.filter(vuln_id="CVE-2024-9").exists()
+
+    _run_inventory_cycle(client, token, cluster="e2e-ci", import_id="imp-2", items=inv_items)
+    assert Workload.objects.get(cluster__name="e2e-ci", name="api").deployed is True
+
+
+# ── J. Lost response → re-upload is idempotent ────────────────────
+
+
+@pytest.mark.django_db(transaction=True)
+def test_reupload_after_lost_response_is_idempotent_end_to_end(client, token):
+    inv_items = [_ns_manifest("ns"), *_deployment_replicaset_pod("api", "ns")]
+    envelope = [_envelope("e2e-cj", inv_items)]
+    _upload_bundle(client, token, cluster="e2e-cj", import_id="imp-1", kind="inventory",
+                   items=envelope, expect=201)
+    # The importer never saw the 201 and retries the identical bytes.
+    resp = _upload_bundle(client, token, cluster="e2e-cj", import_id="imp-1", kind="inventory",
+                          items=envelope, expect=200)
+    assert resp.json()["status"] == "already_uploaded"
+
+    _commit(client, token, cluster="e2e-cj", import_id="imp-1", kinds={"inventory": 1})
+    # And a retried commit is accepted too.
+    resp = _commit(client, token, cluster="e2e-cj", import_id="imp-1", kinds={"inventory": 1})
+    assert resp.json()["status"] == "already_committed"
+
+    totals = _drain()
+    assert totals["ok"] == 1
+    assert Workload.objects.get(cluster__name="e2e-cj", name="api").deployed is True
+
+
+# ── K. Queue holds in-flight work only ────────────────────────────
+
+
+@pytest.mark.django_db(transaction=True)
+def test_queue_empty_after_reap_with_failures_recorded_on_the_mark(client, token):
+    digest = "sha256:" + "8" * 64
+    inv_items = [_ns_manifest("ns"), *_deployment_replicaset_pod("api", "ns", digest=digest)]
+    vuln_payload = _vuln_report(
+        namespace="ns", workload_kind="ReplicaSet", workload_name="api-7d9f5b6c8d",
+        image_digest=digest, vulns=[_vuln("CVE-2024-10")],
+    )
+    real_process_item = ingest_service.process_item
+
+    def _flaky(item):
+        if item.kind == VULN:
+            raise RuntimeError("vuln parser exploded")
+        return real_process_item(item)
+
+    with patch("core.services.ingest.process_item", side_effect=_flaky):
+        totals = _run_cycle(client, token, cluster="e2e-ck", import_id="imp-1",
+                            inv_items=inv_items, scans={VULN: [vuln_payload, vuln_payload]})
+
+    assert (totals["ok"], totals["failed"]) == (1, 2)
+    assert IngestQueue.objects.filter(cluster_name="e2e-ck").count() == 0, (
+        "done AND failed rows are deleted at reap"
+    )
+    marks = {m.kind: m for m in ImportMark.objects.filter(cluster__name="e2e-ck", import_id="imp-1")}
+    assert all(m.state == ImportMarkState.REAPED.value for m in marks.values())
+    assert marks["inventory"].failed_count == 0
+    assert marks[VULN].failed_count == 2
+    assert "vuln parser exploded" in marks[VULN].last_error
+    assert Workload.objects.get(cluster__name="e2e-ck", name="api").deployed is True
+
+
+# ── L. Uncommitted import is never processed, then discarded ──────
+
+
+@pytest.mark.django_db(transaction=True)
+def test_uncommitted_import_is_never_processed_and_is_discarded_by_safety_net(client, token):
+    inv_items = [_ns_manifest("ns"), *_deployment_replicaset_pod("api", "ns")]
+    _upload_bundle(client, token, cluster="e2e-cl", import_id="imp-1", kind="inventory",
+                   items=[_envelope("e2e-cl", inv_items)])
+    _upload_bundle(client, token, cluster="e2e-cl", import_id="imp-1", kind=VULN, items=[])
+
+    assert _drain()["claimed"] == 0, "open marks are not claimable"
+    assert not Workload.objects.filter(cluster__name="e2e-cl").exists()
+
+    # The importer died before commit; the lock window and then the
+    # stuck-open TTL pass.
+    ImportMark.objects.filter(cluster__name="e2e-cl").update(
+        started_at=timezone.now() - timedelta(seconds=STUCK_OPEN_TIMEOUT_SECONDS + 60),
+    )
+    with patch("core.services.reaper._maybe_capture_heartbeat"):
+        call_command("reap_safety_net")
+
+    marks = list(ImportMark.objects.filter(cluster__name="e2e-cl"))
+    assert len(marks) == 2
+    assert all(m.state == ImportMarkState.REAPED.value for m in marks)
+    assert all(m.discard_reason == ImportDiscardReason.STUCK_OPEN.value for m in marks)
+    assert not IngestQueue.objects.filter(cluster_name="e2e-cl").exists()
+    assert not Workload.objects.filter(cluster__name="e2e-cl").exists()
+
+    pending = client.get("/api/v1/imports/pending/?cluster=e2e-cl", **_auth(token))
+    assert pending.status_code == 200 and pending.json()["in_flight"] is False
+
+    _run_inventory_cycle(client, token, cluster="e2e-cl", import_id="imp-2", items=inv_items)
+    assert Workload.objects.get(cluster__name="e2e-cl", name="api").deployed is True

@@ -1,0 +1,68 @@
+{
+  "inventory": {
+    "compressed_bytes": 13330,
+    "count": 1,
+    "sha256": "e01ba9e05151e513837341b13624f747caf5debe07dc780024bab0ad218595fa",
+    "uncompressed_bytes": 245545
+  },
+  "kyverno.ClusterPolicyReport": {
+    "compressed_bytes": 171,
+    "count": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "uncompressed_bytes": 179
+  },
+  "kyverno.PolicyReport": {
+    "compressed_bytes": 24620,
+    "count": 173,
+    "sha256": "4980c292c641774d2836efced279cfdb4649d6bc9e35a155d31b115a662a4b41",
+    "uncompressed_bytes": 571713
+  },
+  "trivy.ClusterComplianceReport": {
+    "compressed_bytes": 4703,
+    "count": 5,
+    "sha256": "5f1104b41a85074ff0876e1e52c02d7ca8a8a5ac72f950b181164394a0fffba4",
+    "uncompressed_bytes": 28225
+  },
+  "trivy.ClusterRbacAssessmentReport": {
+    "compressed_bytes": 15656,
+    "count": 156,
+    "sha256": "688270765fa7077cea8f53682f7096f2f538184db3226b46d9b2e47d08ca63be",
+    "uncompressed_bytes": 178989
+  },
+  "trivy.ConfigAuditReport": {
+    "compressed_bytes": 8298,
+    "count": 22,
+    "sha256": "e775b13840ca2c9ecf8a04f9b4aa2b4e6885bc8c561174190e283655cd58ec9e",
+    "uncompressed_bytes": 176090
+  },
+  "trivy.ExposedSecretReport": {
+    "compressed_bytes": 4993,
+    "count": 33,
+    "sha256": "e1b89843ec365b4273b1704d45c6fb1d01e663d283d7c7a0b7c59af80370c063",
+    "uncompressed_bytes": 36983
+  },
+  "trivy.InfraAssessmentReport": {
+    "compressed_bytes": 735,
+    "count": 3,
+    "sha256": "5a708c065597e2e01f8606ee1090935184d0139e492801b5bcfbed3006aff66b",
+    "uncompressed_bytes": 2542
+  },
+  "trivy.RbacAssessmentReport": {
+    "compressed_bytes": 3345,
+    "count": 23,
+    "sha256": "259fc4c8c144f9528c1dc7cec14a4a8ab7273a7c8e9feab1bb73863d267aa67e",
+    "uncompressed_bytes": 25026
+  },
+  "trivy.SbomReport": {
+    "compressed_bytes": 267216,
+    "count": 36,
+    "sha256": "fce6862d091b8dfadda40f23e10b3118d57b30c76f607d55f65f1cef14c3ef78",
+    "uncompressed_bytes": 3374739
+  },
+  "trivy.VulnerabilityReport": {
+    "compressed_bytes": 100560,
+    "count": 33,
+    "sha256": "1549cc4ee25f62b188ec4a97228e7508a76977a032ccc49d6c0b1e69c0ebc991",
+    "uncompressed_bytes": 1290812
+  }
+}

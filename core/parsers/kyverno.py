@@ -13,7 +13,6 @@ against — this is what we resolve to a Workload via the alias chain.
 """
 from __future__ import annotations
 
-
 from core.constants import Category, Severity, Source
 from core.signals import signal_for_kyverno_policy
 

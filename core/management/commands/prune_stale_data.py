@@ -11,8 +11,7 @@ This command is a thin wrapper that delegates to those functions.
 """
 from __future__ import annotations
 
-from django.core.management.base import BaseCommand
-
+from core.management.base import KubePostureCommand
 from core.services.pruning import (
     prune_import_marks,
     prune_ingest_queue,
@@ -20,7 +19,6 @@ from core.services.pruning import (
     prune_stale_findings,
     prune_stale_sbom_components,
 )
-
 
 # (option_name, fetcher, days_kwarg, days_default)
 _TARGETS = [
@@ -32,7 +30,7 @@ _TARGETS = [
 ]
 
 
-class Command(BaseCommand):
+class Command(KubePostureCommand):
     help = "Daily DB hygiene — prune stale rows across operational tables."
 
     def add_arguments(self, parser):

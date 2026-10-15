@@ -65,6 +65,13 @@ class ImportMarkState(models.TextChoices):
     REAPED = "reaped", "Reaped"
 
 
+class ImportDiscardReason(models.TextChoices):
+    """Why a mark reached `reaped` WITHOUT its reap body running. Empty
+    for a normal reap. See core.services.reaper.discard_import."""
+    STUCK_OPEN = "stuck_open", "Importer never committed the import"
+    INVENTORY_FAILED = "inventory_failed", "Inventory payload failed to process"
+
+
 class IngestQueueStatus(models.TextChoices):
     PENDING = "pending", "Pending"
     PROCESSING = "processing", "Processing"

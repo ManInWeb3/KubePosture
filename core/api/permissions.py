@@ -24,7 +24,6 @@ from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
 from rest_framework.permissions import BasePermission
 
-
 ROLE_HIERARCHY = ["viewer", "SecEngineer", "admin"]
 
 

@@ -129,10 +129,12 @@ Pass the root context (.) — needs .Values.image and the env helper.
     {{- include "kubeposture.env" . | nindent 4 }}
   securityContext:
     {{- include "kubeposture.securityContext" . | nindent 4 }}
+  # requests == limits: QoS is decided per pod, so a Burstable init
+  # container would demote every batch job out of Guaranteed.
   resources:
     requests:
-      cpu: 10m
-      memory: 64Mi
+      cpu: 100m
+      memory: 128Mi
     limits:
       cpu: 100m
       memory: 128Mi

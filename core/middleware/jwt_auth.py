@@ -34,7 +34,6 @@ logger = logging.getLogger(__name__)
 
 # Importer + probe paths that must never go through JWT auth.
 BYPASS_PREFIXES: tuple[str, ...] = (
-    "/api/v1/ingest/",
     "/api/v1/imports/",
     "/api/v1/cluster-metadata/",
     "/healthz",

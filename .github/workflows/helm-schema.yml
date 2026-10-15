@@ -1,0 +1,99 @@
+name: Helm values schema
+
+# Both charts ship a values.schema.json GENERATED from values.yaml by
+# dadav/helm-schema (the `# @schema` annotations in values.yaml are the
+# source of truth). This workflow fails a PR when:
+#   1. a committed schema is stale — values.yaml changed but
+#      `helm-schema -c deploy/charts -n -r -a` was not re-run;
+#   2. a chart's default values no longer satisfy its own schema
+#      (helm lint / helm template validate merged values against it);
+#   3. the schema stopped rejecting what it must reject — a handful of
+#      invalid overrides are linted and expected to FAIL, so a loosened
+#      annotation is caught here, not by a user at install time.
+
+on:
+  pull_request:
+    paths:
+      - "deploy/charts/**"
+      - ".github/workflows/helm-schema.yml"
+  push:
+    branches: [main]
+    paths:
+      - "deploy/charts/**"
+      - ".github/workflows/helm-schema.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: helm-schema-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pin the exact release used locally; bump deliberately. The checksum is
+  # the Linux_x86_64 line of the release's checksums.txt.
+  HELM_SCHEMA_VERSION: "0.23.5"
+  HELM_SCHEMA_SHA256: "b6e5334de9651a06b5fc7af573a114fda5177ee13d4c3dc59e3b6f21d0695552"
+
+jobs:
+  schema:
+    name: Generated schema is current and enforced
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install helm-schema ${{ env.HELM_SCHEMA_VERSION }}
+        run: |
+          set -euo pipefail
+          url="https://github.com/dadav/helm-schema/releases/download/${HELM_SCHEMA_VERSION}/helm-schema_${HELM_SCHEMA_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSL "$url" -o helm-schema.tgz
+          echo "${HELM_SCHEMA_SHA256}  helm-schema.tgz" | sha256sum -c -
+          tar -xzf helm-schema.tgz helm-schema
+          sudo install -m 0755 helm-schema /usr/local/bin/helm-schema
+          helm-schema --version
+
+      - name: values.schema.json matches values.yaml (both charts)
+        run: |
+          # -n: no dependency charts; -a: trailing newline (matches the
+          # committed files). Regenerate locally with the same flags plus
+          # -r (adds the yaml-language-server reference when missing).
+          helm-schema -c deploy/charts -n -a --check
+
+      - uses: azure/setup-helm@v4
+
+      - name: Default values satisfy the schema
+        run: |
+          set -euo pipefail
+          helm lint deploy/charts/kubeposture
+          helm lint deploy/charts/kubeposture-import --set clusterName=ci
+          helm template ci deploy/charts/kubeposture > /dev/null
+          helm template ci deploy/charts/kubeposture-import --set clusterName=ci > /dev/null
+
+      - name: Schema rejects invalid overrides
+        run: |
+          set -uo pipefail
+          C=deploy/charts/kubeposture
+          I=deploy/charts/kubeposture-import
+          fails=0
+          must_fail() {
+            local label=$1; shift
+            if helm lint "$@" > lint.out 2>&1; then
+              echo "::error::schema accepted '$label' — it must be rejected"
+              fails=$((fails + 1))
+            else
+              echo "rejected as expected: $label"
+            fi
+          }
+          must_fail "unknown top-level key"        "$C" --set typo=1
+          must_fail "image.pullPolicy enum"        "$C" --set image.pullPolicy=Sometimes
+          must_fail "cpu quantity"                 "$C" --set cronJobs.enrichEpss.resources.requests.cpu=abc
+          must_fail "typo inside resources"        "$C" --set cronJobs.enrichEpss.resources.requests.cpuu=1
+          must_fail "cron without command"         "$C" --set cronJobs.custom.schedule="0 * * * *"
+          must_fail "tmp.sizeLimit unit"           "$C" --set tmp.sizeLimit=1GB
+          must_fail "missing clusterName"          "$I"
+          must_fail "logLevel enum"                "$I" --set clusterName=c,logLevel=verbose
+          must_fail "coverage.minRatio range"      "$I" --set clusterName=c,coverage.minRatio=1.5
+          must_fail "kubepostureUrl scheme"        "$I" --set clusterName=c,kubepostureUrl=kubeposture.local
+          test "$fails" -eq 0

@@ -1,8 +1,6 @@
 """Tests for the `/findings/` triage list view."""
 from __future__ import annotations
 
-from datetime import timedelta
-
 import pytest
 from django.contrib.auth.models import User
 from django.urls import reverse

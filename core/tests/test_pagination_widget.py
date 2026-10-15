@@ -17,7 +17,6 @@ from core.models import (
     WorkloadImageObservation,
 )
 
-
 # ── elided_page_range filter ─────────────────────────────────────
 
 

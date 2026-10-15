@@ -1,0 +1,35 @@
+{
+  "captured_at": "2026-10-14T07:53:08+00:00",
+  "item_counts": {
+    "kubeapi/cronjobs.json": 4,
+    "kubeapi/daemonsets.json": 7,
+    "kubeapi/deployments.json": 93,
+    "kubeapi/ingresses.json": 27,
+    "kubeapi/jobs.json": 19,
+    "kubeapi/namespaces.json": 71,
+    "kubeapi/networkpolicies.json": 3,
+    "kubeapi/nodes.json": 14,
+    "kubeapi/pods.json": 236,
+    "kubeapi/replicasets.json": 467,
+    "kubeapi/services.json": 120,
+    "kubeapi/statefulsets.json": 11,
+    "kyverno/clusterpolicyreports.json": 0,
+    "kyverno/policyreports.json": 988,
+    "trivy/clustercompliancereports.json": 5,
+    "trivy/clusterrbacassessmentreports.json": 156,
+    "trivy/configauditreports.json": 404,
+    "trivy/exposedsecretreports.json": 295,
+    "trivy/infraassessmentreports.json": 3,
+    "trivy/rbacassessmentreports.json": 54,
+    "trivy/sbomreports.json": 629,
+    "trivy/vulnerabilityreports.json": 177
+  },
+  "scanner_images": [
+    "background-controller:v1.19.1",
+    "cleanup-controller:v1.19.1",
+    "kyverno:v1.19.1",
+    "reports-controller:v1.19.1",
+    "trivy-operator:0.35.0"
+  ],
+  "server_version": "v1.35.7-eks-cb19647"
+}

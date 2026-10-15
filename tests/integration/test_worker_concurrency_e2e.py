@@ -42,6 +42,8 @@ from core.constants import ImportMarkState, IngestQueueStatus
 from core.models import Cluster, ImportMark, IngestQueue
 from core.services.queue import MAX_RECLAIM_ATTEMPTS, STALE_PROCESSING_SECONDS
 
+pytestmark = pytest.mark.e2e
+
 _UNKNOWN_KIND = "synthetic.E2EWorkerLoad"
 _N_TUPLES = 5
 _ITEMS_PER_TUPLE = 15
@@ -150,14 +152,19 @@ def test_parallel_workers_drain_the_backlog_despite_one_locked_poison_item():
         "backlog around it (this is the production incident, reproduced)"
     )
 
-    done_count = IngestQueue.objects.filter(
-        pk__in=[i.pk for i in normal_items], status=IngestQueueStatus.DONE.value,
-    ).count()
-    assert done_count == len(normal_items), (
-        f"only {done_count}/{len(normal_items)} ordinary backlog items were "
+    # A drained tuple's rows are deleted by its reap, so "fully drained"
+    # means none of the ordinary rows remain and every ordinary mark is
+    # reaped with no failures recorded.
+    remaining = IngestQueue.objects.filter(pk__in=[i.pk for i in normal_items]).count()
+    assert remaining == 0, (
+        f"{remaining}/{len(normal_items)} ordinary backlog items were not "
         "drained — the parallel worker fleet failed to make full progress "
         "even though none of them needed the locked row"
     )
+    reaped = ImportMark.objects.exclude(import_id="imp-poison")
+    assert reaped.count() == _N_TUPLES
+    assert all(m.state == ImportMarkState.REAPED.value for m in reaped)
+    assert all(m.failed_count == 0 for m in reaped)
 
     poison.refresh_from_db()
     assert poison.status == IngestQueueStatus.PROCESSING.value, (

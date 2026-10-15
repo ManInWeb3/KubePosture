@@ -2,6 +2,7 @@ __pycache__
 *.py[cod]
 *.egg-info
 .git
+.github
 .gitignore
 .env
 *.sqlite3
@@ -13,3 +14,8 @@ docker-compose.yml
 Dockerfile
 README.md
 requirements-dev.txt
+# test suites and real-data fixtures are not needed in the image
+tests
+core/tests
+scripts/importer_tests
+fixtures/real

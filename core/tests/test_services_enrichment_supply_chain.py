@@ -23,7 +23,6 @@ from core.models import (
 )
 from core.services import enrichment
 
-
 # ── Fixture helpers ─────────────────────────────────────────────
 
 

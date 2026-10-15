@@ -1,10 +1,10 @@
 """One-shot drain of IngestQueue. Helm CronJob entry point."""
-from django.core.management.base import BaseCommand
 
+from core.management.base import KubePostureCommand
 from core.services import worker
 
 
-class Command(BaseCommand):
+class Command(KubePostureCommand):
     help = "Drain pending IngestQueue items and fire reaps."
 
     def add_arguments(self, parser):

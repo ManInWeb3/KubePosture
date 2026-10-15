@@ -29,7 +29,6 @@ from core.services.images import (
     list_images,
 )
 
-
 # ── Fixtures ─────────────────────────────────────────────────────
 
 

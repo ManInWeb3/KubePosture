@@ -7,9 +7,11 @@ loop:
   every claimable item until the queue settles.
 - `--once` runs a single batch and returns.
 - Items whose ImportMark is still in `open` are NOT claimed — they
-  wait for the importer to finish.
-- A successful drain transitions the queue items to `done` and the
-  matching ImportMark to `reaped`.
+  wait for the importer to commit.
+- A successful drain reaps the matching ImportMark; the reap deletes
+  the tuple's queue rows, so "drained" means the rows are gone and the
+  mark is `reaped` (with `failed_count` / `last_error` recording any
+  failures).
 - A second invocation on an already-drained queue is a no-op.
 
 End-to-end parser correctness is exercised by the per-parser test
@@ -24,9 +26,10 @@ from unittest.mock import patch
 
 import pytest
 from django.core.management import call_command
+from django.test import override_settings
 from django.utils import timezone
 
-from core.constants import ImportMarkState, IngestQueueStatus
+from core.constants import ImportDiscardReason, ImportMarkState, IngestQueueStatus
 from core.models import Cluster, ImportMark, IngestQueue
 
 # ── helpers ─────────────────────────────────────────────────────────
@@ -53,6 +56,10 @@ def _seed(cluster: Cluster, *, kind: str = _UNKNOWN_KIND, import_id: str = "imp-
     return mark, item
 
 
+def _gone(item: IngestQueue) -> bool:
+    return not IngestQueue.objects.filter(pk=item.pk).exists()
+
+
 @pytest.fixture
 def cluster(db):
     return Cluster.objects.create(name="c-drain")
@@ -71,18 +78,18 @@ def _quiet_heartbeat():
 @pytest.mark.django_db(transaction=True)
 def test_command_drains_until_empty_by_default(cluster):
     """No `--once` → the command keeps draining until no claim returns
-    anything. The seeded pending item ends up `done` and the mark
-    flips to `reaped`."""
+    anything. The seeded pending item is processed, the mark flips to
+    `reaped`, and the reap deletes the row."""
     mark, item = _seed(cluster)
 
     out = io.StringIO()
     call_command("process_ingest_queue", stdout=out, stderr=io.StringIO())
 
-    item.refresh_from_db()
     mark.refresh_from_db()
-    assert item.status == IngestQueueStatus.DONE.value
-    assert item.processed_at is not None
+    assert _gone(item)
     assert mark.state == ImportMarkState.REAPED.value
+    assert mark.failed_count == 0
+    assert mark.last_error == ""
     body = out.getvalue()
     assert "claimed" in body
     assert "ok" in body
@@ -134,16 +141,16 @@ def test_command_once_runs_a_single_batch(cluster):
         stdout=out, stderr=io.StringIO(),
     )
 
-    item.refresh_from_db()
     mark.refresh_from_db()
-    assert item.status == IngestQueueStatus.DONE.value
+    assert _gone(item)
     assert mark.state == ImportMarkState.REAPED.value
 
 
 @pytest.mark.django_db(transaction=True)
 def test_command_once_respects_limit_flag(cluster):
     """`--once --limit 1` claims at most one item per pass. With two
-    pending items, one drain leaves the second pending."""
+    pending items in two tuples, one drain reaps one tuple (its row is
+    deleted) and leaves the other pending."""
     _seed(cluster, import_id="imp-A")
     _seed(cluster, import_id="imp-B")
 
@@ -152,10 +159,10 @@ def test_command_once_respects_limit_flag(cluster):
         stdout=io.StringIO(), stderr=io.StringIO(),
     )
 
-    done = IngestQueue.objects.filter(status=IngestQueueStatus.DONE.value).count()
-    pending = IngestQueue.objects.filter(status=IngestQueueStatus.PENDING.value).count()
-    assert done == 1
-    assert pending == 1
+    assert IngestQueue.objects.count() == 1
+    assert IngestQueue.objects.filter(status=IngestQueueStatus.PENDING.value).count() == 1
+    assert ImportMark.objects.filter(state=ImportMarkState.REAPED.value).count() == 1
+    assert ImportMark.objects.filter(state=ImportMarkState.DRAINING.value).count() == 1
 
 
 # ── idempotence ─────────────────────────────────────────────────────
@@ -164,23 +171,21 @@ def test_command_once_respects_limit_flag(cluster):
 @pytest.mark.django_db(transaction=True)
 def test_command_is_idempotent_on_already_drained_state(cluster):
     """Running the command twice on the same seed leaves the system in
-    the same state — no resurrection of DONE items, no duplicate
-    reaps."""
+    the same state — no resurrection, no duplicate reaps."""
     mark, item = _seed(cluster, import_id="imp-idem")
 
     call_command("process_ingest_queue", stdout=io.StringIO(), stderr=io.StringIO())
-    item.refresh_from_db()
     mark.refresh_from_db()
-    assert item.status == IngestQueueStatus.DONE.value
+    assert _gone(item)
     assert mark.state == ImportMarkState.REAPED.value
 
     # Second run — nothing to do.
     out = io.StringIO()
     call_command("process_ingest_queue", stdout=out, stderr=io.StringIO())
-    item.refresh_from_db()
     mark.refresh_from_db()
-    assert item.status == IngestQueueStatus.DONE.value
     assert mark.state == ImportMarkState.REAPED.value
+    assert IngestQueue.objects.count() == 0
+    assert "'claimed': 0" in out.getvalue()
 
 
 # ── multi-tuple drain ──────────────────────────────────────────────
@@ -189,19 +194,16 @@ def test_command_is_idempotent_on_already_drained_state(cluster):
 @pytest.mark.django_db(transaction=True)
 def test_command_drains_multiple_independent_tuples(cluster):
     """Two unrelated `(kind, import_id)` tuples both drain in one
-    invocation; each mark transitions to REAPED."""
+    invocation; each mark transitions to REAPED and its row is gone."""
     cluster_b = Cluster.objects.create(name="c-drain-b")
     m1, q1 = _seed(cluster, kind=_UNKNOWN_KIND, import_id="imp-1")
     m2, q2 = _seed(cluster_b, kind="synthetic.OtherKind", import_id="imp-2")
 
     call_command("process_ingest_queue", stdout=io.StringIO(), stderr=io.StringIO())
 
-    q1.refresh_from_db()
-    q2.refresh_from_db()
     m1.refresh_from_db()
     m2.refresh_from_db()
-    assert q1.status == IngestQueueStatus.DONE.value
-    assert q2.status == IngestQueueStatus.DONE.value
+    assert _gone(q1) and _gone(q2)
     assert m1.state == ImportMarkState.REAPED.value
     assert m2.state == ImportMarkState.REAPED.value
 
@@ -211,11 +213,29 @@ def test_command_drains_multiple_independent_tuples(cluster):
 
 @pytest.mark.django_db(transaction=True)
 def test_command_marks_item_failed_when_process_item_raises(cluster):
-    """If `process_item` raises, the worker flips the row to FAILED
-    and the mark stays draining (because the queue is technically
-    drained, the reap WILL still fire — the failure doesn't block
-    cleanup)."""
+    """If `process_item` raises, the worker flips the row to FAILED. The
+    queue then has no PENDING/PROCESSING rows, so the reap still fires:
+    it records the failure on the mark and deletes the row."""
     mark, item = _seed(cluster, import_id="imp-fail")
+
+    with patch(
+        "core.services.ingest.process_item", side_effect=RuntimeError("boom"),
+    ):
+        call_command("process_ingest_queue", stdout=io.StringIO(), stderr=io.StringIO())
+
+    mark.refresh_from_db()
+    assert _gone(item)
+    assert mark.state == ImportMarkState.REAPED.value
+    assert mark.failed_count == 1
+    assert "boom" in mark.last_error
+
+
+@pytest.mark.django_db(transaction=True)
+@override_settings(IMPORT_KEEP_FAILED_PAYLOADS=True)
+def test_failed_row_is_kept_when_debug_flag_is_on(cluster):
+    """IMPORT_KEEP_FAILED_PAYLOADS keeps the failed row (and its raw
+    payload) for the 14-day prune so the failure can be replayed."""
+    mark, item = _seed(cluster, import_id="imp-keep")
 
     with patch(
         "core.services.ingest.process_item", side_effect=RuntimeError("boom"),
@@ -225,10 +245,39 @@ def test_command_marks_item_failed_when_process_item_raises(cluster):
     item.refresh_from_db()
     mark.refresh_from_db()
     assert item.status == IngestQueueStatus.FAILED.value
-    assert "boom" in (item.error_message or "")
-    # After a failure the queue has no PENDING/PROCESSING rows, so the
-    # drain_check passes and the reap fires anyway.
+    assert "boom" in item.error_message
     assert mark.state == ImportMarkState.REAPED.value
+    assert mark.failed_count == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_failed_inventory_item_discards_the_whole_import(cluster):
+    """An inventory item that fails would hold every scan row of its
+    import behind the inventory gate forever. The worker discards the
+    import instead: scan rows deleted, every mark `reaped` with
+    `discard_reason=inventory_failed`, the inventory error on the
+    inventory mark, and the cluster anchor untouched."""
+    inv_mark, inv_item = _seed(cluster, kind="inventory", import_id="imp-inv-fail")
+    vuln_mark, vuln_item = _seed(
+        cluster, kind="trivy.VulnerabilityReport", import_id="imp-inv-fail",
+    )
+
+    with patch(
+        "core.services.ingest.process_item", side_effect=RuntimeError("inventory exploded"),
+    ):
+        call_command("process_ingest_queue", stdout=io.StringIO(), stderr=io.StringIO())
+
+    inv_mark.refresh_from_db()
+    vuln_mark.refresh_from_db()
+    cluster.refresh_from_db()
+    assert _gone(inv_item) and _gone(vuln_item)
+    for m in (inv_mark, vuln_mark):
+        assert m.state == ImportMarkState.REAPED.value
+        assert m.discard_reason == ImportDiscardReason.INVENTORY_FAILED.value
+    assert inv_mark.failed_count == 1
+    assert "inventory exploded" in inv_mark.last_error
+    assert vuln_mark.failed_count == 0
+    assert cluster.last_complete_inventory_at is None
 
 
 # ── deadlock retry ──────────────────────────────────────────────────
@@ -265,10 +314,11 @@ def test_command_retries_and_recovers_from_a_transient_deadlock(cluster):
     ):
         call_command("process_ingest_queue", stdout=io.StringIO(), stderr=io.StringIO())
 
-    item.refresh_from_db()
+    mark.refresh_from_db()
     assert calls["n"] == 2, "must retry once after the first deadlock, not fail immediately"
-    assert item.status == IngestQueueStatus.DONE.value
-    assert not item.error_message
+    assert _gone(item)
+    assert mark.state == ImportMarkState.REAPED.value
+    assert mark.failed_count == 0
 
 
 @pytest.mark.django_db(transaction=True)
@@ -289,10 +339,10 @@ def test_command_gives_up_after_max_deadlock_retries(cluster):
     ):
         call_command("process_ingest_queue", stdout=io.StringIO(), stderr=io.StringIO())
 
-    item.refresh_from_db()
+    mark.refresh_from_db()
     assert calls["n"] == 3, "must stop after max attempts, not retry forever"
-    assert item.status == IngestQueueStatus.FAILED.value
-    assert "deadlock" in item.error_message.lower()
+    assert mark.failed_count == 1
+    assert "deadlock" in mark.last_error.lower()
 
 
 @pytest.mark.django_db(transaction=True)
@@ -311,6 +361,7 @@ def test_command_does_not_retry_a_non_deadlock_failure(cluster):
     with patch("core.services.ingest.process_item", side_effect=_boom):
         call_command("process_ingest_queue", stdout=io.StringIO(), stderr=io.StringIO())
 
-    item.refresh_from_db()
+    mark.refresh_from_db()
     assert calls["n"] == 1, "a non-deadlock error must not be retried"
-    assert item.status == IngestQueueStatus.FAILED.value
+    assert mark.failed_count == 1
+    assert "not a deadlock" in mark.last_error

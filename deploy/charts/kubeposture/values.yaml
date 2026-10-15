@@ -1,28 +1,137 @@
-# -- KubePosture Helm chart values
-# Database is NOT included — use CNPG (CloudNativePG) or any external PostgreSQL 16+.
+# yaml-language-server: $schema=values.schema.json
+#
+# values.schema.json is GENERATED from this file by dadav/helm-schema —
+# never edit it by hand. The `# @schema … # @schema` blocks below carry
+# the constraints the generator cannot infer (enums, nullables, ranges,
+# free-form maps, shared definitions); everything else (types, defaults,
+# descriptions) is inferred from the values and the comments above them.
+#
+#   helm-schema -c deploy/charts -n -r -a        # regenerate both charts
+#   helm-schema -c deploy/charts -n --check      # what CI runs
+#
+# Helm validates the *merged* values against the schema on install /
+# upgrade / lint / template, so a typo'd key or a wrong type fails before
+# anything is rendered.
+
+# @schema.root
+# title: KubePosture chart values
+# description: Central KubePosture deployment — web, queue worker, batch CronJobs. The database is NOT included; use CNPG or any external PostgreSQL 16+.
+# definitions:
+#   quantity:
+#     description: Kubernetes resource quantity, e.g. 500m, 1, 1.5, 512Mi, 2Gi.
+#     type: [string, number]
+#     pattern: '^[0-9]+(\.[0-9]+)?(m|k|M|G|T|P|E|Ki|Mi|Gi|Ti|Pi|Ei)?$'
+#   resourceList:
+#     type: object
+#     additionalProperties: false
+#     properties:
+#       cpu: {$ref: "#/definitions/quantity"}
+#       memory: {$ref: "#/definitions/quantity"}
+#       ephemeral-storage: {$ref: "#/definitions/quantity"}
+#   resources:
+#     description: Kubernetes ResourceRequirements. Batch jobs run with requests == limits (Guaranteed QoS) — see docs/operations/batch-jobs-memory.md.
+#     type: object
+#     additionalProperties: false
+#     properties:
+#       requests: {$ref: "#/definitions/resourceList"}
+#       limits: {$ref: "#/definitions/resourceList"}
+#   cronSchedule:
+#     description: Cron expression (5 fields) or a @-macro such as @daily.
+#     type: string
+#     pattern: '^(@(yearly|annually|monthly|weekly|daily|midnight|hourly)|(\S+\s+){4}\S+)$'
+#   command:
+#     description: Container command (argv). One string per element.
+#     type: array
+#     minItems: 1
+#     items: {type: string}
+#   stringMap:
+#     description: Free-form string→string map (labels, annotations, selectors).
+#     type: object
+#     additionalProperties: {type: string}
+#   secretRef:
+#     description: Reference to a key in an existing Secret. Both fields null → the plaintext `value` is used instead.
+#     type: object
+#     additionalProperties: false
+#     properties:
+#       name: {type: [string, "null"]}
+#       key: {type: [string, "null"]}
+#   cronJob:
+#     description: One batch CronJob. Rendered by templates/cronjobs.yaml (+ a one-shot Job on install/upgrade when initialRun is true).
+#     type: object
+#     additionalProperties: false
+#     required: [schedule, command]
+#     properties:
+#       enabled: {type: boolean, default: true}
+#       initialRun: {type: boolean, default: false, description: Also run once as a post-install/upgrade Job.}
+#       schedule: {$ref: "#/definitions/cronSchedule"}
+#       command: {$ref: "#/definitions/command"}
+#       resources: {$ref: "#/definitions/resources"}
+#       activeDeadlineSeconds: {type: integer, minimum: 1, default: 300}
+# @schema.root
 
 # -- Django SECRET_KEY — provide either a plaintext value or a secret reference.
 # If secretRef is set it takes precedence over value.
 secretKey:
   value: "SomeStrongSecret"    # plaintext (not recommended for production)
+  # @schema
+  # $ref: "#/definitions/secretRef"
+  # @schema
   secretRef:
     name: null       # K8s secret name
     key: null                # key inside that secret
 
 # -- Database URL secret (e.g. CNPG-generated secret)
 db:
+  # @schema
+  # type: string
+  # minLength: 1
+  # required: true
+  # @schema
   secretName: kubeposture-secret   # secret that holds the DB URL
+  # @schema
+  # type: string
+  # minLength: 1
+  # required: true
+  # @schema
   urlKey: DATABASE_URL             # key inside that secret (e.g. "uri" for CNPG)
 
 # -- Application environment variables (non-sensitive)
 app:
+  # @schema
+  # type: object
+  # additionalProperties:
+  #   type: [string, number, boolean]
+  # properties: {}
+  # @schema
+  # -- Rendered 1:1 as container env vars (values are quoted, so numbers and
+  # booleans are accepted). Any key may be added; the ones below are the
+  # settings the app reads — see kubeposture/settings.py.
   env:
     DEBUG: "False"
     ALLOWED_HOSTS: "*"
     CSRF_TRUSTED_ORIGINS: ""      # e.g. "https://kubeposture.example.com"
     LOG_LEVEL: "INFO"
-    INGEST_QUEUE_MAX_ATTEMPTS: "3"
     INTERNAL_INGRESS_CLASSES: ""  # CSV of ingress class names treated as not public, e.g. "pomerium,nginx-internal"
+    # -- Import bundles (see core/services/bundle_ingest.py). The upload
+    # view streams the body itself, so these caps — not Django's
+    # DATA_UPLOAD_MAX_MEMORY_SIZE — bound a bundle. A cycle is ~20 MB
+    # uncompressed / ~2 MB gzipped today; defaults leave wide headroom.
+    IMPORT_BUNDLE_MAX_COMPRESSED_BYTES: "67108864"      # 64 MiB
+    IMPORT_BUNDLE_MAX_UNCOMPRESSED_BYTES: "134217728"   # 128 MiB — one bundle is one transaction
+    IMPORT_BUNDLE_MAX_ITEMS: "50000"
+    IMPORT_BUNDLE_MAX_LINE_BYTES: "33554432"            # 32 MiB — the inventory envelope is one line
+    # commit logs `import.coverage_low` at ERROR when the importer-reported
+    # scan coverage (matched / expected) is below this; the import proceeds.
+    IMPORT_COVERAGE_ALERT_RATIO: "0.9"
+    # Debugging aid only. The reap deletes a tuple's queue rows once it has
+    # recorded failed_count / last_error on the ImportMark; "true" keeps
+    # `failed` rows (with their raw payloads) for the 14-day prune so a
+    # reproducible parse failure can be replayed. Turn on while
+    # investigating, off afterwards.
+    IMPORT_KEEP_FAILED_PAYLOADS: "false"
+    # Plain-JSON endpoints (commit, the testing harness) still go through
+    # Django's in-memory body limit.
+    DATA_UPLOAD_MAX_MEMORY_SIZE: "16777216"             # 16 MiB
     # -- Proxy-forwarded JWT auth. When JWT_AUTH_ENABLED="true", requests
     # carrying a valid JWT in JWT_AUTH_HEADER auto-create a Django User in
     # the `viewer` group and start a session. Importer paths bypass this.
@@ -37,12 +146,12 @@ app:
     METRICS_BUSINESS_TTL_SECONDS: "300"   # business gauges cached this long; finding counts only change when imports complete
     # TTL for the in-flight-import "lock". An open/draining ImportMark
     # older than this is treated as abandoned (crashed importer) and
-    # stops blocking new on-demand imports. Lower if a crashed importer
-    # leaves the in-cluster trigger skipping for too long; raise if
-    # legitimate slow imports get raced. Defaults to 30min, matching
-    # the workload-cluster job's activeDeadlineSeconds (900s) with 2x
-    # headroom for slow networks.
-    IMPORT_LOCK_TIMEOUT_SECONDS: "900"
+    # stops blocking new on-demand imports. Must be >= the importer
+    # Job's activeDeadlineSeconds (900 in kubeposture-import) so a
+    # slow-but-alive import is never raced by a second one, and < the
+    # reaper's STUCK_OPEN_TIMEOUT_SECONDS (1800) so an abandoned import
+    # stops gating new ones before it is discarded.
+    IMPORT_LOCK_TIMEOUT_SECONDS: "1200"
 
 # Compliance framework loading is not implemented in this milestone.
 # The fixtures/ directory holds sample YAMLs but no `load_frameworks`
@@ -51,8 +160,16 @@ app:
 
 # ── Web Deployment ──────────────────────────────────────────────
 
+# -- The Django web Deployment (gunicorn).
 web:
+  # @schema
+  # type: integer
+  # minimum: 0
+  # @schema
   replicaCount: 2
+  # @schema
+  # $ref: "#/definitions/command"
+  # @schema
   command:
     # gthread (not sync) — sync workers handle one socket at a time, so two
     # half-open / slow-reading connections froze the whole pod and the arbiter
@@ -77,6 +194,9 @@ web:
     - "30"
     - --access-logfile
     - "-"
+  # @schema
+  # $ref: "#/definitions/resources"
+  # @schema
   resources:
     requests:
       cpu: 200m
@@ -84,7 +204,11 @@ web:
     limits:
       cpu: 500m
       memory: 1Gi
-  # Liveness uses /healthz (process up); readiness uses /readyz (DB reachable).
+  # @schema
+  # type: object
+  # additionalProperties: true
+  # @schema
+  # -- Liveness probe (passed through verbatim). /healthz = process up.
   livenessProbe:
     httpGet:
       path: /healthz
@@ -92,6 +216,11 @@ web:
     initialDelaySeconds: 5
     periodSeconds: 15
     timeoutSeconds: 3
+  # @schema
+  # type: object
+  # additionalProperties: true
+  # @schema
+  # -- Readiness probe (passed through verbatim). /readyz = DB reachable.
   readinessProbe:
     httpGet:
       path: /readyz
@@ -99,19 +228,45 @@ web:
     initialDelaySeconds: 3
     periodSeconds: 10
     timeoutSeconds: 3
+  # -- HorizontalPodAutoscaler for the web Deployment.
   autoscaling:
     enabled: false
+    # @schema
+    # type: integer
+    # minimum: 1
+    # @schema
     minReplicas: 2
+    # @schema
+    # type: integer
+    # minimum: 1
+    # @schema
     maxReplicas: 6
+    # @schema
+    # type: integer
+    # minimum: 1
+    # maximum: 100
+    # @schema
     targetCPUUtilizationPercentage: 80
 
 # ── Queue Worker CronJob ────────────────────────────────────────
 
+# -- The ingest-queue worker CronJob (process_ingest_queue).
 worker:
   enabled: true
+  # @schema
+  # $ref: "#/definitions/cronSchedule"
+  # @schema
   schedule: "*/3 * * * *"       # every 3 minutes
+  # @schema
+  # type: string
+  # enum: [Allow, Forbid, Replace]
+  # @schema
   concurrencyPolicy: Allow      # allow overlap during heavy imports
-  # Pods per job. claim_batch's SKIP LOCKED partitions work safely across
+  # @schema
+  # type: integer
+  # minimum: 1
+  # @schema
+  # -- Pods per job. claim_batch's SKIP LOCKED partitions work safely across
   # them (the k8s "work queue" Job pattern — no `completions` is set, so
   # the Job just runs `parallelism` pods to completion against the shared
   # queue). Raised from 1 -> 4: cluster-wide capacity is not the
@@ -121,8 +276,15 @@ worker:
   # unprotected statement, run first on every drain_once iteration, could
   # block an entire pod on a lock held by an unrelated in-flight worker.
   parallelism: 4
+  # @schema
+  # type: integer
+  # minimum: 1
+  # @schema
   activeDeadlineSeconds: 300
-  # Default mode: drain_once in a loop until the queue is empty (up to
+  # @schema
+  # $ref: "#/definitions/command"
+  # @schema
+  # -- Default mode: drain_once in a loop until the queue is empty (up to
   # max_iterations=200 rounds of --limit items each) — intentional for
   # this CronJob, not just the synchronous /testing/load_scenario/
   # harness. Each item commits independently (see worker._process_one),
@@ -136,17 +298,26 @@ worker:
     - process_ingest_queue
     - --limit
     - "100"
+  # @schema
+  # $ref: "#/definitions/resources"
+  # @schema
+  # -- requests == limits (Guaranteed QoS) like the other batch jobs; size
+  # from the `command.finished peak_rss_mb=` log line.
   resources:
     requests:
-      cpu: 200m
-      memory: 512Mi
+      cpu: 500m
+      memory: 1Gi
     limits:
       cpu: 500m
       memory: 1Gi
 
 # ── Init: DB migrations ────────────────────────────────────────
 
+# -- The migrate init container of the setup Job.
 migration:
+  # @schema
+  # $ref: "#/definitions/resources"
+  # @schema
   resources:
     requests:
       cpu: 100m
@@ -157,11 +328,32 @@ migration:
 
 # ── CronJobs ───────────────────────────────────────────────────
 
+# @schema
+# type: object
+# additionalProperties:
+#   $ref: "#/definitions/cronJob"
+# @schema
+# -- Batch CronJobs, keyed by name (kebab-cased into the resource name).
+# Extra entries may be added; each one follows the `cronJob` definition.
+#
 # Crons with initialRun: true also run once as a post-install/upgrade Job —
 # used for seeding EPSS/KEV data immediately instead of waiting for the next tick.
 # Crons without initialRun only run on their schedule.
+#
+# Batch jobs run with requests == limits (Guaranteed QoS): a job is then
+# never evicted or OOM-killed because a *neighbour* spiked, only when it
+# exceeds its own limit. Every command logs `command.finished ...
+# peak_rss_mb=` on exit — size `memory` from those lines, not by guess
+# (EPSS/KEV are sized already; the rest still carry their old 2Gi limit
+# as the request until a few runs have been read), and keep /tmp on the
+# disk-backed emptyDir (`tmp.sizeLimit`), never `medium: Memory`, so a
+# runaway download evicts the pod instead of counting against its memory
+# limit.
 cronJobs:
-  # CISA KEV catalog — small (~1.5k rows), refreshed daily by CISA.
+  # @schema
+  # $ref: "#/definitions/cronJob"
+  # @schema
+  # -- CISA KEV catalog — small (~1.5k rows), refreshed daily by CISA.
   enrichKev:
     enabled: true
     initialRun: true            # seed KEV on install
@@ -169,14 +361,19 @@ cronJobs:
     command: ["python", "manage.py", "enrich_fetch", "--source", "kev"]
     resources:
       requests:
-        cpu: 200m
+        cpu: 500m
         memory: 512Mi
       limits:
-        cpu: 1
-        memory: 2Gi
+        cpu: 500m
+        memory: 512Mi
     activeDeadlineSeconds: 300
 
-  # first.org EPSS feed — ~330k rows, published daily.
+  # @schema
+  # $ref: "#/definitions/cronJob"
+  # @schema
+  # -- first.org EPSS feed — ~330k rows, published daily. Streamed from the
+  # HTTP response through gunzip + csv.reader into 5k-row upserts, so
+  # peak memory is one chunk, not the feed.
   enrichEpss:
     enabled: true
     initialRun: true            # seed EPSS on install
@@ -184,55 +381,65 @@ cronJobs:
     command: ["python", "manage.py", "enrich_fetch", "--source", "epss"]
     resources:
       requests:
-        cpu: 200m
+        cpu: 500m
         memory: 512Mi
       limits:
-        cpu: 1
-        memory: 2Gi
+        cpu: 500m
+        memory: 512Mi
     activeDeadlineSeconds: 600
 
-  # OSV.dev per-ecosystem bulk-zip snapshots. Conditional GET keeps
+  # @schema
+  # $ref: "#/definitions/cronJob"
+  # @schema
+  # -- OSV.dev per-ecosystem bulk-zip snapshots. Conditional GET keeps
   # off-cycle ticks cheap; only ecosystems present in SbomComponent
   # are fetched. The npm zip is hundreds of MB on actual fetches, but
   # the fetcher streams it to a temp file and decompresses one advisory
-  # at a time, so peak memory stays flat — the limit below is headroom,
-  # not a working-set requirement.
+  # at a time; the matcher intersects touched purls with the SBOM table
+  # in SQL. Larger than the others for the per-advisory upsert loop.
   enrichOsvSupplyChain:
     enabled: true
     schedule: "5 * * * *"       # hourly at :05 to avoid coinciding with EPSS
     command: ["python", "manage.py", "enrich_fetch", "--source", "osv-supply-chain"]
     resources:
       requests:
-        cpu: 200m
-        memory: 512Mi
+        cpu: 1
+        memory: 2Gi
       limits:
         cpu: 1
         memory: 2Gi
     activeDeadlineSeconds: 900
 
-  # Safety-net for import-level auto-resolve, covering both ends of the
+  # @schema
+  # $ref: "#/definitions/cronJob"
+  # @schema
+  # -- Safety-net for import-level auto-resolve, covering both ends of the
   # ImportMark lifecycle. The queue processor reaps inline after each
   # item transitions to DONE (zero-latency); this CronJob covers the
   # case where the processor restarts or misses a signal, so a stranded
-  # `draining` mark doesn't leak findings indefinitely. It also promotes
-  # marks abandoned in `state=open` (importer crashed before
-  # /imports/finish/) so their queue tuples stop being permanently
-  # unclaimable — two passes per run, both cheap single-row updates over
-  # an indexed query.
+  # `draining` mark doesn't leak findings indefinitely. It also discards
+  # imports that can never complete: marks abandoned in `state=open`
+  # (importer died before /imports/<id>/commit/) and imports whose
+  # inventory payload failed. Discarding deletes the import's queue
+  # rows and marks its ImportMarks reaped with a `discard_reason` —
+  # nothing partial is ever processed.
   reapSafetyNet:
     enabled: true
     schedule: "7 * * * *"       # hourly at :07 to stagger from other crons
     command: ["python", "manage.py", "reap_safety_net"]
     resources:
       requests:
-        cpu: 200m
-        memory: 512Mi
+        cpu: 500m
+        memory: 2Gi
       limits:
-        cpu: 1
+        cpu: 500m
         memory: 2Gi
     activeDeadlineSeconds: 300
 
-  # Daily Snapshot heartbeat for the CVE-trend charts. Scheduled after
+  # @schema
+  # $ref: "#/definitions/cronJob"
+  # @schema
+  # -- Daily Snapshot heartbeat for the CVE-trend charts. Scheduled after
   # the enrichment runs have settled so the captured counts reflect
   # end-of-day state, not mid-import churn.
   snapshotCapture:
@@ -241,14 +448,17 @@ cronJobs:
     command: ["python", "manage.py", "snapshot_capture"]
     resources:
       requests:
-        cpu: 200m
-        memory: 512Mi
+        cpu: 500m
+        memory: 2Gi
       limits:
-        cpu: 1
+        cpu: 500m
         memory: 2Gi
     activeDeadlineSeconds: 300
 
-  # Daily DB hygiene — prune stale rows from operational tables that
+  # @schema
+  # $ref: "#/definitions/cronJob"
+  # @schema
+  # -- Daily DB hygiene — prune stale rows from operational tables that
   # otherwise grow unboundedly (IngestQueue, ImportMark, ScanInconsistency,
   # old Findings, SbomComponents on long-undeployed images). Retention
   # windows per target are configurable via flags; see
@@ -259,28 +469,34 @@ cronJobs:
     command: ["python", "manage.py", "prune_stale_data"]
     resources:
       requests:
-        cpu: 200m
-        memory: 512Mi
+        cpu: 500m
+        memory: 2Gi
       limits:
-        cpu: 1
+        cpu: 500m
         memory: 2Gi
     activeDeadlineSeconds: 600
 
-  # Delete Snapshot rows older than SNAPSHOT_RETENTION_DAYS (default 365).
+  # @schema
+  # $ref: "#/definitions/cronJob"
+  # @schema
+  # -- Delete Snapshot rows older than SNAPSHOT_RETENTION_DAYS (default 365).
   pruneSnapshots:
     enabled: true
     schedule: "0 7 * * *"       # daily 07:00 UTC (after snapshot_capture)
     command: ["python", "manage.py", "prune_snapshots"]
     resources:
       requests:
-        cpu: 200m
-        memory: 512Mi
+        cpu: 500m
+        memory: 2Gi
       limits:
-        cpu: 1
+        cpu: 500m
         memory: 2Gi
     activeDeadlineSeconds: 300
 
-  # Recompute every Finding's effective_priority. Cheap when the urgency
+  # @schema
+  # $ref: "#/definitions/cronJob"
+  # @schema
+  # -- Recompute every Finding's effective_priority. Cheap when the urgency
   # tree hasn't changed; expensive enough that we run it weekly rather
   # than nightly.
   recalculatePriorities:
@@ -289,26 +505,34 @@ cronJobs:
     command: ["python", "manage.py", "recalculate_priorities"]
     resources:
       requests:
-        cpu: 200m
-        memory: 512Mi
+        cpu: 500m
+        memory: 2Gi
       limits:
-        cpu: 1
+        cpu: 500m
         memory: 2Gi
     activeDeadlineSeconds: 1800
 
 # ── Default admin user (created on first install, skipped if exists) ─
 
+# -- Default admin user (created on first install, skipped if it exists).
 adminUser:
+  # @schema
+  # type: string
+  # minLength: 1
+  # @schema
   username: admin
   password: admin
   email: admin@kubeposture.local
 
 # ── Post-install/upgrade Job ───────────────────────────────────
 
+# -- Post-install/upgrade setup Job: migrate, setup_rbac, createsuperuser
+# (all idempotent — the superuser step uses `|| true` so a re-run after
+# the user exists is a no-op).
 setupJob:
-  # Runs: migrate, setup_rbac, createsuperuser (all idempotent — the
-  # superuser step uses `|| true` so a re-run after the user exists is
-  # a no-op).
+  # @schema
+  # $ref: "#/definitions/resources"
+  # @schema
   resources:
     requests:
       cpu: 100m
@@ -316,6 +540,9 @@ setupJob:
     limits:
       cpu: 500m
       memory: 512Mi
+  # @schema
+  # $ref: "#/definitions/stringMap"
+  # @schema
   # -- Extra annotations on the setup Job.
   # The Job is rendered as a regular resource (no helm.sh/hook), so under
   # plain Helm or ArgoCD it's only created/replaced when its spec changes.
@@ -328,64 +555,180 @@ setupJob:
 
 # ── Image ──────────────────────────────────────────────────────
 
+# -- Container image for every pod (web, worker, jobs).
 image:
+  # @schema
+  # type: string
+  # minLength: 1
+  # @schema
   repository: ghcr.io/maninweb3/kubeposture
+  # @schema
+  # type: string
+  # enum: [Always, IfNotPresent, Never]
+  # @schema
   pullPolicy: IfNotPresent
   tag: ""                 # empty = use Chart.yaml appVersion
 
+# @schema
+# type: array
+# items:
+#   type: object
+#   additionalProperties: false
+#   required: [name]
+#   properties:
+#     name: {type: string, minLength: 1}
+# @schema
+# -- Pull secrets, as `- name: <secret>` entries.
 imagePullSecrets: []
 
 # ── Naming ─────────────────────────────────────────────────────
 
+# -- Override the chart name used in resource names.
 nameOverride: ""
+# -- Override the full release-qualified resource name.
 fullnameOverride: ""
 
 # ── Service Account ────────────────────────────────────────────
 
+# -- ServiceAccount for all pods.
 serviceAccount:
   create: true
   automount: true
+  # @schema
+  # $ref: "#/definitions/stringMap"
+  # @schema
   annotations: {}
   name: ""
 
 # ── Service ────────────────────────────────────────────────────
 
+# -- Service in front of the web Deployment.
 service:
+  # @schema
+  # type: string
+  # enum: [ClusterIP, NodePort, LoadBalancer]
+  # @schema
   type: ClusterIP
+  # @schema
+  # type: integer
+  # minimum: 1
+  # maximum: 65535
+  # @schema
   port: 8000
 
 # ── Ingress ────────────────────────────────────────────────────
 
+# -- Ingress for the web Service.
 ingress:
   enabled: false
   className: ""
+  # @schema
+  # $ref: "#/definitions/stringMap"
+  # @schema
+  # -- The importer uploads one gzip bundle per kind per cycle (~2 MB today;
+  # SBOM-heavy clusters larger). ingress-nginx's default body limit is
+  # 1m, so raise it, and give a slow upload room:
+  #   nginx.ingress.kubernetes.io/proxy-body-size: "64m"
+  #   nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+  #   nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
   annotations: {}
+  # @schema
+  # type: array
+  # items:
+  #   type: object
+  #   additionalProperties: false
+  #   required: [host, paths]
+  #   properties:
+  #     host: {type: string, minLength: 1}
+  #     paths:
+  #       type: array
+  #       minItems: 1
+  #       items:
+  #         type: object
+  #         additionalProperties: false
+  #         required: [path, pathType]
+  #         properties:
+  #           path: {type: string, minLength: 1}
+  #           pathType: {type: string, enum: [Prefix, Exact, ImplementationSpecific]}
+  # @schema
   hosts:
     - host: kubeposture.central.someorg.xyz
       paths:
         - path: /
           pathType: Prefix
+  # @schema
+  # type: array
+  # items:
+  #   type: object
+  #   additionalProperties: false
+  #   properties:
+  #     secretName: {type: string, minLength: 1}
+  #     hosts: {type: array, items: {type: string, minLength: 1}}
+  # @schema
   tls: []
 
 # ── Monitoring ─────────────────────────────────────────────────
-#
-# /metrics is always exposed. Setting `enabled: true` renders a
+
+# -- /metrics is always exposed. Setting `enabled: true` renders a
 # ServiceMonitor for the Prometheus Operator (gated on the CRD being
 # present in the cluster — bare clusters without the operator install
 # fine with the flag set, the template just renders empty).
-
 monitoring:
   enabled: false
   serviceMonitor:
+    # @schema
+    # type: string
+    # pattern: '^[0-9]+(ms|s|m|h)$'
+    # @schema
     interval: 30s
+    # @schema
+    # type: string
+    # pattern: '^[0-9]+(ms|s|m|h)$'
+    # @schema
     scrapeTimeout: 10s
+    # @schema
+    # $ref: "#/definitions/stringMap"
+    # @schema
     labels: {}                  # extra labels for Prometheus selector matching, e.g. release: kube-prometheus
 
 # ── Pod config ─────────────────────────────────────────────────
 
+# @schema
+# $ref: "#/definitions/stringMap"
+# @schema
+# -- Extra annotations on every pod.
 podAnnotations: {}
+# @schema
+# $ref: "#/definitions/stringMap"
+# @schema
+# -- Extra labels on every pod.
 podLabels: {}
 
+# -- Scratch space (/tmp) for every pod: bundle spooling on the web pods,
+# downloaded feeds in the enrichment jobs. Disk-backed emptyDir; the
+# limit evicts a runaway pod instead of filling the node's disk.
+tmp:
+  # @schema
+  # $ref: "#/definitions/quantity"
+  # @schema
+  sizeLimit: 1Gi
+
+# @schema
+# $ref: "#/definitions/stringMap"
+# @schema
+# -- Node selector for every pod.
 nodeSelector: {}
+# @schema
+# type: array
+# items:
+#   type: object
+#   additionalProperties: true
+# @schema
+# -- Tolerations for every pod (passed through verbatim).
 tolerations: []
+# @schema
+# type: object
+# additionalProperties: true
+# @schema
+# -- Affinity for the web Deployment (passed through verbatim).
 affinity: {}

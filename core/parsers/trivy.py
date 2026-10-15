@@ -26,17 +26,42 @@ def _labels(obj: dict) -> dict:
     return _meta(obj).get("labels") or {}
 
 
+def _owner_reference(obj: dict, kind: str) -> dict | None:
+    """The report's ownerReference that names the scanned resource.
+    Trivy sets exactly one, `controller: true`, pointing at it."""
+    refs = [r for r in (_meta(obj).get("ownerReferences") or []) if isinstance(r, dict)]
+    for ref in refs:
+        if ref.get("controller") is True and (not kind or ref.get("kind") == kind):
+            return ref
+    for ref in refs:
+        if not kind or ref.get("kind") == kind:
+            return ref
+    return None
+
+
 def _resource_identity(obj: dict) -> tuple[str, str, str]:
     """Pull (namespace, kind, name) from a Trivy CRD's labels.
 
     Trivy stamps `trivy-operator.resource.{namespace,kind,name}` on
     every report; the namespace label is absent for cluster-scoped
     reports.
+
+    Label values are capped at 63 characters, so for a resource with a
+    longer name (long Deployment → ReplicaSet → Pod chains, static Pods
+    named after their node) Trivy omits `resource.name` and sets only
+    `resource.name-hash`. The scanned resource's real name is then only
+    in the report's `ownerReferences`; fall back to it, otherwise every
+    finding on such a workload is silently dropped as unresolvable.
     """
     lbls = _labels(obj)
     namespace = lbls.get("trivy-operator.resource.namespace") or _meta(obj).get("namespace") or ""
     kind = lbls.get("trivy-operator.resource.kind") or ""
     name = lbls.get("trivy-operator.resource.name") or ""
+    if not name:
+        ref = _owner_reference(obj, kind)
+        if ref is not None:
+            name = ref.get("name") or ""
+            kind = kind or ref.get("kind") or ""
     return namespace, kind, name
 
 

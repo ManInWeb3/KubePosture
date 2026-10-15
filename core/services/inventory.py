@@ -11,9 +11,8 @@ The per-vuln / per-vuln-image cascade in
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Iterable
-
 from datetime import timedelta
+from typing import Iterable
 
 from django.db.models import Case, Exists, F, IntegerField, OuterRef, Q, Value, When
 from django.utils import timezone
@@ -33,7 +32,6 @@ from core.models import (
     Workload,
     WorkloadImageObservation,
 )
-
 
 # ── Filter primitives ────────────────────────────────────────────
 

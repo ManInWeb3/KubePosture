@@ -1,0 +1,113 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  # Settings the Django test suite needs. Postgres is required (SKIP
+  # LOCKED, TRUNCATE … CASCADE, select_for_update).
+  DATABASE_URL: postgres://kubeposture:kubeposture@localhost:5432/kubeposture
+  SECRET_KEY: ci-only-not-secret
+  ALLOWED_HOSTS: "*"
+  TESTING_HARNESS_ENABLED: "true"
+  LOG_LEVEL: WARNING
+
+jobs:
+  lint:
+    name: Lint (ruff, helm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      # Line length (E501) is not gated yet — the repo carries legacy
+      # long lines; everything else in the configured rule set is.
+      - run: ruff check --output-format=github --ignore E501 .
+      - uses: azure/setup-helm@v4
+      - run: |
+          helm lint deploy/charts/kubeposture
+          helm lint deploy/charts/kubeposture-import --set clusterName=ci
+          helm template ci deploy/charts/kubeposture > /dev/null
+          helm template ci deploy/charts/kubeposture-import --set clusterName=ci > /dev/null
+
+  unit:
+    name: Unit + service + HTTP contract
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: kubeposture
+          POSTGRES_USER: kubeposture
+          POSTGRES_PASSWORD: kubeposture
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U kubeposture"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: python manage.py makemigrations --check --dry-run
+      - run: pytest -m "not e2e and not realdata" -p no:cacheprovider --junitxml=junit-unit.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-unit
+          path: junit-unit.xml
+
+  e2e:
+    name: End-to-end (real endpoints, real importer, real-data fixtures)
+    runs-on: ubuntu-latest
+    needs: [unit]
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: kubeposture
+          POSTGRES_USER: kubeposture
+          POSTGRES_PASSWORD: kubeposture
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U kubeposture"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -m "e2e or realdata" -p no:cacheprovider -x --junitxml=junit-e2e.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-e2e
+          path: junit-e2e.xml

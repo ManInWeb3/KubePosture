@@ -39,7 +39,6 @@ from core.services.inventory import (
     restrict_to_currently_deployed_images,
 )
 
-
 # Powers of 10 — a single IMMEDIATE outranks any pile of lower bands.
 IMPACT_WEIGHTS = {
     PriorityBand.IMMEDIATE.value:   1000,

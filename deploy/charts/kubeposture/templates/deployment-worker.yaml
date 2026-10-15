@@ -49,7 +49,8 @@ spec:
                   mountPath: /tmp
           volumes:
             - name: tmp
-              emptyDir: {}
+              emptyDir:
+                sizeLimit: {{ .Values.tmp.sizeLimit }}
           {{- with .Values.nodeSelector }}
           nodeSelector:
             {{- toYaml . | nindent 12 }}

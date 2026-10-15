@@ -21,7 +21,6 @@ from core.constants import (
 from core.models import Cluster, Finding, Namespace, Workload
 from core.services.inventory import list_findings
 
-
 # ── Fixture builders ─────────────────────────────────────────────
 
 
@@ -102,7 +101,7 @@ def test_name_contains_matches_title_or_vuln_id():
     w = _workload(c, ns)
     f1 = _finding(workload=w, hash_code="h1", title="openssl heap overflow", vuln_id="CVE-2024-1111")
     f2 = _finding(workload=w, hash_code="h2", title="curl integer wrap",       vuln_id="CVE-2025-2222")
-    f3 = _finding(workload=w, hash_code="h3", title="something else",          vuln_id="GHSA-aaaa")
+    _finding(workload=w, hash_code="h3", title="something else",          vuln_id="GHSA-aaaa")
 
     by_title = {f.pk for f in list_findings(name_contains="openssl")}
     by_vuln = {f.pk for f in list_findings(name_contains="2025")}

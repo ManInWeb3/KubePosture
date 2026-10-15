@@ -20,10 +20,10 @@ Usage:
 """
 from __future__ import annotations
 
-from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from core.constants import Environment, Severity
+from core.management.base import KubePostureCommand
 from core.models import (
     Cluster,
     Finding,
@@ -175,7 +175,7 @@ KNOWN_HISTORICAL_IOCS: list[dict] = [
 ]
 
 
-class Command(BaseCommand):
+class Command(KubePostureCommand):
     help = "Seed a supply-chain test scenario end-to-end, run the matcher."
 
     def add_arguments(self, parser):

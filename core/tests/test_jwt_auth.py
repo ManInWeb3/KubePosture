@@ -12,7 +12,6 @@ from django.test import override_settings
 
 from core.middleware import jwt_auth
 
-
 # ── Test keypair + fake JWKS client ─────────────────────────────
 
 
@@ -195,7 +194,7 @@ def test_wrong_audience_falls_through(client, db, groups, fake_jwks, keypair, jw
 # ── 8) Bypass paths: middleware does not touch request.user ──────
 
 
-@pytest.mark.parametrize("path", ["/api/v1/ingest/", "/api/v1/imports/start/", "/healthz", "/metrics"])
+@pytest.mark.parametrize("path", ["/api/v1/imports/x/commit/", "/api/v1/imports/pending/", "/healthz", "/metrics"])
 def test_bypass_paths_skip_jwt(client, db, fake_jwks, keypair, jwt_settings, path):
     priv, _ = keypair
     token = _make_jwt(priv, email="bypass@example.test")

@@ -28,7 +28,6 @@ from core.models import (
     WorkloadSignal,
 )
 
-
 # ── Fixtures ─────────────────────────────────────────────────────
 
 

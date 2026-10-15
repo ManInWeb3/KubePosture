@@ -35,7 +35,6 @@ from core.services.pruning import (
     prune_stale_sbom_components,
 )
 
-
 # ── helpers ─────────────────────────────────────────────────────
 
 

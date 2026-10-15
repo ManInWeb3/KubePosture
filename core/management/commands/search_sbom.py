@@ -14,14 +14,13 @@ import json
 import sys
 from pathlib import Path
 
-from django.core.management.base import BaseCommand
-
+from core.management.base import KubePostureCommand
 from core.models import Cluster
 from core.purl import normalize_purl
 from core.services.components import search_by_purls
 
 
-class Command(BaseCommand):
+class Command(KubePostureCommand):
     help = "Search the SBOM inventory for purls / purl prefixes."
 
     def add_arguments(self, parser):

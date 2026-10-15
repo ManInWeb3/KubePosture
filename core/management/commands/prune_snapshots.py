@@ -5,13 +5,13 @@ Per Architecture/dev_docs/03-data-model.md §Snapshot — Retention.
 from datetime import timedelta
 
 from django.conf import settings
-from django.core.management.base import BaseCommand
 from django.utils import timezone
 
+from core.management.base import KubePostureCommand
 from core.models import Snapshot
 
 
-class Command(BaseCommand):
+class Command(KubePostureCommand):
     help = "Delete Snapshot rows older than SNAPSHOT_RETENTION_DAYS."
 
     def add_arguments(self, parser):

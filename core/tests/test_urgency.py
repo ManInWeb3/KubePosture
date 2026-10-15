@@ -18,7 +18,6 @@ from core.models import (
 )
 from core.urgency import score
 
-
 # ── Fixture builders ─────────────────────────────────────────────
 
 
