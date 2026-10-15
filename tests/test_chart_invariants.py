@@ -94,13 +94,26 @@ def test_every_cronjob_runs_with_guaranteed_qos():
 
 
 def test_central_tmp_is_a_bounded_disk_backed_emptydir():
+    """Every central pod gets its volumes from the shared
+    `kubeposture.volumes` helper, and that helper's /tmp is a bounded,
+    disk-backed emptyDir."""
     values = _values(CENTRAL)
     assert values["tmp"]["sizeLimit"]
+
+    helpers = (CENTRAL / "templates/_helpers.tpl").read_text()
+    volumes = helpers.split('define "kubeposture.volumes"')[1].split("{{- end }}\n\n")[0]
+    assert "name: tmp" in volumes and "emptyDir:" in volumes
+    assert "sizeLimit: {{ .Values.tmp.sizeLimit }}" in volumes
+    mounts = helpers.split('define "kubeposture.volumeMounts"')[1].split("{{- end }}\n\n")[0]
+    assert "mountPath: /tmp" in mounts
+
     for name in ("deployment-web.yaml", "deployment-worker.yaml", "job-setup.yaml",
                  "cronjobs.yaml", "jobs-cron-initial.yaml"):
         text = (CENTRAL / "templates" / name).read_text()
-        assert "Values.tmp.sizeLimit" in text, name
-        assert "medium: Memory" not in text, f"{name}: /tmp must not count against the memory limit"
+        assert 'include "kubeposture.volumes"' in text, f"{name}: must use the shared volumes helper"
+        assert 'include "kubeposture.volumeMounts"' in text, f"{name}: must use the shared mounts helper"
+    for path in (CENTRAL / "templates").iterdir():
+        assert "medium: Memory" not in path.read_text(), f"{path.name}: /tmp must not count against the memory limit"
 
 
 def test_values_schema_is_generated_and_referenced():
