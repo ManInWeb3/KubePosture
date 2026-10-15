@@ -64,7 +64,7 @@ def test_upsert_findings_progress_log_does_not_break_at_debug(caplog):
 
     assert (created, updated) == (n, 0)
     assert Finding.objects.filter(cluster=cluster).count() == n
-    progress = [r for r in caplog.records if r.msg == "dedup.upsert_findings.progress"]
+    progress = list({id(r): r for r in caplog.records if r.msg == "dedup.upsert_findings.progress"}.values())
     assert len(progress) == 2
     assert progress[-1].findings_created == dedup._PROGRESS_LOG_EVERY * 2
 

@@ -92,7 +92,7 @@ def test_components_page_one_renders_numbered_buttons(client, viewer, many_compo
     assert 'aria-current="page"' in body                   # active marker
     assert "page=2" in body                                # link to page 2
     # Prev arrow is disabled on page 1; Next is enabled.
-    assert "Previous page" not in body or "disabled" in body
+    assert 'aria-label="Previous page"' not in body and 'aria-label="Next page"' in body
 
 
 def test_components_page_two_active_state(client, viewer, many_components):

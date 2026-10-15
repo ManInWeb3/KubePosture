@@ -84,7 +84,9 @@ def test_processing_inventory_blocks_vuln(cluster):
 
 def test_failed_inventory_keeps_gate_closed(cluster):
     """If inventory `failed`, the gate stays shut — non-inventory items
-    sit pending so the queue blocks visibly rather than dropping data."""
+    are never processed against a missing inventory; the worker / safety
+    net then discard the whole import (reaper.discard_import_for_failed_
+    inventory) rather than promoting a partial cycle."""
     inv = _seed_mark_and_queue(cluster, "inventory", "imp-4")
     inv.status = IngestQueueStatus.FAILED.value
     inv.save(update_fields=["status"])
@@ -95,9 +97,9 @@ def test_failed_inventory_keeps_gate_closed(cluster):
 
 
 def test_no_inventory_row_means_no_gate(cluster):
-    """Imports that never carried an inventory item (e.g. webhook-only
-    pushes) are unblocked — the gate only fires when an inventory row
-    actually exists for the import_id."""
+    """An import without an inventory row (e.g. a scan-only import, or a
+    test scenario) is unblocked — the gate only fires when an inventory
+    row actually exists for the import_id."""
     vul = _seed_mark_and_queue(cluster, "trivy.VulnerabilityReport", "imp-5")
 
     claimed = claim_batch(limit=10)

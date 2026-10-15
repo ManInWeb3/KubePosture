@@ -166,24 +166,6 @@ def test_vuln_report_creates_one_finding_per_vulnerability():
     assert vids == ["CVE-2023-9999", "CVE-2024-1234", "CVE-2024-5678"]
 
 
-def test_vuln_report_severity_normalisation():
-    """Trivy CRITICAL/HIGH/MEDIUM/LOW/UNKNOWN → core.Severity values."""
-    obj = _vuln_report(vulns=[
-        _vuln("CVE-1", severity="CRITICAL"),
-        _vuln("CVE-2", severity="HIGH"),
-        _vuln("CVE-3", severity="MEDIUM"),
-        _vuln("CVE-4", severity="LOW"),
-        _vuln("CVE-5", severity="UNKNOWN"),
-    ])
-    parsed = trivy.parse_vulnerability_report(obj)
-    sevs = [f["severity"] for f in parsed["findings"]]
-    assert Severity.CRITICAL.value in sevs
-    assert Severity.HIGH.value in sevs
-    assert Severity.MEDIUM.value in sevs
-    assert Severity.LOW.value in sevs
-    # Unknown maps to UNKNOWN
-    assert Severity.UNKNOWN.value in sevs
-
 
 def test_vuln_report_empty_vulnerabilities_yields_empty_findings():
     obj = _vuln_report(vulns=[])

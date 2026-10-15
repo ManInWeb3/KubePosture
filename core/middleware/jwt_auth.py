@@ -10,8 +10,8 @@ matching Django ``User`` is auto-created (in the ``viewer`` group on
 first login). A session is started so subsequent requests skip the
 verification cost.
 
-Importer paths (``/api/v1/ingest/``, ``/api/v1/imports/``,
-``/api/v1/cluster-metadata/``) and probes (``/healthz``, ``/readyz``,
+Importer paths (``/api/v1/imports/``, ``/api/v1/cluster-metadata/``)
+and probes (``/healthz``, ``/readyz``,
 ``/metrics``) bypass this middleware unconditionally.
 
 Verification failures fall through silently so ``/accounts/login/``

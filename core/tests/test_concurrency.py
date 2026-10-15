@@ -1,13 +1,13 @@
 """Real-concurrency tests — separate threads, separate DB connections.
 
-Every other "concurrency" test in this repo (test_queue_reclaim.py,
-test_reaper.py's idempotence tests) simulates a race sequentially in one
-connection/transaction — useful for the SQL logic, but it can't actually
-prove the two guarantees that matter once `worker.parallelism` > 1 (see
+The sequential "race" tests (test_queue_reclaim.py, test_reaper.py's
+idempotence tests) exercise the SQL logic in one connection; they can't
+prove the guarantees that matter once `worker.parallelism` > 1 (see
 deploy/charts/kubeposture/values.yaml): that `claim_batch`'s SKIP LOCKED
 really does prevent two pods from claiming the same row, and that
 `upsert_findings` really is safe against two pods resolving to the same
-dedup key at once. These use `@pytest.mark.django_db(transaction=True)`
+dedup key at once. (test_reaper.py has its own real-thread tests for the
+reap claim.) These use `@pytest.mark.django_db(transaction=True)`
 (real commits, no wrapping test-transaction) plus real `threading.Thread`s
 so each gets its own DB connection, and a `Barrier` to force maximum
 overlap.

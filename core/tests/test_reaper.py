@@ -21,9 +21,9 @@ Covers:
 - Discards: `reap_stuck_open` (never committed) and the inventory-failed
   paths never apply data and never advance the cluster anchor.
 
-Inventory reap (`_reap_inventory`) is covered indirectly via
-`test_inventory_parser.py` — its `reap_inventory_diff` body is the
-non-trivial part and lives in the parser, not the reaper.
+The inventory reap's diff body (`reap_inventory_diff`) lives in the
+parser and is covered there; its event-path snapshots and the heartbeat
+are covered in test_reaper_snapshots.py.
 """
 from __future__ import annotations
 

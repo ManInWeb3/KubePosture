@@ -43,7 +43,8 @@ def fake_jwks(keypair, monkeypatch):
         return client
 
     monkeypatch.setattr(jwt_auth._jwks_cache, "get", fake_get)
-    monkeypatch.setattr(jwt_auth._jwks_cache, "invalidate", lambda url: None)
+    client.invalidated = []
+    monkeypatch.setattr(jwt_auth._jwks_cache, "invalidate", client.invalidated.append)
     return client
 
 
@@ -178,6 +179,7 @@ def test_bad_signature_falls_through(client, db, groups, fake_jwks, jwt_settings
     response = client.get("/workloads/", HTTP_X_POMERIUM_JWT_ASSERTION=token)
     assert response.status_code == 302
     assert not User.objects.filter(username="alice@example.test").exists()
+    assert len(fake_jwks.invalidated) == 2, "cache invalidated on the failed attempt and on the retry"
 
 
 # ── 7) Wrong audience → no login ─────────────────────────────────
@@ -194,7 +196,8 @@ def test_wrong_audience_falls_through(client, db, groups, fake_jwks, keypair, jw
 # ── 8) Bypass paths: middleware does not touch request.user ──────
 
 
-@pytest.mark.parametrize("path", ["/api/v1/imports/x/commit/", "/api/v1/imports/pending/", "/healthz", "/metrics"])
+@pytest.mark.parametrize("path", ["/api/v1/imports/x/commit/", "/api/v1/imports/pending/",
+                                  "/api/v1/cluster-metadata/sync/", "/healthz", "/readyz", "/metrics"])
 def test_bypass_paths_skip_jwt(client, db, fake_jwks, keypair, jwt_settings, path):
     priv, _ = keypair
     token = _make_jwt(priv, email="bypass@example.test")

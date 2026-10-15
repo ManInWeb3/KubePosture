@@ -124,11 +124,10 @@ def score(finding: Finding) -> PriorityResult:
     # Cluster-scoped finding (e.g. RBAC on ClusterRole) — no workload
     if finding.workload is None:
         env = finding.cluster.environment
+        # Capped at OutOfCycle in v1: without a workload there is no
+        # exposure / escalation context to justify Immediate.
         if finding.severity == "critical":
-            return PriorityResult(
-                PriorityBand.IMMEDIATE if env == "prod" else PriorityBand.OUT_OF_CYCLE,
-                ("critical", f"cluster-scoped", env),
-            )
+            return PriorityResult(PriorityBand.OUT_OF_CYCLE, ("critical", "cluster-scoped", env))
         if finding.severity == "high" and env == "prod":
             return PriorityResult(PriorityBand.OUT_OF_CYCLE, ("high", "cluster-scoped", "prod"))
         return PriorityResult(PriorityBand.SCHEDULED, ("cluster-scoped",))

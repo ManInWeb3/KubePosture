@@ -22,7 +22,10 @@ def _finished_records(caplog, run):
             run()
     finally:
         logger.removeHandler(caplog.handler)
-    return [r for r in caplog.records if r.msg.startswith("command.finished")]
+    # A record can reach caplog twice (its handler + propagation under some
+    # plugin setups); count distinct records.
+    seen = {id(r): r for r in caplog.records if r.msg.startswith("command.finished")}
+    return list(seen.values())
 
 
 @pytest.mark.django_db

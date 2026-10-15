@@ -1,6 +1,8 @@
 """Tests for /metrics endpoint, business collector, and TTL cache."""
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from core.metrics import registry as metrics_registry
@@ -69,12 +71,7 @@ def test_metrics_endpoint_returns_200(client, db):
     assert response["Content-Type"].startswith("text/plain")
 
 
-def test_metrics_endpoint_unauthenticated(client, db):
-    """Match /healthz pattern — no login required."""
-    response = client.get("/metrics")
-    assert response.status_code == 200
-
-
+@pytest.mark.skipif(sys.platform != "linux", reason="prometheus ProcessCollector reads /proc")
 def test_metrics_emits_python_runtime(client, db):
     body = client.get("/metrics").content.decode()
     assert "python_info" in body

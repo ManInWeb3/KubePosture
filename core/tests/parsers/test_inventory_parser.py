@@ -1,8 +1,9 @@
 """Unit tests for core.parsers.inventory.
 
 Focus: alias resolution and standalone-Pod detection — the densest
-logic in the parser. These run on `parse_envelope` only (no DB
-writes) so they're fast.
+logic in the parser. Most tests run on `parse_envelope` only (no DB
+writes); the `persist()` semantics live in
+test_inventory_persist_semantics.py.
 """
 from __future__ import annotations
 
@@ -246,21 +247,23 @@ def test_unknown_kind_silently_skipped():
     st = inv.parse_envelope(payload, _cluster())
     # ConfigMap silently skipped; Deployment still parsed
     assert ("ns", WorkloadKind.DEPLOYMENT.value, "api") in st.workloads
+    assert st.unknown_kind_skipped == 1, "counted, so persist() can warn about it"
 
 
 def test_pod_security_signals_detected_from_pod_spec():
-    """Pod with hostNetwork=true emits a kp:has-host-network signal."""
+    """hostNetwork / hostPID on a standalone Pod land on its own Workload
+    as the host-namespaces signal; a hardened container adds nothing."""
     pod = _pod("naked", "ns")
     pod["spec"]["hostNetwork"] = True
     pod["spec"]["hostPID"] = True
+    pod["spec"]["containers"][0]["securityContext"] = {
+        "allowPrivilegeEscalation": False, "runAsNonRoot": True, "readOnlyRootFilesystem": True,
+    }
     payload = _envelope(_ns("ns"), pod)
     st = inv.parse_envelope(payload, _cluster())
 
     key = ("ns", WorkloadKind.POD.value, "naked")
-    sigs = st.derived_signals.get(key, set())
-    # Signal IDs are namespaced kp:* — exact ID pattern verified by signals tests;
-    # for parser test we just confirm signals are present
-    assert sigs, "hostNetwork/hostPID should produce derived signals"
+    assert st.derived_signals.get(key) == {"kyverno:disallow-host-namespaces"}
 
 
 @pytest.mark.django_db

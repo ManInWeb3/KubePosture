@@ -100,13 +100,10 @@ class WorkloadDetailView(generics.RetrieveAPIView):
 class FindingListView(generics.ListAPIView):
     serializer_class = FindingSerializer
     filterset_class = FindingFilter
-    ordering_fields = [
-        "severity",
-        "effective_priority",
-        "epss_score",
-        "last_seen",
-        "first_seen",
-    ]
+    # `severity` / `effective_priority` are deliberately absent: they are
+    # CharFields, so `?ordering=severity` would sort alphabetically
+    # (critical, high, low, medium) — not by urgency.
+    ordering_fields = ["epss_score", "last_seen", "first_seen"]
     ordering = ["-last_seen"]
 
     def get_queryset(self):

@@ -19,7 +19,7 @@ For retention logic see
 | `IngestQueue` | `status ∈ {done, failed}` AND `processed_at < cutoff` | **14 days** | **Safety net only.** The reap itself deletes a tuple's rows (done *and* failed) once it has recorded `failed_count` / `last_error` on the ImportMark, so the queue normally holds in-flight work only. This prune catches rows left behind by an errored reap, and `failed` rows kept deliberately via `IMPORT_KEEP_FAILED_PAYLOADS=true` (a debugging aid — the raw payload of a reproducible parse failure). |
 | `ImportMark` | `state = reaped` AND `completed_at < cutoff` | **90 days** | REAPED marks are an audit trail of completed cycles, including discarded imports (`discard_reason` set). No operational code path reads them after reap. |
 | `ScanInconsistency` | `last_observed_at < cutoff` | **30 days** | Per the model docstring: "rows older than 30 days are pruned by a maintenance job." Persistent gaps stay live because their `last_observed_at` is bumped each cycle. |
-| `Finding` | `last_seen < cutoff` AND (`workload.deployed = false` OR `workload IS NULL`) | **180 days** | Hard-delete soft-resolved findings on undeployed workloads + long-stale cluster-scoped findings. Findings on deployed workloads can never age past the cutoff — every inventory cycle bumps their `last_seen`. |
+| `Finding` | `last_seen < cutoff` AND (`workload.deployed = false` OR `workload IS NULL` OR the finding's `(workload, image)` pair is no longer currently deployed) | **180 days** | Hard-delete soft-resolved findings: undeployed workloads, long-stale cluster-scoped findings, and findings bound to an image the workload has since rolled away from. Findings on a deployed workload's current image can never age past the cutoff — every inventory cycle bumps their `last_seen`. Deleted in pk slices (`delete_in_chunks`). |
 | `SbomComponent` | image hasn't been observed in `cutoff` days AND no currently-deployed observation references it | **90 days** | Components on long-undeployed images. Re-ingest of an SbomReport recreates them automatically if the image comes back online. |
 
 Each target is opt-out-able via `--skip-<target>` and has its own
@@ -70,9 +70,10 @@ The pruning service follows three invariants:
    age. An accidental clock skew that backdates `last_seen` cannot
    delete a live row because the workload-state predicate still
    protects it.
-2. **No cascading delete.** Each predicate filters within one table;
-   no `on_delete=CASCADE` walk runs as a side effect. This keeps the
-   blast radius of a misconfigured retention to one table.
+2. **No cross-table predicates.** Each predicate selects rows of one
+   table. The only cascade is the model's own: deleting a `Finding`
+   removes its `FindingAction` rows (per-finding overlays have no
+   meaning without the finding). Nothing else is reached.
 3. **Idempotent and dry-runnable.** A second `prune_stale_data` run
    after the first finds zero matching rows. `--dry-run` counts what
    would be deleted without touching the DB.
