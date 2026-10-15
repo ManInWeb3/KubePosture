@@ -94,6 +94,14 @@ db:
   # required: true
   # @schema
   urlKey: DATABASE_URL             # key inside that secret (e.g. "uri" for CNPG)
+  # -- CA bundle for sslmode=verify-full/verify-ca: mounted into every container
+  # and exported as PGSSLROOTCERT. name null → nothing mounted.
+  # @schema
+  # $ref: "#/definitions/secretRef"
+  # @schema
+  caSecret:
+    name: null       # K8s secret name
+    key: ca.crt      # key inside that secret
 
 # -- Application environment variables (non-sensitive)
 app:

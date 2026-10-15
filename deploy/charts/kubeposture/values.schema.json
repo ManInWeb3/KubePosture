@@ -233,6 +233,10 @@
       "additionalProperties": false,
       "description": "Database URL secret (e.g. CNPG-generated secret)",
       "properties": {
+        "caSecret": {
+          "$ref": "#/definitions/secretRef",
+          "required": []
+        },
         "secretName": {
           "default": "kubeposture-secret",
           "minLength": 1,
