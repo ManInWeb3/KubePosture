@@ -215,3 +215,26 @@ def test_collect_from_folder_handles_wrappers_lists_single_objects_and_gz(tmp_pa
 def test_collect_from_folder_reads_kubectl_version_shape(tmp_path):
     _write(tmp_path / "kubeapi/version.json", {"clientVersion": {}, "serverVersion": {"gitVersion": "v1.31.1"}})
     assert collect_from_folder(tmp_path)["__version__"] == {"git_version": "v1.31.1"}
+
+
+def test_typed_list_error_fails_the_cycle_instead_of_shipping_a_partial_inventory():
+    """A transient kube-api error on an inventory list used to yield `[]`;
+    the server treats a committed inventory as complete, so one timeout
+    on `list_namespace` would deactivate every namespace of the cluster.
+    Now it raises before any byte is sent."""
+    from kubernetes.client.exceptions import ApiException
+    from kubeposture_importer.sources.kube import InventoryListError
+    mod = _build_mock_module(namespaces=[_v1_namespace("test-ns")])
+    mod.CoreV1Api.return_value.list_namespace.side_effect = ApiException(status=500, reason="Boom")
+    with pytest.raises(InventoryListError, match="namespaces: 500 Boom"):
+        collect_from_kube_api(mod)
+
+
+def test_typed_list_404_is_still_an_empty_kind(capsys):
+    from kubernetes.client.exceptions import ApiException
+    mod = _build_mock_module()
+    mod.NetworkingV1Api.return_value.list_network_policy_for_all_namespaces.side_effect = \
+        ApiException(status=404, reason="Not Found")
+    out = collect_from_kube_api(mod)
+    assert out["NetworkPolicy"] == []
+    assert "WARN: networkpolicies" in capsys.readouterr().err

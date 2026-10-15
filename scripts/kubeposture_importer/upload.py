@@ -59,10 +59,15 @@ def commit(client: HttpClient, *, import_id: str, cluster: str, kinds: dict[str,
 def abort(client: HttpClient, *, import_id: str, cluster: str, reason: str,
           log: Callable[[str], None] | None = None) -> bool:
     """Best effort — never raises. A failed abort is harmless: the
-    server's stuck-open sweep discards the import after its TTL."""
+    server's stuck-open sweep discards the import after its TTL — but
+    that TTL is 30 minutes during which the cluster reads as in-flight,
+    so the abort ignores the upload deadline: a tripped deadline is the
+    main reason we are aborting in the first place."""
     log = log or (lambda msg: print(msg, file=sys.stderr))
     try:
-        result = client.post_json(f"/api/v1/imports/{import_id}/abort/", {"cluster": cluster})
+        result = client.post_json(
+            f"/api/v1/imports/{import_id}/abort/", {"cluster": cluster}, ignore_deadline=True,
+        )
     except Exception as exc:  # pragma: no cover - defensive
         log(f"  abort {import_id}: {exc}")
         return False

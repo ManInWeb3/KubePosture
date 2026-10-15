@@ -9,6 +9,14 @@ from ..kinds import CRD_SOURCES
 K8S_TIMEOUT: tuple[int, int] = (10, 60)
 
 
+class InventoryListError(RuntimeError):
+    """A typed (inventory) list call failed. Every committed inventory is
+    treated server-side as a complete snapshot, so a transient kube-api
+    error must fail the cycle before any byte is sent — shipping `[]` for
+    Namespaces or Deployments would deactivate every namespace / retire
+    every workload of the cluster at reap."""
+
+
 def load_kube_config(kubeconfig: str | None, in_cluster: bool):
     from kubernetes import client, config  # type: ignore
     if in_cluster:
@@ -29,10 +37,12 @@ def _to_dict(obj) -> dict:
 def collect_from_kube_api(client_module) -> dict:
     """Return `{kind: [items]}` from a live cluster.
 
-    Typed lists use `_request_timeout=K8S_TIMEOUT`; errors are logged
-    and yield `[]`. CRD lists that 404 (operator not installed) are
-    OMITTED from the result — see sources/__init__.py for why that
-    differs from an empty list.
+    Typed (inventory) lists use `_request_timeout=K8S_TIMEOUT`; any
+    error other than a 404 raises `InventoryListError` (see its
+    docstring). CRD lists that 404 (operator not installed) are OMITTED
+    from the result and other CRD errors yield `[]` — see
+    sources/__init__.py for why an empty scan list is the right signal
+    for a scanner outage.
     """
     out: dict[str, list[dict]] = {}
     core = client_module.CoreV1Api()
@@ -59,12 +69,14 @@ def collect_from_kube_api(client_module) -> dict:
                 out_items.append(d)
             return out_items
         except client_module.ApiException as e:
-            if e.status != 404:
-                print(f"  WARN: {label}: {e.reason}", file=sys.stderr)
-            return []
+            if e.status == 404:
+                # Resource type not served by this API server — the kind
+                # is legitimately empty here.
+                print(f"  WARN: {label}: not found, treating as empty", file=sys.stderr)
+                return []
+            raise InventoryListError(f"{label}: {e.status} {e.reason}") from e
         except Exception as e:  # pragma: no cover
-            print(f"  WARN: {label}: {e}", file=sys.stderr)
-            return []
+            raise InventoryListError(f"{label}: {e}") from e
 
     out["Namespace"] = _list("namespaces", core.list_namespace, kind="Namespace", api_version="v1")
     out["Deployment"] = _list("deployments", apps.list_deployment_for_all_namespaces, kind="Deployment", api_version="apps/v1")
