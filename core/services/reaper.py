@@ -69,7 +69,7 @@ from core.services.snapshot import (
     capture_cluster_heartbeat,
 )
 from core.signals import SIGNALS
-from core.urgency import recompute_batch
+from core.urgency import RECOMPUTE_CHUNK_SIZE, recompute_ids
 
 log = logging.getLogger("core.reaper")
 
@@ -193,10 +193,9 @@ def _reap_inventory_body(mark: ImportMark) -> dict:
 
     # Recompute priority for all findings on workloads in this cluster
     # (publicly_exposed / namespace.internet_exposed may have moved).
-    affected = list(
-        cluster.findings.all().only("id")
+    recompute_ids(
+        cluster.findings.values_list("id", flat=True).iterator(chunk_size=RECOMPUTE_CHUNK_SIZE)
     )
-    recompute_batch(affected)
 
     log.info("reap.inventory", extra={"cluster": cluster.name, **counters})
     return counters
@@ -358,8 +357,11 @@ def _reap_scan_body(mark: ImportMark) -> dict:
             # Recompute the affected workloads' findings.
             workload_ids = {s.workload_id for s in affected}
             from core.models import Finding
-            findings = list(Finding.objects.filter(workload_id__in=workload_ids))
-            recompute_batch(findings)
+            recompute_ids(
+                Finding.objects.filter(workload_id__in=workload_ids)
+                .values_list("id", flat=True)
+                .iterator(chunk_size=RECOMPUTE_CHUNK_SIZE)
+            )
 
     log.info("reap.scan", extra={"cluster": cluster.name, "kind": mark.kind, **counters})
     return counters

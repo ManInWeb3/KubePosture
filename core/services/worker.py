@@ -170,7 +170,9 @@ def drain_once(*, limit: int = 100) -> dict:
     }
 
 
-def drain_until_empty(*, limit: int = 100, max_iterations: int | None = 200) -> dict:
+def drain_until_empty(
+    *, limit: int = 100, max_iterations: int | None = 200, max_seconds: float | None = None,
+) -> dict:
     """Loop `drain_once` until a pass claims zero items.
 
     `limit` rows are claimed per pass. With `limit=1` (the worker
@@ -180,15 +182,30 @@ def drain_until_empty(*, limit: int = 100, max_iterations: int | None = 200) -> 
     is empty, or every remaining row is held by another worker, gated
     behind its import's inventory, or not committed yet; the next run
     picks those up. `max_iterations` caps the passes; 0/None = no cap.
+
+    `max_seconds` is a wall-clock budget (0/None = none): no new pass is
+    started once it is spent, and the final reap sweep is skipped too —
+    it is unbounded, and the reap-safety-net CronJob runs the same sweep.
+    Set it below the Job's activeDeadlineSeconds so a run exits cleanly
+    instead of being killed (a kill mid-reap rolls the whole reap back).
+    The pass in flight when the budget runs out still finishes, so leave
+    headroom for one slow item plus its reap.
     """
+    deadline = time.monotonic() + max_seconds if max_seconds else None
     totals = {"claimed": 0, "ok": 0, "failed": 0, "reaps_fired": 0}
     passes = itertools.count() if not max_iterations else range(max_iterations)
     for _ in passes:
+        if deadline is not None and time.monotonic() >= deadline:
+            log.info("worker.drain.time_budget_spent", extra={"max_seconds": max_seconds, **totals})
+            return totals
         round_ = drain_once(limit=limit)
         if round_["claimed"] == 0:
             break
         for k in totals:
             totals[k] += round_[k]
+    if deadline is not None and time.monotonic() >= deadline:
+        log.info("worker.drain.time_budget_spent", extra={"max_seconds": max_seconds, **totals})
+        return totals
     # Final safety-net pass to fire any reap that was eligible after the
     # last drain (e.g. the last item of a tuple, processed in a
     # round that didn't itself claim anything new).

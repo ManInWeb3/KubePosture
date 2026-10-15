@@ -298,7 +298,11 @@ worker:
   # be working on). The run ends when the queue is empty or everything
   # left is held by another pod, gated behind its import's inventory, or
   # not committed yet; the next tick picks those up. --max-iterations
-  # caps the passes per run (0 = no cap). Each item commits
+  # caps the passes per run (0 = no cap); --max-seconds stops starting
+  # new passes (and skips the final reap sweep) once that much wall time
+  # is spent — keep it below activeDeadlineSeconds with headroom for one
+  # slow item + its reap, so a run exits instead of being killed mid-reap
+  # (which rolls the reap back). Each item commits
   # independently (see worker._process_one), so a pod hitting
   # activeDeadlineSeconds or its memory limit keeps what it finished and
   # holds at most --limit rows, reclaimed after STALE_PROCESSING_SECONDS.
@@ -310,6 +314,8 @@ worker:
     - "1"
     - --max-iterations
     - "0"
+    - --max-seconds
+    - "240"
   # @schema
   # $ref: "#/definitions/resources"
   # @schema

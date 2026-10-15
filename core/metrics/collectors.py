@@ -9,11 +9,11 @@ from django.db.models import Count, Min
 from django.utils import timezone
 from prometheus_client.core import GaugeMetricFamily
 
-from core.constants import ImportMarkState
+from core.constants import ImportMarkState, IngestQueueStatus
 from core.models import Cluster, ImportMark, IngestQueue, Namespace, Workload
 from core.services.inventory import default_finding_qs
 
-from .registry import cached
+from .registry import cached, queue_ttl_seconds
 
 
 def _findings_open():
@@ -83,8 +83,12 @@ def _clusters_total():
 
 
 def _ingest_queue_depth():
-    rows = IngestQueue.objects.values("status").annotate(n=Count("id"))
-    return [(r["status"], r["n"]) for r in rows]
+    """Every status, 0 when empty — an absent row used to mean an absent
+    series, so the drained queue showed up as gaps instead of 0."""
+    counts = dict.fromkeys(IngestQueueStatus.values, 0)
+    for r in IngestQueue.objects.values("status").annotate(n=Count("id")):
+        counts[r["status"]] = r["n"]
+    return list(counts.items())
 
 
 def _ingest_queue_oldest_age_seconds():
@@ -92,8 +96,10 @@ def _ingest_queue_oldest_age_seconds():
     work now (rows are deleted at reap), so a growing `pending` age means
     the worker isn't keeping up or an import can't be claimed."""
     now = timezone.now()
-    rows = IngestQueue.objects.values("status").annotate(oldest=Min("created_at"))
-    return [(r["status"], (now - r["oldest"]).total_seconds()) for r in rows]
+    ages = dict.fromkeys(IngestQueueStatus.values, 0.0)  # empty status → 0, not absent
+    for r in IngestQueue.objects.values("status").annotate(oldest=Min("created_at")):
+        ages[r["status"]] = (now - r["oldest"]).total_seconds()
+    return list(ages.items())
 
 
 def _import_scan_coverage_ratio():
@@ -234,7 +240,7 @@ class KubePostureCollector:
             "Items in the ingest queue, by status.",
             labels=["status"],
         )
-        for status, n in cached("ingest_queue_depth", _ingest_queue_depth):
+        for status, n in cached("ingest_queue_depth", _ingest_queue_depth, ttl=queue_ttl_seconds()):
             g.add_metric([status], n)
         yield g
 
@@ -243,7 +249,7 @@ class KubePostureCollector:
             "Age of the oldest ingest queue item, by status.",
             labels=["status"],
         )
-        for status, age in cached("ingest_queue_oldest_age", _ingest_queue_oldest_age_seconds):
+        for status, age in cached("ingest_queue_oldest_age", _ingest_queue_oldest_age_seconds, ttl=queue_ttl_seconds()):
             g.add_metric([status], age)
         yield g
 

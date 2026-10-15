@@ -236,15 +236,40 @@ def compute_priority(finding: Finding) -> PriorityResult:
     return score(finding)
 
 
+#: Findings loaded (with relations + workload signals) per pass. Bounds worker
+#: memory regardless of cluster size — a whole-cluster pass OOMKilled workers.
+RECOMPUTE_CHUNK_SIZE = 5000
+
+
 def recompute_batch(findings: Iterable[Finding]) -> int:
-    """Bulk recompute. One query pass loads relations, then score() each in
-    memory, then a single bulk_update.
+    """Bulk recompute for Finding objects (only `pk` is read). Delegates to
+    `recompute_ids`; prefer that with a streamed id queryset for large sets.
 
     Returns the count updated.
     """
-    pks = [f.pk for f in findings]
-    if not pks:
-        return 0
+    return recompute_ids(f.pk for f in findings)
+
+
+def recompute_ids(ids: Iterable[int]) -> int:
+    """Bulk recompute by id, `RECOMPUTE_CHUNK_SIZE` at a time: each chunk is
+    one query pass loading relations, score() in memory, one bulk_update.
+    Pass a `values_list("id", flat=True).iterator()` to stream ids too.
+
+    Returns the count updated.
+    """
+    total = 0
+    chunk: list[int] = []
+    for pk in ids:
+        chunk.append(pk)
+        if len(chunk) >= RECOMPUTE_CHUNK_SIZE:
+            total += _recompute_chunk(chunk)
+            chunk = []
+    if chunk:
+        total += _recompute_chunk(chunk)
+    return total
+
+
+def _recompute_chunk(pks: list[int]) -> int:
     loaded = list(
         Finding.objects
         .filter(pk__in=pks)

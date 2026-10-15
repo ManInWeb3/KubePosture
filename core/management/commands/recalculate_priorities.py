@@ -6,12 +6,7 @@ should fan out across existing data.
 
 from core.management.base import KubePostureCommand
 from core.models import Finding
-from core.urgency import recompute_batch
-
-# Same bound as enrichment's _RECOMPUTE_CHUNK_SIZE: recompute_batch loads each
-# chunk with its relations + workload signals, so memory stays flat instead of
-# growing with the whole Finding table (OOMKilled at 4Gi before chunking).
-_CHUNK_SIZE = 5000
+from core.urgency import RECOMPUTE_CHUNK_SIZE, recompute_ids
 
 
 class Command(KubePostureCommand):
@@ -24,20 +19,17 @@ class Command(KubePostureCommand):
         qs = Finding.objects.all()
         if options["cluster"]:
             qs = qs.filter(cluster__name=options["cluster"])
-        ids = qs.order_by().values_list("id", flat=True).iterator(chunk_size=_CHUNK_SIZE)
+        scanned = 0
 
-        scanned = updated = 0
-        chunk: list[int] = []
-        for fid in ids:
-            chunk.append(fid)
-            if len(chunk) >= _CHUNK_SIZE:
-                updated += recompute_batch(Finding.objects.filter(pk__in=chunk).only("id"))
-                scanned += len(chunk)
-                chunk = []
-        if chunk:
-            updated += recompute_batch(Finding.objects.filter(pk__in=chunk).only("id"))
-            scanned += len(chunk)
+        def _ids():
+            # Streamed + chunked by recompute_ids: memory stays flat however
+            # big the table is (an unbounded load OOMKilled the CronJob).
+            nonlocal scanned
+            for pk in qs.order_by().values_list("id", flat=True).iterator(chunk_size=RECOMPUTE_CHUNK_SIZE):
+                scanned += 1
+                yield pk
 
+        updated = recompute_ids(_ids())
         self.stdout.write(self.style.SUCCESS(
             f"recomputed: scanned={scanned} updated={updated}"
         ))

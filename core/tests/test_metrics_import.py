@@ -61,3 +61,35 @@ def test_import_scan_coverage_ratio_uses_latest_committed_mark_per_cluster_kind(
     assert len(lines) == 1
     assert 'cluster="prod-east"' in lines[0] and f'kind="{kind}"' in lines[0]
     assert float(lines[0].split()[-1]) == pytest.approx(0.9)
+
+
+def _gauge(body, name, status):
+    line = next(ln for ln in body.splitlines() if ln.startswith(f'{name}{{status="{status}"}}'))
+    return float(line.split()[-1])
+
+
+@pytest.mark.django_db
+def test_ingest_queue_gauges_report_every_status_as_zero_when_empty(client):
+    """An empty status must be 0, not an absent series (gaps in Grafana)."""
+    IngestQueue.objects.create(cluster_name="c", kind="k", import_id="i", raw_json={},
+                               status=IngestQueueStatus.PROCESSING.value)
+
+    body = client.get("/metrics").content.decode()
+
+    for status in IngestQueueStatus.values:
+        expected_depth = 1 if status == IngestQueueStatus.PROCESSING.value else 0
+        assert _gauge(body, "kubeposture_ingest_queue_depth", status) == expected_depth
+    assert _gauge(body, "kubeposture_ingest_queue_oldest_age_seconds", "pending") == 0
+
+
+@pytest.mark.django_db
+def test_ingest_queue_depth_uses_short_ttl_not_business_ttl(client, monkeypatch):
+    """Queue gauges refresh on the queue TTL even while business gauges stay cached."""
+    monkeypatch.setenv("METRICS_QUEUE_TTL_SECONDS", "0")
+    client.get("/metrics")
+    IngestQueue.objects.create(cluster_name="c", kind="k", import_id="i", raw_json={},
+                               status=IngestQueueStatus.PENDING.value)
+
+    body = client.get("/metrics").content.decode()
+
+    assert _gauge(body, "kubeposture_ingest_queue_depth", "pending") == 1

@@ -373,14 +373,14 @@ def test_command_does_not_retry_a_non_deadlock_failure(cluster):
 def test_default_claims_one_row_per_pass_with_no_iteration_cap():
     with patch("core.services.worker.drain_until_empty", return_value={"claimed": 0}) as drain:
         call_command("process_ingest_queue", stdout=io.StringIO(), stderr=io.StringIO())
-    drain.assert_called_once_with(limit=1, max_iterations=0)
+    drain.assert_called_once_with(limit=1, max_iterations=0, max_seconds=0)
 
 
 def test_limit_and_max_iterations_flags_reach_the_drain_loop():
     with patch("core.services.worker.drain_until_empty", return_value={"claimed": 0}) as drain:
         call_command("process_ingest_queue", "--limit", "5", "--max-iterations", "3",
-                     stdout=io.StringIO(), stderr=io.StringIO())
-    drain.assert_called_once_with(limit=5, max_iterations=3)
+                     "--max-seconds", "1200", stdout=io.StringIO(), stderr=io.StringIO())
+    drain.assert_called_once_with(limit=5, max_iterations=3, max_seconds=1200.0)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -418,3 +418,59 @@ def test_run_exits_when_only_gated_or_uncommitted_rows_remain(cluster):
     assert totals["claimed"] == 0
     assert (timezone.now() - started).total_seconds() < 5
     assert IngestQueue.objects.filter(status=IngestQueueStatus.PENDING.value).count() == 2
+
+
+# ── wall-clock budget (--max-seconds) ──────────────────────────────
+
+
+class _Clock:
+    """Fake time.monotonic: advances `step` seconds per call."""
+
+    def __init__(self, step):
+        self.now, self.step = 0.0, step
+
+    def __call__(self):
+        self.now += self.step
+        return self.now
+
+
+def test_max_seconds_stops_new_passes_and_skips_final_reap_sweep(monkeypatch):
+    from core.services import worker
+
+    monkeypatch.setattr(worker.time, "monotonic", _Clock(step=10))
+    one = {"claimed": 1, "ok": 1, "failed": 0, "reaps_fired": 0}
+    with patch.object(worker, "drain_once", return_value=one) as drain, \
+         patch.object(worker.reaper, "reap_all_drainable") as sweep:
+        totals = worker.drain_until_empty(limit=1, max_iterations=0, max_seconds=35)
+
+    # deadline=45 (first tick 10 + 35); checks at 20, 30, 40 pass, 50 stops.
+    assert drain.call_count == 3
+    assert totals["claimed"] == 3
+    sweep.assert_not_called()
+
+
+def test_max_seconds_unspent_still_runs_final_reap_sweep(monkeypatch):
+    from core.services import worker
+
+    monkeypatch.setattr(worker.time, "monotonic", _Clock(step=1))
+    empty = {"claimed": 0, "ok": 0, "failed": 0, "reaps_fired": 0}
+    with patch.object(worker, "drain_once", return_value=empty), \
+         patch.object(worker.reaper, "reap_all_drainable", return_value=2) as sweep:
+        totals = worker.drain_until_empty(limit=1, max_iterations=0, max_seconds=1200)
+
+    sweep.assert_called_once()
+    assert totals["reaps_fired"] == 2
+
+
+def test_max_seconds_zero_means_no_budget(monkeypatch):
+    from core.services import worker
+
+    monkeypatch.setattr(worker.time, "monotonic", _Clock(step=10_000))
+    rounds = iter([{"claimed": 1, "ok": 1, "failed": 0, "reaps_fired": 0}] * 5
+                  + [{"claimed": 0, "ok": 0, "failed": 0, "reaps_fired": 0}])
+    with patch.object(worker, "drain_once", side_effect=lambda limit: next(rounds)), \
+         patch.object(worker.reaper, "reap_all_drainable", return_value=0) as sweep:
+        totals = worker.drain_until_empty(limit=1, max_iterations=0, max_seconds=0)
+
+    assert totals["claimed"] == 5
+    sweep.assert_called_once()
