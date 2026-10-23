@@ -10,7 +10,15 @@ from django.utils import timezone
 from prometheus_client.core import GaugeMetricFamily
 
 from core.constants import ImportMarkState, IngestQueueStatus
-from core.models import Cluster, ImportMark, IngestQueue, Namespace, OsvAdvisory, SbomComponent, Workload
+from core.models import (
+    Cluster,
+    ImportMark,
+    IngestQueue,
+    Namespace,
+    OsvAdvisory,
+    SbomComponent,
+    Workload,
+)
 from core.services.inventory import default_finding_qs
 
 from .registry import cached, queue_ttl_seconds
