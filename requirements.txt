@@ -9,4 +9,5 @@ pyyaml>=6.0,<7
 kubernetes>=32,<33
 prometheus-client>=0.20,<1
 PyJWT[crypto]>=2.8,<3
+semver>=3.0,<4  # OSV SEMVER ranges (npm / Go / crates.io) — core/osv_ranges.py
 tzdata>=2024.1  # zoneinfo data — wolfi-base ships no /usr/share/zoneinfo

@@ -137,26 +137,42 @@ def _is_htmx(request) -> bool:
 
 
 def _render_list(request, *, target: str, partial: str, page: str, context: dict,
-                 page_context: Callable[[], dict]):
+                 page_context: Callable[[], dict], oob: dict | None = None):
     """The fork every list / detail page has: an HTMX request whose
     `HX-Target` is the rows container gets the `partial` with `context`;
     anything else gets the full `page` with `context` plus
     `page_context()` — a callable so the dropdown / tile queries only
-    run when the chrome is actually rendered."""
+    run when the chrome is actually rendered.
+
+    `oob` is the context for `widgets/_namespace_select.html`, prepended
+    to the partial as an out-of-band swap so the namespace dropdown
+    follows the selected cluster (the swap itself only replaces the rows).
+    It goes first: htmx parses the fragment in a `<template>`, where a
+    `<select>` before the `<tr>`s is unambiguous."""
     if _is_htmx(request) and request.headers.get("HX-Target") == target:
-        return render(request, partial, context)
+        resp = render(request, partial, context)
+        if oob is not None:
+            select = render(request, "widgets/_namespace_select.html", {**oob, "oob": True})
+            resp.content = select.content + resp.content
+        return resp
     return render(request, page, {**context, **page_context()})
 
 
-def _cluster_and_namespace_choices(cluster_name: str | None) -> tuple:
-    """`(clusters, namespace_names)` for the list-page filter dropdowns:
-    every cluster, and the names of namespaces with at least one deployed
-    workload — in the selected cluster when one is."""
+def _namespace_choices(cluster_name: str | None) -> list[str]:
+    """Names of namespaces with at least one deployed workload — in the
+    selected cluster when one is. Runs on every list request (full page
+    and HTMX partial), so it stays one cheap query."""
     ns_qs = Namespace.objects.filter(workloads__deployed=True)
     if cluster_name:
         ns_qs = ns_qs.filter(cluster__name=cluster_name)
-    namespace_names = list(ns_qs.values_list("name", flat=True).distinct().order_by("name"))
-    return Cluster.objects.order_by("name"), namespace_names
+    return list(ns_qs.values_list("name", flat=True).distinct().order_by("name"))
+
+
+def _scoped_namespace(namespace: str | None, namespace_names: list[str]) -> str | None:
+    """Drop a namespace filter the dropdown no longer offers — typically a
+    namespace of the previously selected cluster still in the form when the
+    cluster changes. Keeping it would empty the table for no visible reason."""
+    return namespace if namespace and namespace in namespace_names else None
 
 
 # ── Root redirect ────────────────────────────────────────────────
@@ -182,7 +198,8 @@ class WorkloadsListView(LoginRequiredMixin, View):
     def get(self, request):
         params = request.GET
         cluster = params.get("cluster") or None
-        namespace = params.get("namespace") or None
+        namespace_names = _namespace_choices(cluster)
+        namespace = _scoped_namespace(params.get("namespace"), namespace_names)
         name_contains = params.get("name") or None
         sort = params.get("sort") or None
         sort_dir = params.get("dir") or "desc"
@@ -200,10 +217,9 @@ class WorkloadsListView(LoginRequiredMixin, View):
         page = Paginator(rows, 50).get_page(params.get("page") or 1)
 
         def page_context():
-            clusters, namespace_names = _cluster_and_namespace_choices(cluster)
             return {
                 "nav": "workloads",
-                "clusters": clusters,
+                "clusters": Cluster.objects.order_by("name"),
                 "namespace_names": namespace_names,
                 "filters": {
                     "cluster": cluster or "",
@@ -218,6 +234,7 @@ class WorkloadsListView(LoginRequiredMixin, View):
             request, target="workload-rows", partial="workloads/_rows.html", page=self.template_name,
             context={"page_obj": page, "rows": page.object_list, "request_qs": _qs_without_page(request.GET)},
             page_context=page_context,
+            oob={"namespace_names": namespace_names, "selected_namespace": namespace or ""},
         )
 
 
@@ -498,6 +515,9 @@ class ImagesListView(LoginRequiredMixin, View):
             "dir":                  params.get("dir") or "desc",
         }
 
+        namespace_names = _namespace_choices(filters["cluster"] or None)
+        filters["namespace"] = _scoped_namespace(filters["namespace"], namespace_names) or ""
+
         rows = list_images(
             cluster=filters["cluster"] or None,
             namespace=filters["namespace"] or None,
@@ -511,8 +531,11 @@ class ImagesListView(LoginRequiredMixin, View):
         page = Paginator(rows, 50).get_page(params.get("page") or 1)
 
         def page_context():
-            clusters, namespace_names = _cluster_and_namespace_choices(filters["cluster"])
-            return {"nav": "images", "clusters": clusters, "namespace_names": namespace_names}
+            return {
+                "nav": "images",
+                "clusters": Cluster.objects.order_by("name"),
+                "namespace_names": namespace_names,
+            }
 
         return _render_list(
             request, target="image-rows", partial="images/_rows.html", page=self.template_name,
@@ -523,6 +546,7 @@ class ImagesListView(LoginRequiredMixin, View):
                 "request_qs": _qs_without_page(request.GET),
             },
             page_context=page_context,
+            oob={"namespace_names": namespace_names, "selected_namespace": filters["namespace"]},
         )
 
 

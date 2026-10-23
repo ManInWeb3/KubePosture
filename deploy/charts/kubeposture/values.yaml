@@ -413,16 +413,19 @@ cronJobs:
   # @schema
   # $ref: "#/definitions/cronJob"
   # @schema
-  # -- OSV.dev per-ecosystem bulk-zip snapshots. Conditional GET keeps
-  # off-cycle ticks cheap; only ecosystems present in SbomComponent
-  # are fetched. The npm zip is hundreds of MB on actual fetches, but
-  # the fetcher streams it to a temp file and decompresses one advisory
-  # at a time; the matcher intersects touched purls with the SBOM table
-  # in SQL. Larger than the others for the per-advisory upsert loop.
+  # -- OSV.dev per-ecosystem bulk-zip snapshots: malicious-package IoCs
+  # and vulnerability advisories (OsvAdvisory), then the vulnerability
+  # matcher over every deployed SBOM component. Conditional GET keeps
+  # off-cycle ticks cheap; only ecosystems present in SbomComponent are
+  # fetched. The npm zip is hundreds of MB on actual fetches, but the
+  # fetcher streams it to a temp file and decompresses one advisory at a
+  # time, skipping entries whose `modified` is unchanged; the first run
+  # upserts every advisory (npm ≈ 230k). The key keeps its pre-lane
+  # name so existing value overrides still apply.
   enrichOsvSupplyChain:
     enabled: true
     schedule: "5 * * * *"       # hourly at :05 to avoid coinciding with EPSS
-    command: ["python", "manage.py", "enrich_fetch", "--source", "osv-supply-chain"]
+    command: ["python", "manage.py", "enrich_fetch", "--source", "osv"]
     resources:
       requests:
         cpu: 1

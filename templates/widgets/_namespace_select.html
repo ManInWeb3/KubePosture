@@ -1,0 +1,10 @@
+{# Namespace filter dropdown shared by the list pages. Rendered inline on
+   the full page and again, with `oob=True`, at the top of the HTMX rows
+   partial so htmx swaps it out-of-band — the options follow the
+   selected cluster without a full page load. #}
+<select name="namespace" id="namespace-filter" class="form-select form-select-sm"{% if oob %} hx-swap-oob="true"{% endif %}>
+  <option value="">Any namespace</option>
+  {% for n in namespace_names %}
+    <option value="{{ n }}"{% if selected_namespace == n %} selected{% endif %}>{{ n }}</option>
+  {% endfor %}
+</select>

@@ -16,6 +16,7 @@ from core.models import (
     Finding,
     Image,
     Namespace,
+    OsvAdvisory,
     SbomComponent,
     SupplyChainIoc,
     Workload,
@@ -143,8 +144,12 @@ def test_osv_filters_to_malicious_only():
     # MAL- defaults to critical when no severity given.
     mal = next(i for i in iocs if i.advisory_id == "MAL-2026-9999")
     assert mal.severity == Severity.CRITICAL.value
-    # Two upserts; both kicked off matcher → one Finding per matching IoC.
-    assert n == 2
+    # Two IoC rows plus the one vulnerability advisory (it goes to the
+    # OSV advisory tables, not the IoC lane); the IoC matcher ran → one
+    # Finding per matching IoC. The vulnerability matcher is not part of
+    # `fetch_osv` (see `refresh_osv`), so the GHSA adds no Finding here.
+    assert n == 3
+    assert OsvAdvisory.objects.filter(osv_id="GHSA-1234-aaaa-bbbb").exists()
     assert Finding.objects.count() == 2
 
 

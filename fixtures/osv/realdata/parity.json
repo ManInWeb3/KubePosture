@@ -1,0 +1,14 @@
+{
+  "cluster-a": {
+    "both": 1711,
+    "images": 27,
+    "osv_only": 54,
+    "trivy_only": 0
+  },
+  "cluster-b": {
+    "both": 2082,
+    "images": 19,
+    "osv_only": 63,
+    "trivy_only": 0
+  }
+}

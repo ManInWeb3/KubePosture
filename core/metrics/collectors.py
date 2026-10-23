@@ -5,12 +5,20 @@ so the scrape rate decouples from the DB-query rate.
 """
 from __future__ import annotations
 
-from django.db.models import Count, Min
+from django.db.models import Count, Min, Q
 from django.utils import timezone
 from prometheus_client.core import GaugeMetricFamily
 
 from core.constants import ImportMarkState, IngestQueueStatus
-from core.models import Cluster, ImportMark, IngestQueue, Namespace, Workload
+from core.models import (
+    Cluster,
+    ImportMark,
+    IngestQueue,
+    Namespace,
+    OsvAdvisory,
+    SbomComponent,
+    Workload,
+)
 from core.services.inventory import default_finding_qs
 
 from .registry import cached, queue_ttl_seconds
@@ -131,6 +139,25 @@ def _inventory_age_seconds():
     ]
 
 
+def _sbom_components_total():
+    """Rows of the SBOM inventory by purl type (every image, not only the
+    deployed ones): the size of what the OSV matcher walks."""
+    rows = SbomComponent.objects.values("ecosystem").annotate(n=Count("id"))
+    return [(r["ecosystem"] or "", r["n"]) for r in rows]
+
+
+def _osv_advisories_total():
+    rows = (
+        OsvAdvisory.objects.values("ecosystem")
+        .annotate(n=Count("osv_id"), withdrawn=Count("osv_id", filter=Q(withdrawn_at__isnull=False)))
+    )
+    out = []
+    for r in rows:
+        out.append((r["ecosystem"], "false", r["n"] - r["withdrawn"]))
+        out.append((r["ecosystem"], "true", r["withdrawn"]))
+    return out
+
+
 _METRIC_DESCRIPTORS = (
     ("kubeposture_findings_open",
      "Open findings (excludes accepted / false-positive overlays).",
@@ -162,6 +189,12 @@ _METRIC_DESCRIPTORS = (
     ("kubeposture_last_inventory_age_seconds",
      "Seconds since the most recent complete inventory cycle, per cluster.",
      ["cluster"]),
+    ("kubeposture_sbom_components_total",
+     "SBOM component rows by purl type (all images).",
+     ["ecosystem"]),
+    ("kubeposture_osv_advisories_total",
+     "OSV vulnerability advisories held, by OSV ecosystem and withdrawn flag.",
+     ["ecosystem", "withdrawn"]),
 )
 
 
@@ -269,4 +302,22 @@ class KubePostureCollector:
         )
         for cluster, age in cached("inventory_age_seconds", _inventory_age_seconds):
             g.add_metric([cluster], age)
+        yield g
+
+        g = GaugeMetricFamily(
+            "kubeposture_sbom_components_total",
+            "SBOM component rows by purl type (all images).",
+            labels=["ecosystem"],
+        )
+        for ecosystem, n in cached("sbom_components_total", _sbom_components_total):
+            g.add_metric([ecosystem], n)
+        yield g
+
+        g = GaugeMetricFamily(
+            "kubeposture_osv_advisories_total",
+            "OSV vulnerability advisories held, by OSV ecosystem and withdrawn flag.",
+            labels=["ecosystem", "withdrawn"],
+        )
+        for ecosystem, withdrawn, n in cached("osv_advisories_total", _osv_advisories_total):
+            g.add_metric([ecosystem, withdrawn], n)
         yield g

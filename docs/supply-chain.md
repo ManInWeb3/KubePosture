@@ -85,6 +85,11 @@ response leaves existing rows intact instead of clearing them.
 later without a schema change, but OSV.dev is the only feed shipped
 today — it is a public, no-auth source that works out of the box.
 
+The same download also feeds the vulnerability lane: non-malicious
+advisories go to `OsvAdvisory` / `OsvAffected` and are matched as
+`source=osv` findings — see [osv.md](osv.md). This document covers the
+IoC lane only.
+
 ### OSV.dev supply-chain
 
 - **URL pattern.** `https://osv-vulnerabilities.storage.googleapis.com/{ecosystem}/all.zip`.

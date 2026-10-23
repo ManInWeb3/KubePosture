@@ -59,17 +59,20 @@ def normalize_purl(purl: str) -> str:
     a producer bug (the purl spec doesn't allow `%XX` for the `@`
     separator), but it slips into real-world data. Our IoC feed (OSV)
     uses literal `@`, so mismatched encoding silently breaks
-    purl-equality matching.
+    purl-equality matching. Trivy likewise encodes the `+` of Go build
+    metadata (`v1.55.5%2Bincompatible`, `…%2Bdirty`), which the SemVer
+    parser in the OSV lane needs literal.
 
-    This function does a targeted fix: only the `@` separator is
-    decoded. We deliberately don't full-`unquote()` the string because
-    qualifiers (e.g. `?arch=amd64&distro=debian-12`) can carry
-    intentional percent-encoded values that we'd over-decode.
+    This function does a targeted fix: only `@` and `+` are decoded. We
+    deliberately don't full-`unquote()` the string because qualifiers
+    (e.g. `?arch=amd64&distro=debian-12`) can carry intentional
+    percent-encoded values that we'd over-decode.
 
     Idempotent: already-normalised purls pass through unchanged.
     """
     if not purl:
         return purl
     # %40 is case-insensitive at the hex digits, but both digits here
-    # are numeric so a single replace covers both encoder styles.
-    return purl.replace("%40", "@")
+    # are numeric so a single replace covers both encoder styles; %2B
+    # has a letter, so both cases are handled.
+    return purl.replace("%40", "@").replace("%2B", "+").replace("%2b", "+")

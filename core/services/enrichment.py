@@ -24,7 +24,7 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from django.db import OperationalError, connection
+from django.db import OperationalError, connection, transaction
 from django.utils import timezone
 
 from core.constants import Severity
@@ -33,6 +33,8 @@ from core.models import (
     FeedFetchState,
     Finding,
     KevEntry,
+    OsvAdvisory,
+    OsvAffected,
     SbomComponent,
     SupplyChainIoc,
 )
@@ -574,12 +576,164 @@ def _affected_versions(affected: dict) -> list[str]:
     return versions
 
 
-def fetch_osv_supply_chain() -> int:
-    """Download per-ecosystem OSV bulk-zip for ecosystems we actually
-    deploy (read from `SbomComponent.ecosystem`), filter to malicious-
-    publish entries, upsert `SupplyChainIoc` rows, and run the matcher.
+def _upsert_ioc_rows(advisory: dict, osv_eco: str, touched_purls: set[str]) -> int:
+    """One malicious-package advisory → `SupplyChainIoc` rows (one per
+    affected purl). Returns the number of rows touched."""
+    advisory_id = advisory["id"]
+    severity = _osv_severity(advisory)
+    title = (advisory.get("summary") or advisory_id)[:512]
+    summary = advisory.get("details") or ""
+    advisory_url = ""
+    for ref in advisory.get("references") or []:
+        if ref.get("type") in ("ADVISORY", "WEB") and ref.get("url"):
+            advisory_url = ref["url"][:512]
+            break
+    published_at = _parse_iso_dt(advisory.get("published"))
+    purl_eco = _OSV_TO_PURL.get(osv_eco)
 
-    Returns the number of `SupplyChainIoc` rows touched (created+updated).
+    n = 0
+    for affected in advisory.get("affected") or []:
+        pkg = affected.get("package") or {}
+        name_ = pkg.get("name") or ""
+        explicit_purl = normalize_purl(pkg.get("purl") or "")
+        versions = _affected_versions(affected)
+        if explicit_purl and "@" in explicit_purl:
+            purls = [explicit_purl]
+        elif purl_eco and name_ and versions:
+            purls = [f"pkg:{purl_eco}/{name_}@{v}" for v in versions]
+        elif purl_eco and name_:
+            # No explicit version (typically a ranges-only
+            # `introduced: "0"` block: every version is
+            # malicious) → store the name-only purl as a
+            # sentinel; the matcher matches it against
+            # every version of that package (see
+            # supply_chain_matcher's name-purl match).
+            purls = [f"pkg:{purl_eco}/{name_}"]
+        else:
+            continue
+
+        for purl in purls:
+            purl = normalize_purl(purl)
+            SupplyChainIoc.objects.update_or_create(
+                feed_source="osv",
+                advisory_id=advisory_id,
+                purl=purl,
+                defaults={
+                    "severity": severity,
+                    "title": title,
+                    "summary": summary,
+                    "advisory_url": advisory_url,
+                    "published_at": published_at,
+                    "raw": advisory,
+                },
+            )
+            touched_purls.add(purl)
+            n += 1
+    return n
+
+
+# ── OSV vulnerability advisories ------------------------------------
+
+# Advisories per bulk upsert; also the high-water mark of advisory
+# objects held in memory while a zip is applied.
+_OSV_BATCH = 1000
+
+_ADVISORY_SEVERITY = {
+    "CRITICAL": Severity.CRITICAL.value,
+    "HIGH": Severity.HIGH.value,
+    "MODERATE": Severity.MEDIUM.value,
+    "MEDIUM": Severity.MEDIUM.value,
+    "LOW": Severity.LOW.value,
+}
+
+
+def _advisory_severity(advisory: dict) -> str:
+    """`database_specific.severity` (GHSA's informal label) mapped, or ""
+    — unlike the malicious lane there is no default: Go vulndb and
+    RustSec entries carry none and the finding says UNKNOWN."""
+    dbs = advisory.get("database_specific") or {}
+    return _ADVISORY_SEVERITY.get(str(dbs.get("severity") or "").upper(), "")
+
+
+def _advisory_cvss_vector(advisory: dict) -> str:
+    """First CVSS vector string, v3 preferred over v4 over v2."""
+    by_type = {s.get("type"): s.get("score") for s in advisory.get("severity") or [] if isinstance(s, dict)}
+    for t in ("CVSS_V3", "CVSS_V4", "CVSS_V2"):
+        score = by_type.get(t)
+        if isinstance(score, str) and score.startswith("CVSS:"):
+            return score[:128]
+    return ""
+
+
+def _advisory_rows(advisory: dict, osv_eco: str) -> tuple[OsvAdvisory, list[OsvAffected]]:
+    from core.services.osv_vuln_matcher import package_name
+
+    osv_id = advisory["id"]
+    adv = OsvAdvisory(
+        osv_id=osv_id,
+        ecosystem=osv_eco,
+        aliases=sorted({a for a in advisory.get("aliases") or [] if isinstance(a, str)}),
+        severity=_advisory_severity(advisory),
+        cvss_vector=_advisory_cvss_vector(advisory),
+        summary=(advisory.get("summary") or "")[:512],
+        references=[r["url"][:512] for r in (advisory.get("references") or []) if isinstance(r, dict) and r.get("url")][:10],
+        published_at=_parse_iso_dt(advisory.get("published")),
+        modified_at=_parse_iso_dt(advisory.get("modified")),
+        withdrawn_at=_parse_iso_dt(advisory.get("withdrawn")),
+    )
+    rows = []
+    for block in advisory.get("affected") or []:
+        pkg = block.get("package") or {}
+        purl_type = _OSV_TO_PURL.get(str(pkg.get("ecosystem") or "").split(":")[0])
+        name = pkg.get("name") or ""
+        versions = [v for v in (block.get("versions") or []) if isinstance(v, str)]
+        ranges = [
+            {"type": r.get("type"), "events": [e for e in (r.get("events") or []) if isinstance(e, dict)]}
+            for r in (block.get("ranges") or []) if isinstance(r, dict) and r.get("type") in ("SEMVER", "ECOSYSTEM")
+        ]
+        if not purl_type or not name or not (versions or ranges):
+            continue
+        rows.append(OsvAffected(
+            advisory=adv, purl_type=purl_type, name=package_name(purl_type, name)[:255],
+            versions=versions, ranges=ranges,
+        ))
+    return adv, rows
+
+
+def _upsert_advisories(batch: list[tuple[dict, str]]) -> int:
+    """Bulk-upsert one batch of advisories and replace their affected
+    rows. One short transaction per batch, so the matcher never sees an
+    advisory without its blocks and no lock outlives the batch."""
+    advisories, affected = [], []
+    for advisory, osv_eco in batch:
+        adv, rows = _advisory_rows(advisory, osv_eco)
+        advisories.append(adv)
+        affected.extend(rows)
+    with transaction.atomic():
+        OsvAdvisory.objects.bulk_create(
+            advisories,
+            update_conflicts=True,
+            unique_fields=["osv_id"],
+            update_fields=["ecosystem", "aliases", "severity", "cvss_vector", "summary", "references",
+                           "published_at", "modified_at", "withdrawn_at", "fetched_at"],
+        )
+        OsvAffected.objects.filter(advisory_id__in=[a.osv_id for a in advisories]).delete()
+        OsvAffected.objects.bulk_create(affected, batch_size=_OSV_BATCH)
+    return len(advisories)
+
+
+def fetch_osv() -> int:
+    """Download the per-ecosystem OSV bulk zips for the ecosystems we
+    actually deploy (read from `SbomComponent.ecosystem`) and apply every
+    advisory: malicious-package entries → `SupplyChainIoc` (+ the IoC
+    matcher on the purls touched), everything else → `OsvAdvisory` /
+    `OsvAffected` (entries whose `modified` is unchanged are skipped).
+
+    Does not run the vulnerability matcher — see `refresh_osv`, which the
+    cron uses, so a load can be tested on its own.
+
+    Returns the number of rows touched (IoC rows + advisories upserted),
+    0 when nothing was fetched.
     """
     from core.services.supply_chain_matcher import match_iocs_to_components
 
@@ -595,7 +749,7 @@ def fetch_osv_supply_chain() -> int:
         return 0
 
     touched_purls: set[str] = set()
-    upserted = 0
+    touched = 0
     for osv_eco in osv_ecosystems:
         url = OSV_ZIP_URL.format(eco=osv_eco)
         zip_path = _http_download_conditional(
@@ -603,87 +757,75 @@ def fetch_osv_supply_chain() -> int:
         )
         if zip_path is None:
             continue
+        # `modified` of what we already hold: npm's 230k advisories
+        # change a few hundred a day, so the hourly refresh re-upserts
+        # only those. ~15 MB of Python for npm, released per ecosystem.
+        known_modified = dict(
+            OsvAdvisory.objects.filter(ecosystem=osv_eco).values_list("osv_id", "modified_at")
+        )
+        batch: list[tuple[dict, str]] = []
+        advisories_seen = skipped = 0
         try:
             # No outer transaction.atomic(): npm's MAL feed yields hundreds
             # of thousands of upserts, and holding all those row locks in
             # one transaction OOM-killed the pod (Python + PG state) and
-            # tripped the 15-min activeDeadlineSeconds. Autocommitting each
-            # update_or_create is safe — it's idempotent on the unique key.
+            # tripped the 15-min activeDeadlineSeconds. The IoC path
+            # autocommits each update_or_create (idempotent on the unique
+            # key); advisories go in short per-batch transactions.
             with zipfile.ZipFile(zip_path) as zf:
                 for name in zf.namelist():
                     if not name.endswith(".json"):
                         continue
-                    # Cheap bytes-level prefilter — ~99% of npm entries are
-                    # GHSA-* vulns we don't ingest here. Avoids json.loads
-                    # of every advisory in the 200MB zip.
-                    raw_bytes = zf.read(name)
-                    if b"MAL-" not in raw_bytes and b'"malicious"' not in raw_bytes:
-                        continue
                     try:
-                        advisory = json.loads(raw_bytes)
+                        advisory = json.loads(zf.read(name))
                     except (json.JSONDecodeError, OSError):
                         continue
-                    if not _is_malicious_advisory(advisory):
+                    if not isinstance(advisory, dict) or not advisory.get("id"):
                         continue
-                    advisory_id = advisory.get("id") or ""
-                    if not advisory_id:
+                    if _is_malicious_advisory(advisory):
+                        touched += _upsert_ioc_rows(advisory, osv_eco, touched_purls)
                         continue
-                    severity = _osv_severity(advisory)
-                    title = (advisory.get("summary") or advisory_id)[:512]
-                    summary = advisory.get("details") or ""
-                    refs = advisory.get("references") or []
-                    advisory_url = ""
-                    for ref in refs:
-                        if ref.get("type") in ("ADVISORY", "WEB") and ref.get("url"):
-                            advisory_url = ref["url"][:512]
-                            break
-                    published_at = _parse_iso_dt(advisory.get("published"))
-                    purl_eco = _OSV_TO_PURL.get(osv_eco)
-
-                    for affected in advisory.get("affected") or []:
-                        pkg = affected.get("package") or {}
-                        name_ = pkg.get("name") or ""
-                        explicit_purl = normalize_purl(pkg.get("purl") or "")
-                        versions = _affected_versions(affected)
-                        if explicit_purl and "@" in explicit_purl:
-                            purls = [explicit_purl]
-                        elif purl_eco and name_ and versions:
-                            purls = [f"pkg:{purl_eco}/{name_}@{v}" for v in versions]
-                        elif purl_eco and name_:
-                            # No explicit version (typically a ranges-only
-                            # `introduced: "0"` block: every version is
-                            # malicious) → store the name-only purl as a
-                            # sentinel; the matcher matches it against
-                            # every version of that package (see
-                            # supply_chain_matcher's name-purl match).
-                            purls = [f"pkg:{purl_eco}/{name_}"]
-                        else:
-                            continue
-
-                        for purl in purls:
-                            purl = normalize_purl(purl)
-                            SupplyChainIoc.objects.update_or_create(
-                                feed_source="osv",
-                                advisory_id=advisory_id,
-                                purl=purl,
-                                defaults={
-                                    "severity": severity,
-                                    "title": title,
-                                    "summary": summary,
-                                    "advisory_url": advisory_url,
-                                    "published_at": published_at,
-                                    "raw": advisory,
-                                },
-                            )
-                            touched_purls.add(purl)
-                            upserted += 1
+                    advisories_seen += 1
+                    modified = _parse_iso_dt(advisory.get("modified"))
+                    if modified is not None and known_modified.get(advisory["id"]) == modified:
+                        skipped += 1
+                        continue
+                    batch.append((advisory, osv_eco))
+                    if len(batch) >= _OSV_BATCH:
+                        touched += _upsert_advisories(batch)
+                        batch = []
+            if batch:
+                touched += _upsert_advisories(batch)
             # Only now is the zip known to be good and fully applied.
             _commit_fetch_state(f"osv:{osv_eco}", getattr(zip_path, "fetch_state", None))
+            log.info(
+                "enrichment.osv.applied eco=%s advisories=%d unchanged=%d",
+                osv_eco, advisories_seen, skipped,
+            )
         except zipfile.BadZipFile:
             log.warning("enrichment.osv.bad_zip eco=%s", osv_eco)
         finally:
             Path(zip_path).unlink(missing_ok=True)
+            del known_modified
 
     if touched_purls:
         match_iocs_to_components(touched_purls=touched_purls)
-    return upserted
+    return touched
+
+
+def refresh_osv() -> int:
+    """The cron entry point: apply the feeds, then match every deployed
+    component. The full match runs even when every zip came back 304 —
+    a finding only stays visible while something bumps its `last_seen`
+    past the cluster's latest complete inventory, so still-deployed
+    matches must be re-asserted every tick, not only when their
+    advisory changed."""
+    from core.services.osv_vuln_matcher import match_osv_vulns
+
+    touched = fetch_osv()
+    match_osv_vulns()
+    return touched
+
+
+# Pre-vulnerability-lane name, kept for callers and operators' muscle memory.
+fetch_osv_supply_chain = fetch_osv
