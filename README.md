@@ -249,19 +249,32 @@ python manage.py enrich_from_file --source epss /path/to/epss_scores.csv
 
 ---
 
-## Supply-chain detection (OSV)
+## OSV: vulnerabilities + supply-chain detection
 
-Layered on top of Trivy SBOM ingest. Each cluster import now POSTs
+Layered on top of Trivy SBOM ingest. Each cluster import POSTs
 `SbomReport` CRDs alongside the existing scan kinds, which populate the
-`SbomComponent` table — one row per `(image, purl)`. The OSV.dev feed
-pulls malicious-publish IoCs and a matcher joins them against currently-
-deployed components.
+`SbomComponent` table — one row per `(image, purl)`. One hourly fetch of
+the OSV.dev bulk zips feeds two lanes:
+
+- **Vulnerabilities** — advisories land in `OsvAdvisory` / `OsvAffected`;
+  the matcher evaluates every deployed component's version against them
+  and emits `Finding(source=osv, category=vulnerability)` **only where
+  Trivy has no finding for that package / version / vuln** (any alias).
+  It covers images whose Trivy VulnerabilityReport is missing and applies
+  new advisories to stored SBOMs without a rescan. Design and the
+  measured Trivy comparison: [docs/osv.md](docs/osv.md).
+- **Supply chain** — malicious-publish IoCs (`MAL-*`) go to
+  `SupplyChainIoc` and short-circuit to Immediate: [docs/supply-chain.md](docs/supply-chain.md).
 
 ```bash
-# Pull the IoC feed (writes SupplyChainIoc rows, runs the matcher inline).
-python manage.py enrich_fetch --source osv-supply-chain  # ~hourly in prod
+# Apply both lanes and run the vulnerability matcher fleet-wide.
+python manage.py enrich_fetch --source osv  # hourly in prod
 
-# Run the matcher manually (e.g. after seeding IoCs by hand for testing).
+# Vulnerability matcher on its own (after a matching-logic change / one image).
+python manage.py match_osv
+python manage.py match_osv --image sha256:…
+
+# IoC matcher manually (e.g. after seeding IoCs by hand for testing).
 python manage.py match_supply_chain
 python manage.py match_supply_chain --purl pkg:npm/lodash@4.17.21
 
@@ -274,16 +287,16 @@ python manage.py search_sbom --purls-file /path/to/iocs.txt
 OSV uses per-ecosystem bulk-zip snapshots
 (`osv-vulnerabilities.storage.googleapis.com/<eco>/all.zip`) with
 conditional GET. The fetcher only downloads ecosystems we actually
-deploy — read from `SbomComponent.ecosystem` distinct. Filtered to
-malicious-publish entries (`MAL-*` IDs or
-`database_specific.malicious=true`). Each zip is streamed to a temp
-file and decompressed one advisory at a time, so peak memory stays
-flat even for the multi-hundred-MB npm snapshot. It works out of the
-box with no configuration.
+deploy — read from `SbomComponent.ecosystem` distinct. Each zip is
+streamed to a temp file and decompressed one advisory at a time, and
+advisories whose `modified` is unchanged are skipped, so peak memory
+stays flat even for the multi-hundred-MB npm snapshot. It works out of
+the box with no configuration.
 
-Matches become normal `Finding` rows with
-`source=supply_chain_ioc`, `category=supply_chain`,
-`effective_priority=immediate`, and show up in `/findings/?source=supply_chain_ioc`.
+IoC matches become `Finding` rows with `source=supply_chain_ioc`,
+`category=supply_chain`, `effective_priority=immediate`
+(`/findings/?source=supply_chain_ioc`); vulnerability matches are
+`source=osv`, scored by the normal tree (`/findings/?source=osv`).
 
 ### End-to-end smoke test
 
@@ -315,8 +328,9 @@ re-run on the same triggers (or just on demand).
 | `process_ingest_queue` | every 1–3 min (continuous) | Drains `IngestQueue`; reaps inline as marks finish draining (the reap deletes the tuple's rows — the queue only ever holds in-flight work) |
 | `enrich_fetch --source kev` | daily | CISA KEV catalog refresh |
 | `enrich_fetch --source epss` | daily | first.org EPSS publishes daily; streamed gzip CSV → chunked upserts, stale rows swept by `fetched_at` watermark |
-| `enrich_fetch --source osv-supply-chain` | hourly | OSV.dev per-ecosystem bulk-zip snapshots; conditional GET keeps off-cycle ticks cheap; streams each zip to disk so memory stays flat; calls the matcher inline |
-| `match_supply_chain` | on-demand | Re-run matcher without re-fetching feeds (after seeding test IoCs, or after a matching-logic change) |
+| `enrich_fetch --source osv` | hourly | OSV.dev per-ecosystem bulk-zip snapshots → IoCs + vulnerability advisories; conditional GET and `modified`-skip keep off-cycle ticks cheap; streams each zip to disk so memory stays flat; runs both matchers (the vulnerability one fleet-wide every tick, so still-deployed matches keep their `last_seen`) |
+| `match_osv` | on-demand | Re-run the vulnerability matcher without re-fetching (after a matching-logic change, or `--image` for one image) |
+| `match_supply_chain` | on-demand | Re-run the IoC matcher without re-fetching feeds (after seeding test IoCs, or after a matching-logic change) |
 | `reap_safety_net` | hourly | Catches stuck `state=draining` ImportMarks the inline reaper missed; discards imports that can never complete — marks abandoned in `state=open` (importer died before `/imports/<id>/commit/`) and imports whose inventory payload failed — deleting their rows and marking them `reaped` with a `discard_reason` |
 | `snapshot_capture` | daily (after enrichment + reaper) | End-of-day heartbeat at global / cluster / namespace / workload scopes; feeds trend charts |
 | `prune_stale_data` | daily | DB hygiene — prunes `IngestQueue` leftovers (14d; normally empty, see [docs/pruning.md](docs/pruning.md)), `ImportMark` REAPED (90d), `ScanInconsistency` (30d), stale `Finding` rows (180d), `SbomComponent` on long-undeployed images (90d). Configurable per target. |
@@ -434,7 +448,7 @@ PR rather than by a user at install time.
 | Sweep stuck draining/open marks | `python manage.py reap_safety_net` |
 | Fetch latest EPSS / KEV | `python manage.py enrich_fetch --source {epss,kev}` |
 | Load EPSS / KEV from file (offline) | `python manage.py enrich_from_file --source {epss,kev} <path>` |
-| Pull supply-chain IoC feed (OSV bulk zip) | `python manage.py enrich_fetch --source osv-supply-chain` |
+| Pull OSV feeds (vuln advisories + supply-chain IoCs) and match | `python manage.py enrich_fetch --source osv` |
 | Re-run the supply-chain matcher | `python manage.py match_supply_chain [--purl <purl>]` |
 | Search the SBOM inventory for a purl | `python manage.py search_sbom --purl <purl> \| --prefix <pfx> \| --purls-file <path>` |
 | Seed an end-to-end supply-chain test | `python manage.py seed_supply_chain_test [--purl <purl>] [--cleanup]` |

@@ -8,6 +8,7 @@ from core.models.import_mark import ImportMark
 from core.models.ingest_queue import IngestQueue
 from core.models.ingest_token import IngestToken
 from core.models.namespace import Namespace
+from core.models.osv import OsvAdvisory, OsvAffected
 from core.models.sbom_component import SbomComponent
 from core.models.scan_inconsistency import ScanInconsistency
 from core.models.snapshot import Snapshot
@@ -30,6 +31,8 @@ __all__ = [
     "IngestToken",
     "KevEntry",
     "Namespace",
+    "OsvAdvisory",
+    "OsvAffected",
     "SbomComponent",
     "ScanInconsistency",
     "Snapshot",

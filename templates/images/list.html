@@ -47,12 +47,7 @@
         </select>
       </div>
       <div class="col-auto">
-        <select name="namespace" class="form-select form-select-sm">
-          <option value="">Any namespace</option>
-          {% for n in namespace_names %}
-            <option value="{{ n }}"{% if filters.namespace == n %} selected{% endif %}>{{ n }}</option>
-          {% endfor %}
-        </select>
+        {% include "widgets/_namespace_select.html" with selected_namespace=filters.namespace %}
       </div>
       <div class="col-auto">
         <input type="text" name="registry" class="form-control form-control-sm"

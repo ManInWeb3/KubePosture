@@ -219,9 +219,11 @@
       </div>
       <div class="page-body">
         <div class="container-xl">
-          {# Flash messages for every page — views redirect after POST and
-             rely on this; per-page copies used to leave some pages (e.g. the
-             workload detail's hardening-preview upload) showing nothing. #}
+          {% comment %}
+            Flash messages for every page — views redirect after POST and
+            rely on this; per-page copies used to leave some pages (e.g. the
+            workload detail's hardening-preview upload) showing nothing.
+          {% endcomment %}
           {% for msg in messages %}
           <div class="alert alert-{{ msg.tags }} alert-dismissible">{{ msg }}
             <a class="btn-close" data-bs-dismiss="alert"></a>

@@ -25,6 +25,7 @@ from core.parsers import inventory as inventory_parser
 from core.parsers import kyverno as kyverno_parser
 from core.parsers import trivy as trivy_parser
 from core.services.dedup import upsert_findings
+from core.services.osv_vuln_matcher import match_osv_vulns
 from core.signals import SIGNALS
 
 log = logging.getLogger("core.ingest")
@@ -349,7 +350,21 @@ def _process_sbom(item: IngestQueue, parser_func) -> dict:
     )
     updated = len(existing)
     created = len(by_purl) - updated
+    _after_sbom_upsert(image)
     return {"components": len(components), "created": created, "updated": updated}
+
+
+def _after_sbom_upsert(image: Image) -> None:
+    """Match this image's fresh component set against the OSV advisory
+    tables. Every inventory cycle re-posts the SbomReport, so running the
+    matcher here keeps OSV findings' `last_seen` in step with the cycle
+    the same way Trivy's own VulnerabilityReports do for theirs. A matcher
+    failure is logged, not raised: the SBOM upsert above is the item's
+    job and has already happened."""
+    try:
+        match_osv_vulns(image=image)
+    except Exception:  # noqa: BLE001 — never fail the queue item for the side lane
+        log.exception("ingest.sbom.osv_match_failed", extra={"image_digest": image.digest})
 
 
 # ── Top-level dispatch --------------------------------------------

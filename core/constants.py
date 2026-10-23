@@ -29,6 +29,7 @@ class Source(models.TextChoices):
     TRIVY = "trivy", "Trivy"
     KYVERNO = "kyverno", "Kyverno"
     SUPPLY_CHAIN_IOC = "supply_chain_ioc", "Supply-Chain IoC"
+    OSV = "osv", "OSV"
 
 
 class PriorityBand(models.TextChoices):

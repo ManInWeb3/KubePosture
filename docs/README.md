@@ -6,6 +6,7 @@
 - [SSVC Mapping](ssvc-mapping.md) — KubePosture's mapping to SSVC v2.0: which decision points are implemented, which are approximated, where the tool deviates from the spec, and how to read priority labels correctly.
 - [Import Pipeline](import-pipeline.md) — design decisions behind the bundle import protocol (Oct 2026): one gzip NDJSON bundle per kind + atomic commit, discard-don't-promote, delete-at-reap, relevance filter instead of age filter, coverage as record-and-alert, timer ordering, why `complete_snapshot` was removed, real anonymised fixtures, rollout checks.
 - [Supply-chain detection](supply-chain.md) — SBOM ingest, OSV.dev malicious-package feed, the matcher, purl normalisation.
+- [OSV vulnerability lane](osv.md) — SBOMs evaluated against OSV.dev advisories as gap-fill next to Trivy: measured delta, version-range evaluation, finding shape, operations.
 - [Data Retention & Pruning](pruning.md) — what `prune_stale_data` deletes, what is kept, safety rules.
 - [JWT proxy auth](auth-jwt-proxy.md) — running behind an authenticating reverse proxy.
 

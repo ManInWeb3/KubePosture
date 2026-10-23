@@ -60,12 +60,7 @@
         </select>
       </div>
       <div class="col-auto">
-        <select name="namespace" class="form-select form-select-sm">
-          <option value="">Any namespace</option>
-          {% for n in namespace_names %}
-            <option value="{{ n }}" {% if filters.namespace == n %}selected{% endif %}>{{ n }}</option>
-          {% endfor %}
-        </select>
+        {% include "widgets/_namespace_select.html" with selected_namespace=filters.namespace %}
       </div>
       <div class="col-auto">
         <input type="text" name="name" class="form-control form-control-sm"
@@ -108,9 +103,10 @@
   (function () {
     var form = document.getElementById("workloads-filters");
     if (!form) return;
-    var clusterSel = form.querySelector('select[name="cluster"]');
-    var namespaceSel = form.querySelector('select[name="namespace"]');
-    var nameInput = form.querySelector('input[name="name"]');
+    // Looked up per call, not cached: the namespace <select> is replaced
+    // out-of-band on every filter swap, so a cached node goes stale.
+    function field(name) { return form.querySelector('[name="' + name + '"]'); }
+    var nameInput = field("name");
     var subtitleEl = document.getElementById("list-trend-subtitle");
     var intervalGroup = document.getElementById("list-trend-interval");
     var INTERVAL_LABELS = { "1d": "last 24 h", "1w": "last 7 days", "2w": "last 14 days" };
@@ -121,11 +117,8 @@
         return ({"&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"})[c];
       });
     }
-    function debounce(fn, ms) {
-      var t;
-      return function () { clearTimeout(t); t = setTimeout(fn, ms); };
-    }
     function currentFilters() {
+      var clusterSel = field("cluster"), namespaceSel = field("namespace");
       return {
         cluster: clusterSel ? clusterSel.value : "",
         namespace: namespaceSel ? namespaceSel.value : "",
@@ -171,9 +164,11 @@
       if (subtitleEl) subtitleEl.innerHTML = renderSubtitle(f);
     }
 
-    if (clusterSel)   clusterSel.addEventListener("change", syncTrend);
-    if (namespaceSel) namespaceSel.addEventListener("change", syncTrend);
-    if (nameInput)    nameInput.addEventListener("input", debounce(syncTrend, 400));
+    // Every filter change goes through an HTMX request (the form's
+    // hx-trigger covers selects and the debounced text input), and the
+    // swapped-in namespace select may have dropped a namespace of the
+    // previous cluster — so the chart follows the settled form, once.
+    form.addEventListener("htmx:afterSettle", syncTrend);
     if (intervalGroup) {
       intervalGroup.addEventListener("click", function (ev) {
         var btn = ev.target.closest("button[data-interval]");

@@ -13,6 +13,7 @@ from core.models import (
     IngestToken,
     KevEntry,
     Namespace,
+    OsvAdvisory,
     SbomComponent,
     ScanInconsistency,
     Snapshot,
@@ -207,6 +208,15 @@ class SupplyChainIocAdmin(admin.ModelAdmin):
     search_fields = ("advisory_id", "purl", "title", "summary")
     ordering = ("-last_seen_at",)
     readonly_fields = ("first_seen_at", "last_seen_at", "raw")
+
+
+@admin.register(OsvAdvisory)
+class OsvAdvisoryAdmin(admin.ModelAdmin):
+    list_display = ("osv_id", "ecosystem", "severity", "published_at", "modified_at", "withdrawn_at")
+    list_filter = ("ecosystem", "severity")
+    search_fields = ("osv_id", "aliases", "summary", "affected__name")
+    ordering = ("-modified_at",)
+    readonly_fields = ("fetched_at",)
 
 
 @admin.register(FeedFetchState)
