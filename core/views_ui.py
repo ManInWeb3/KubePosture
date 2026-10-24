@@ -35,9 +35,11 @@ from core.models import (
     ImportMark,
     IngestToken,
     Namespace,
+    SbomComponent,
     UserPreference,
     Workload,
 )
+from core.purl import parse_purl_name_version
 from core.services import hardening_preview
 from core.services.cluster_removal import remove_cluster
 from core.services.components import (
@@ -144,16 +146,21 @@ def _render_list(request, *, target: str, partial: str, page: str, context: dict
     `page_context()` — a callable so the dropdown / tile queries only
     run when the chrome is actually rendered.
 
-    `oob` is the context for `widgets/_namespace_select.html`, prepended
+    `oob` is the context for `widgets/_namespace_select.html`, appended
     to the partial as an out-of-band swap so the namespace dropdown
     follows the selected cluster (the swap itself only replaces the rows).
-    It goes first: htmx parses the fragment in a `<template>`, where a
-    `<select>` before the `<tr>`s is unambiguous."""
+    It goes last: htmx parses the response inside a `<template>`, and the
+    HTML parser picks the template's insertion mode from the first start
+    tag. A leading `<select>` selects "in body", which silently drops every
+    `<tr>`/`<td>` after it and leaves the cell text as a flat run; a leading
+    `<tr>` selects "in table body", and a trailing `<select>` is then
+    foster-parented into the template content as a sibling htmx can lift
+    out."""
     if _is_htmx(request) and request.headers.get("HX-Target") == target:
         resp = render(request, partial, context)
         if oob is not None:
             select = render(request, "widgets/_namespace_select.html", {**oob, "oob": True})
-            resp.content = select.content + resp.content
+            resp.content = resp.content + select.content
         return resp
     return render(request, page, {**context, **page_context()})
 
@@ -725,6 +732,68 @@ def _qs_without_page(get_params) -> str:
 # ── Finding detail (HTMX fragment for workload-page offcanvas) ────
 
 
+# Affected versions listed in the finding panel before "+N more".
+_PANEL_MAX_VERSIONS = 30
+
+
+def _http_url(value) -> str:
+    """`value` when it is an http(s) URL, else "": advisory links come from
+    an external feed and end up in an `href`."""
+    return value if isinstance(value, str) and value.startswith(("https://", "http://")) else ""
+
+
+def _affected_panel(details: dict) -> dict | None:
+    """The versions an advisory calls affected (or compromised), as the
+    matchers stored them in `details`; None when they didn't — findings
+    raised before that, and sources that don't know."""
+    versions = [v for v in details.get("affected_versions") or [] if isinstance(v, str)]
+    ranges = [r for r in details.get("affected_ranges") or [] if isinstance(r, str)]
+    if not versions and not ranges:
+        return None
+    return {
+        "versions": versions[:_PANEL_MAX_VERSIONS],
+        "versions_more": max(len(versions) - _PANEL_MAX_VERSIONS, 0),
+        "ranges": ranges,
+    }
+
+
+def _installed_purl(f, details: dict) -> str:
+    """Package URL of the package a finding is about. The supply-chain and
+    OSV matchers record it; a Trivy report doesn't, so it is looked up in
+    the SBOM of the finding's image — same package name, same version."""
+    purl = details.get("purl")
+    if isinstance(purl, str) and purl:
+        return purl
+    if not (f.image_id and f.pkg_name and f.installed_version):
+        return ""
+    candidates = (
+        SbomComponent.objects
+        .filter(image_id=f.image_id, version=f.installed_version)
+        .order_by("purl").values_list("purl", flat=True)
+    )
+    for candidate in candidates:
+        name, _version = parse_purl_name_version(candidate)
+        # Trivy names an OS package `libc6`, its purl `pkg:deb/debian/libc6`.
+        if name == f.pkg_name or name.endswith(f"/{f.pkg_name}"):
+            return candidate
+    return ""
+
+
+def _supply_chain_panel(f, details: dict) -> dict:
+    """What the finding panel shows for a malicious-package match: the
+    installed package URL (with version), the versions the advisory calls
+    compromised, and where to read about it. Findings raised before the
+    matcher stored the advisory's versions simply omit that row."""
+    return {
+        "purl": details.get("purl") or "",
+        "advisory_id": details.get("advisory_id") or f.vuln_id,
+        "advisory_url": _http_url(details.get("advisory_url")),
+        "aliases": [a for a in details.get("aliases") or [] if isinstance(a, str)],
+        "feed_source": details.get("feed_source") or "",
+        **(_affected_panel(details) or {"versions": [], "versions_more": 0, "ranges": []}),
+    }
+
+
 class FindingDetailPanelView(LoginRequiredMixin, View):
     """`/findings/<pk>/panel/` — HTMX fragment with full Finding metadata.
 
@@ -758,13 +827,33 @@ class FindingDetailPanelView(LoginRequiredMixin, View):
             k: v for k, v in details.items() if k not in promoted_keys
         }
 
+        # A malicious-package match has its own section, which carries the
+        # package URL, versions and aliases; every other finding gets them
+        # as plain rows.
+        supply_chain = (
+            _supply_chain_panel(f, details) if f.source == Source.SUPPLY_CHAIN_IOC.value else None
+        )
+        primary_link = details.get("primary_link") or ""
+        # Trivy's `links` and the OSV lane's `references`, external URLs both.
+        links = [
+            u for u in dict.fromkeys([*(details.get("links") or []),
+                                      *(details.get("references") or [])])
+            if _http_url(u) and u != primary_link
+        ]
+
         return render(request, self.template_name, {
             "f": f,
+            "supply_chain": supply_chain,
+            "purl": "" if supply_chain else _installed_purl(f, details),
+            "affected": None if supply_chain else _affected_panel(details),
+            "aliases": [] if supply_chain else [
+                a for a in details.get("aliases") or [] if isinstance(a, str)
+            ],
             "description": details.get("description") or "",
             "remediation": details.get("remediation") or "",
             "messages": details.get("messages") or [],
-            "primary_link": details.get("primary_link") or "",
-            "links": details.get("links") or [],
+            "primary_link": primary_link,
+            "links": links,
             "published_date": details.get("publishedDate") or "",
             "last_modified_date": details.get("lastModifiedDate") or "",
             "resource_kind": details.get("resource_kind") or "",

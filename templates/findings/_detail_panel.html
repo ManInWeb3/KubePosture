@@ -36,6 +36,28 @@
       <div class="datagrid-content"><code class="text-success">{{ f.fixed_version }}</code></div>
     </div>
     {% endif %}
+    {% if purl %}
+    <div class="datagrid-item">
+      <div class="datagrid-title">Package URL</div>
+      <div class="datagrid-content"><code style="word-break: break-all;">{{ purl }}</code></div>
+    </div>
+    {% endif %}
+    {% if affected %}
+    <div class="datagrid-item">
+      <div class="datagrid-title">Affected versions</div>
+      <div class="datagrid-content">
+        {% for r in affected.ranges %}<code class="me-1">{{ r }}</code>{% endfor %}
+        {% for v in affected.versions %}<code class="me-1">{{ v }}</code>{% endfor %}
+        {% if affected.versions_more %}<span class="text-muted small">+{{ affected.versions_more }} more</span>{% endif %}
+      </div>
+    </div>
+    {% endif %}
+    {% if aliases %}
+    <div class="datagrid-item">
+      <div class="datagrid-title">Also known as</div>
+      <div class="datagrid-content">{% for a in aliases %}<code class="me-1">{{ a }}</code>{% endfor %}</div>
+    </div>
+    {% endif %}
     {% if f.cvss_score is not None %}
     <div class="datagrid-item">
       <div class="datagrid-title">CVSS</div>
@@ -106,6 +128,43 @@
     </div>
     {% endif %}
   </div>
+
+  {% if supply_chain %}
+  <div class="mb-3">
+    <h4 class="mb-2">Malicious package</h4>
+    <div class="datagrid">
+      {% if supply_chain.purl %}
+      <div class="datagrid-item">
+        <div class="datagrid-title">Package URL (installed)</div>
+        <div class="datagrid-content"><code style="word-break: break-all;">{{ supply_chain.purl }}</code></div>
+      </div>
+      {% endif %}
+      {% if supply_chain.versions or supply_chain.ranges %}
+      <div class="datagrid-item">
+        <div class="datagrid-title">Compromised versions</div>
+        <div class="datagrid-content">
+          {% for v in supply_chain.versions %}<code class="me-1">{{ v }}</code>{% endfor %}
+          {% if supply_chain.versions_more %}<span class="text-muted small">+{{ supply_chain.versions_more }} more</span>{% endif %}
+          {% for r in supply_chain.ranges %}<code class="me-1">{{ r }}</code>{% endfor %}
+        </div>
+      </div>
+      {% endif %}
+      <div class="datagrid-item">
+        <div class="datagrid-title">Advisory</div>
+        <div class="datagrid-content">
+          <code>{{ supply_chain.advisory_id }}</code>
+          {% for a in supply_chain.aliases %}<code class="ms-1">{{ a }}</code>{% endfor %}
+          {% if supply_chain.feed_source %}<span class="badge bg-secondary-lt text-secondary ms-1">{{ supply_chain.feed_source }}</span>{% endif %}
+          {% if supply_chain.advisory_url %}
+          <div style="word-break: break-all;">
+            <a href="{{ supply_chain.advisory_url }}" target="_blank" rel="noopener noreferrer">{{ supply_chain.advisory_url }}</a>
+          </div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
 
   {% if description %}
   <div class="mb-3">

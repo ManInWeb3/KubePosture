@@ -1,0 +1,435 @@
+{
+ "$schema": "http://cyclonedx.org/schema/bom-1.7.schema.json",
+ "bomFormat": "CycloneDX",
+ "specVersion": "1.7",
+ "version": 1,
+ "components": [
+  {
+   "bom-ref": "pkg:npm/%40solana/web3.js@1.98.4",
+   "type": "library",
+   "group": "@solana",
+   "name": "web3.js",
+   "version": "1.98.4",
+   "hashes": [
+    {
+     "alg": "SHA-1",
+     "content": "89511511e7fa0424b99f656d4b493a682382176b"
+    }
+   ],
+   "licenses": [
+    {
+     "license": {
+      "id": "MIT"
+     }
+    }
+   ],
+   "purl": "pkg:npm/%40solana/web3.js@1.98.4",
+   "properties": [
+    {
+     "name": "aquasecurity:trivy:FilePath",
+     "value": "app/app/.output/server/node_modules/@solana/web3.js/package.json"
+    },
+    {
+     "name": "aquasecurity:trivy:LayerDiffID",
+     "value": "sha256:f107116cce56366fde9c3adc79187e4293477f31711d844123117ec540dac4dc"
+    },
+    {
+     "name": "aquasecurity:trivy:LayerDigest",
+     "value": "sha256:87ce832a5665657754a7055758ac80ea4f910206c80e82b674ada637b56c573a"
+    },
+    {
+     "name": "aquasecurity:trivy:PkgID",
+     "value": "@solana/web3.js@1.98.4"
+    },
+    {
+     "name": "aquasecurity:trivy:PkgType",
+     "value": "node-pkg"
+    }
+   ]
+  },
+  {
+   "bom-ref": "pkg:npm/%40tanstack/history@1.162.1",
+   "type": "library",
+   "group": "@tanstack",
+   "name": "history",
+   "version": "1.162.1",
+   "hashes": [
+    {
+     "alg": "SHA-1",
+     "content": "4914b23dd860313adb7aed0d6a800c409a33c94f"
+    }
+   ],
+   "licenses": [
+    {
+     "license": {
+      "id": "MIT"
+     }
+    }
+   ],
+   "purl": "pkg:npm/%40tanstack/history@1.162.1",
+   "properties": [
+    {
+     "name": "aquasecurity:trivy:FilePath",
+     "value": "app/app/.output/server/node_modules/@tanstack/history/package.json"
+    },
+    {
+     "name": "aquasecurity:trivy:LayerDiffID",
+     "value": "sha256:f107116cce56366fde9c3adc79187e4293477f31711d844123117ec540dac4dc"
+    },
+    {
+     "name": "aquasecurity:trivy:LayerDigest",
+     "value": "sha256:87ce832a5665657754a7055758ac80ea4f910206c80e82b674ada637b56c573a"
+    },
+    {
+     "name": "aquasecurity:trivy:PkgID",
+     "value": "@tanstack/history@1.162.1"
+    },
+    {
+     "name": "aquasecurity:trivy:PkgType",
+     "value": "node-pkg"
+    }
+   ]
+  },
+  {
+   "bom-ref": "pkg:npm/%40tanstack/react-router-devtools@1.167.1",
+   "type": "library",
+   "group": "@tanstack",
+   "name": "react-router-devtools",
+   "version": "1.167.1",
+   "hashes": [
+    {
+     "alg": "SHA-1",
+     "content": "2027aeb95b2a21bd06330e4b271b59332543f557"
+    }
+   ],
+   "licenses": [
+    {
+     "license": {
+      "id": "MIT"
+     }
+    }
+   ],
+   "purl": "pkg:npm/%40tanstack/react-router-devtools@1.167.1",
+   "properties": [
+    {
+     "name": "aquasecurity:trivy:FilePath",
+     "value": "app/app/.output/server/node_modules/@tanstack/react-router-devtools/package.json"
+    },
+    {
+     "name": "aquasecurity:trivy:LayerDiffID",
+     "value": "sha256:f107116cce56366fde9c3adc79187e4293477f31711d844123117ec540dac4dc"
+    },
+    {
+     "name": "aquasecurity:trivy:LayerDigest",
+     "value": "sha256:87ce832a5665657754a7055758ac80ea4f910206c80e82b674ada637b56c573a"
+    },
+    {
+     "name": "aquasecurity:trivy:PkgID",
+     "value": "@tanstack/react-router-devtools@1.167.1"
+    },
+    {
+     "name": "aquasecurity:trivy:PkgType",
+     "value": "node-pkg"
+    }
+   ]
+  },
+  {
+   "bom-ref": "pkg:npm/%40tanstack/react-router-with-query@1.130.17",
+   "type": "library",
+   "group": "@tanstack",
+   "name": "react-router-with-query",
+   "version": "1.130.17",
+   "hashes": [
+    {
+     "alg": "SHA-1",
+     "content": "600948b62f8d36381b19df1037a135069f553086"
+    }
+   ],
+   "licenses": [
+    {
+     "license": {
+      "id": "MIT"
+     }
+    }
+   ],
+   "purl": "pkg:npm/%40tanstack/react-router-with-query@1.130.17",
+   "properties": [
+    {
+     "name": "aquasecurity:trivy:FilePath",
+     "value": "app/app/.output/server/node_modules/@tanstack/react-router-with-query/package.json"
+    },
+    {
+     "name": "aquasecurity:trivy:LayerDiffID",
+     "value": "sha256:f107116cce56366fde9c3adc79187e4293477f31711d844123117ec540dac4dc"
+    },
+    {
+     "name": "aquasecurity:trivy:LayerDigest",
+     "value": "sha256:87ce832a5665657754a7055758ac80ea4f910206c80e82b674ada637b56c573a"
+    },
+    {
+     "name": "aquasecurity:trivy:PkgID",
+     "value": "@tanstack/react-router-with-query@1.130.17"
+    },
+    {
+     "name": "aquasecurity:trivy:PkgType",
+     "value": "node-pkg"
+    }
+   ]
+  },
+  {
+   "bom-ref": "pkg:npm/%40tanstack/react-router@1.170.32",
+   "type": "library",
+   "group": "@tanstack",
+   "name": "react-router",
+   "version": "1.170.32",
+   "hashes": [
+    {
+     "alg": "SHA-1",
+     "content": "2a64cbb3ee2003e5a5eb3ca39f19b6fea3345bdb"
+    }
+   ],
+   "licenses": [
+    {
+     "license": {
+      "id": "MIT"
+     }
+    }
+   ],
+   "purl": "pkg:npm/%40tanstack/react-router@1.170.32",
+   "properties": [
+    {
+     "name": "aquasecurity:trivy:FilePath",
+     "value": "app/app/.output/server/node_modules/@tanstack/react-router/package.json"
+    },
+    {
+     "name": "aquasecurity:trivy:LayerDiffID",
+     "value": "sha256:f107116cce56366fde9c3adc79187e4293477f31711d844123117ec540dac4dc"
+    },
+    {
+     "name": "aquasecurity:trivy:LayerDigest",
+     "value": "sha256:87ce832a5665657754a7055758ac80ea4f910206c80e82b674ada637b56c573a"
+    },
+    {
+     "name": "aquasecurity:trivy:PkgID",
+     "value": "@tanstack/react-router@1.170.32"
+    },
+    {
+     "name": "aquasecurity:trivy:PkgType",
+     "value": "node-pkg"
+    }
+   ]
+  },
+  {
+   "bom-ref": "pkg:npm/%40tanstack/router-core@1.171.27",
+   "type": "library",
+   "group": "@tanstack",
+   "name": "router-core",
+   "version": "1.171.27",
+   "hashes": [
+    {
+     "alg": "SHA-1",
+     "content": "e21f4d5a95e9df5717ae11c0d63c0ca681b988d3"
+    }
+   ],
+   "licenses": [
+    {
+     "license": {
+      "id": "MIT"
+     }
+    }
+   ],
+   "purl": "pkg:npm/%40tanstack/router-core@1.171.27",
+   "properties": [
+    {
+     "name": "aquasecurity:trivy:FilePath",
+     "value": "app/app/.output/server/node_modules/@tanstack/router-core/package.json"
+    },
+    {
+     "name": "aquasecurity:trivy:LayerDiffID",
+     "value": "sha256:f107116cce56366fde9c3adc79187e4293477f31711d844123117ec540dac4dc"
+    },
+    {
+     "name": "aquasecurity:trivy:LayerDigest",
+     "value": "sha256:87ce832a5665657754a7055758ac80ea4f910206c80e82b674ada637b56c573a"
+    },
+    {
+     "name": "aquasecurity:trivy:PkgID",
+     "value": "@tanstack/router-core@1.171.27"
+    },
+    {
+     "name": "aquasecurity:trivy:PkgType",
+     "value": "node-pkg"
+    }
+   ]
+  },
+  {
+   "bom-ref": "pkg:npm/%40tanstack/router-devtools-core@1.168.1",
+   "type": "library",
+   "group": "@tanstack",
+   "name": "router-devtools-core",
+   "version": "1.168.1",
+   "hashes": [
+    {
+     "alg": "SHA-1",
+     "content": "ee53f0d0ddadeea4ac254487980c466df7808728"
+    }
+   ],
+   "licenses": [
+    {
+     "license": {
+      "id": "MIT"
+     }
+    }
+   ],
+   "purl": "pkg:npm/%40tanstack/router-devtools-core@1.168.1",
+   "properties": [
+    {
+     "name": "aquasecurity:trivy:FilePath",
+     "value": "app/app/.output/server/node_modules/@tanstack/router-devtools-core/package.json"
+    },
+    {
+     "name": "aquasecurity:trivy:LayerDiffID",
+     "value": "sha256:f107116cce56366fde9c3adc79187e4293477f31711d844123117ec540dac4dc"
+    },
+    {
+     "name": "aquasecurity:trivy:LayerDigest",
+     "value": "sha256:87ce832a5665657754a7055758ac80ea4f910206c80e82b674ada637b56c573a"
+    },
+    {
+     "name": "aquasecurity:trivy:PkgID",
+     "value": "@tanstack/router-devtools-core@1.168.1"
+    },
+    {
+     "name": "aquasecurity:trivy:PkgType",
+     "value": "node-pkg"
+    }
+   ]
+  },
+  {
+   "bom-ref": "pkg:npm/abitype@1.0.8",
+   "type": "library",
+   "name": "abitype",
+   "version": "1.0.8",
+   "hashes": [
+    {
+     "alg": "SHA-1",
+     "content": "357fe356ae1a534d7063ea3efa7849897df8b6b4"
+    }
+   ],
+   "licenses": [
+    {
+     "license": {
+      "id": "MIT"
+     }
+    }
+   ],
+   "purl": "pkg:npm/abitype@1.0.8",
+   "properties": [
+    {
+     "name": "aquasecurity:trivy:FilePath",
+     "value": "app/app/.output/server/node_modules/.nitro/abitype@1.0.8/package.json"
+    },
+    {
+     "name": "aquasecurity:trivy:LayerDiffID",
+     "value": "sha256:f107116cce56366fde9c3adc79187e4293477f31711d844123117ec540dac4dc"
+    },
+    {
+     "name": "aquasecurity:trivy:LayerDigest",
+     "value": "sha256:87ce832a5665657754a7055758ac80ea4f910206c80e82b674ada637b56c573a"
+    },
+    {
+     "name": "aquasecurity:trivy:PkgID",
+     "value": "abitype@1.0.8"
+    },
+    {
+     "name": "aquasecurity:trivy:PkgType",
+     "value": "node-pkg"
+    }
+   ]
+  },
+  {
+   "bom-ref": "pkg:npm/abitype@1.2.3",
+   "type": "library",
+   "name": "abitype",
+   "version": "1.2.3",
+   "hashes": [
+    {
+     "alg": "SHA-1",
+     "content": "d07711c30164e0417a31e07db1e78394cd2f3c9c"
+    }
+   ],
+   "licenses": [
+    {
+     "license": {
+      "id": "MIT"
+     }
+    }
+   ],
+   "purl": "pkg:npm/abitype@1.2.3",
+   "properties": [
+    {
+     "name": "aquasecurity:trivy:FilePath",
+     "value": "app/app/.output/server/node_modules/.nitro/abitype@1.2.3/package.json"
+    },
+    {
+     "name": "aquasecurity:trivy:LayerDiffID",
+     "value": "sha256:f107116cce56366fde9c3adc79187e4293477f31711d844123117ec540dac4dc"
+    },
+    {
+     "name": "aquasecurity:trivy:LayerDigest",
+     "value": "sha256:87ce832a5665657754a7055758ac80ea4f910206c80e82b674ada637b56c573a"
+    },
+    {
+     "name": "aquasecurity:trivy:PkgID",
+     "value": "abitype@1.2.3"
+    },
+    {
+     "name": "aquasecurity:trivy:PkgType",
+     "value": "node-pkg"
+    }
+   ]
+  },
+  {
+   "bom-ref": "pkg:npm/ably@2.17.1",
+   "type": "library",
+   "name": "ably",
+   "version": "2.17.1",
+   "hashes": [
+    {
+     "alg": "SHA-1",
+     "content": "f7b4c120e8d9a52d87bf3f435e28487c4a5c7df7"
+    }
+   ],
+   "licenses": [
+    {
+     "license": {
+      "id": "Apache-2.0"
+     }
+    }
+   ],
+   "purl": "pkg:npm/ably@2.17.1",
+   "properties": [
+    {
+     "name": "aquasecurity:trivy:FilePath",
+     "value": "app/app/.output/server/node_modules/ably/package.json"
+    },
+    {
+     "name": "aquasecurity:trivy:LayerDiffID",
+     "value": "sha256:f107116cce56366fde9c3adc79187e4293477f31711d844123117ec540dac4dc"
+    },
+    {
+     "name": "aquasecurity:trivy:LayerDigest",
+     "value": "sha256:87ce832a5665657754a7055758ac80ea4f910206c80e82b674ada637b56c573a"
+    },
+    {
+     "name": "aquasecurity:trivy:PkgID",
+     "value": "ably@2.17.1"
+    },
+    {
+     "name": "aquasecurity:trivy:PkgType",
+     "value": "node-pkg"
+    }
+   ]
+  }
+ ]
+}

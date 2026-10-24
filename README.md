@@ -346,6 +346,24 @@ python manage.py snapshot_capture
 python manage.py prune_snapshots
 ```
 
+**On a fresh Kubernetes install** the chart only schedules the CronJobs —
+nothing runs until its first tick, so findings have no EPSS / KEV / OSV
+enrichment yet. Start the first runs by hand instead of waiting:
+
+```bash
+kubectl -n <ns> create job --from=cronjob/<fullname>-enrich-kev  seed-kev
+kubectl -n <ns> create job --from=cronjob/<fullname>-enrich-epss seed-epss
+kubectl -n <ns> create job --from=cronjob/<fullname>-enrich-osv-supply-chain seed-osv
+```
+
+(`<fullname>` is the release name, plus `-kubeposture` unless the release
+name already contains it — `kubectl -n <ns> get cronjob` shows the exact
+names. The first OSV run upserts every advisory of the deployed
+ecosystems, so give it time.) The
+chart used to run KEV and EPSS once on install/upgrade via
+`cronJobs.<name>.initialRun`; that flag is gone, and a values override that
+still sets it is rejected by the schema.
+
 Snapshot rows feed the **CVE Trend** charts on `/workloads/` (fleet-wide
 or per-cluster, follows the cluster filter) and on each workload detail
 page (per-cluster history with image-set events marked). Per-import

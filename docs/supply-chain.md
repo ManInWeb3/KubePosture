@@ -113,6 +113,19 @@ IoC lane only.
 - **Cadence.** ~hourly. Conditional GET keeps off-cycle ticks cheap;
   in practice only npm re-downloads most ticks (its ETag changes
   almost hourly), the rest return 304.
+- **Which versions.** Each `affected[]` block becomes IoC rows by
+  [`core.osv_ranges.ioc_purls`](../core/osv_ranges.py): a `package.purl`
+  that carries a version is used as is; an enumerated `versions[]`
+  becomes one exact purl per version; a block with only ranges
+  (`introduced: "0"`, `introduced 1.95.6 / fixed 1.95.8`) becomes the
+  **name-only purl** — "some versions of this package" — and the matcher
+  checks the component's version against the advisory's own block
+  (§4). Whether a purl "carries a version" is decided by parsing it:
+  a scoped npm name (`pkg:npm/@tanstack/x`, published by OSV as
+  `%40tanstack`) contains an `@` that is not a version separator. An
+  `"@" in purl` test once stored the name-only purl for every scoped
+  advisory and flagged every version of the package; migration
+  `0016_repair_scoped_malicious_iocs` rebuilds those rows from `raw`.
 
 The fetcher invokes the matcher inline once it finishes upserting,
 passing the set of purls it touched via `touched_purls=` — so a
@@ -156,6 +169,15 @@ The matcher is intentionally:
   `advisory_id`s — by design, so the operator sees both pieces of
   evidence. (OSV is the only shipped feed today, but the join keys on
   `(feed_source, advisory_id)` so this holds if another is added.)
+- **Version-checked.** A versioned IoC matches that exact version. A
+  name-only IoC matches a component only if the advisory's block for the
+  package covers its version
+  ([`covers_version`](../core/osv_ranges.py): enumerated `versions[]`
+  and SEMVER intervals via `evaluate`). It fails open — a block with
+  nothing interpretable (`introduced: "0"`, ECOSYSTEM/GIT ranges) or a
+  version that doesn't parse counts as covered, since for malware a
+  miss costs more than a false alarm. The advisory JSON (`raw`, deferred
+  in the bulk query) is read only for IoCs that matched a component.
 - **Re-runnable.** Repeated matches are deduplicated by `compute_hash`
   → no growth on no-op re-runs. Severity / title / URL / summary
   updates propagate into the existing finding's `details` JSONB on
@@ -177,13 +199,42 @@ title               = "Malicious package: {name}@{version} ({feed}:{id})"
 details = {
     purl, ecosystem, feed_source, advisory_id,
     advisory_url, summary, published_at,
+    affected_versions,   # versions the advisory lists, semver-sorted
+    affected_ranges,     # e.g. ">= 1.95.6, < 1.95.8", "all versions"
+    aliases,             # GHSA-… ids of the same advisory
+    links,               # the advisory's other http(s) references
 }
 ```
+
+The finding panel (`/findings/<pk>/panel/`) renders these in a
+"Malicious package" section: the installed package URL with its version,
+the compromised versions, and the advisory id and link (e.g.
+`https://github.com/advisories/GHSA-…`), with `links` under References.
+Findings raised before `affected_*` existed omit that row until the next
+match run refreshes their `details`.
 
 The `effective_priority` is set by `core.urgency.apply_score`, which
 hits the `Category.SUPPLY_CHAIN` short-circuit and lands as
 `PriorityBand.IMMEDIATE` regardless of severity / exposure / env /
 EPSS / KEV.
+
+### When it runs
+
+| Trigger | Scope | Why |
+|---|---|---|
+| Feed fetch (`enrich_fetch --source osv`, hourly) | the purls the zips touched | a newly published IoC reaches already-stored SBOMs |
+| SBOM ingest (`core.services.ingest`, every inventory cycle) | that image (`image=`) | re-observe the image's findings so `last_seen` stays ahead of `last_complete_inventory_at` |
+| `manage.py match_supply_chain` | everything, or `--purl` | manual re-scan after a logic change |
+
+The second row is what keeps a still-deployed malicious package in the
+default views. They show a finding only while
+`last_seen >= cluster.last_complete_inventory_at`, and a finding nothing
+re-observes falls behind with the next completed inventory. Matching only on
+the feed tick hid it for up to an hour after every cycle. The OSV
+vulnerability matcher runs at the same two points; both go through
+[`core.services.matching.emit_for_image`](../core/services/matching.py)
+and are listed in `ingest._image_matchers` — a new image-scoped matcher is
+one entry there.
 
 ### Lifecycle interactions
 
@@ -258,6 +309,12 @@ For automated coverage, see:
 - [core/tests/test_match_supply_chain_command.py](../core/tests/test_match_supply_chain_command.py) — command wrapper.
 - [core/tests/test_seed_supply_chain_command.py](../core/tests/test_seed_supply_chain_command.py) — smoke-test bootstrap.
 - [core/tests/test_views_ui_findings_supply_chain.py](../core/tests/test_views_ui_findings_supply_chain.py) — UI integration.
+- [core/tests/test_supply_chain_scoped_npm.py](../core/tests/test_supply_chain_scoped_npm.py) — real OSV advisories + the SBOM components of a real image
+  (`fixtures/supply_chain/`): versions that are not on the advisory are not
+  flagged, compromised ones are, bounded ranges, the finding panel — and the
+  whole 700-package image against every advisory that names one of its
+  packages (nothing flagged).
+- [core/tests/test_migration_0016_scoped_iocs.py](../core/tests/test_migration_0016_scoped_iocs.py) — rebuild of the wrongly stored scoped rows.
 - [core/tests/test_views_ui_components_list.py](../core/tests/test_views_ui_components_list.py) — components browse.
 - [core/tests/test_services_components.py](../core/tests/test_services_components.py) — components service queries.
 

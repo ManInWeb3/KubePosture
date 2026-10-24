@@ -56,13 +56,12 @@
 #       name: {type: [string, "null"]}
 #       key: {type: [string, "null"]}
 #   cronJob:
-#     description: One batch CronJob. Rendered by templates/cronjobs.yaml (+ a one-shot Job on install/upgrade when initialRun is true).
+#     description: One batch CronJob. Rendered by templates/cronjobs.yaml.
 #     type: object
 #     additionalProperties: false
 #     required: [schedule, command]
 #     properties:
 #       enabled: {type: boolean, default: true}
-#       initialRun: {type: boolean, default: false, description: Also run once as a post-install/upgrade Job.}
 #       schedule: {$ref: "#/definitions/cronSchedule"}
 #       command: {$ref: "#/definitions/command"}
 #       resources: {$ref: "#/definitions/resources"}
@@ -358,9 +357,12 @@ migration:
 # -- Batch CronJobs, keyed by name (kebab-cased into the resource name).
 # Extra entries may be added; each one follows the `cronJob` definition.
 #
-# Crons with initialRun: true also run once as a post-install/upgrade Job —
-# used for seeding EPSS/KEV data immediately instead of waiting for the next tick.
-# Crons without initialRun only run on their schedule.
+# Crons only run on their schedule. To run one now — e.g. to seed KEV / EPSS /
+# OSV right after the first install instead of waiting for the next tick —
+# start a Job from it by hand:
+#   kubectl -n <ns> create job --from=cronjob/<fullname>-<kebab-cased key> <job-name>
+# e.g. `--from=cronjob/kubeposture-enrich-kev seed-kev`
+# (see `kubectl -n <ns> get cronjob` for the exact names).
 #
 # Batch jobs run with requests == limits (Guaranteed QoS): a job is then
 # never evicted or OOM-killed because a *neighbour* spiked, only when it
@@ -378,7 +380,6 @@ cronJobs:
   # -- CISA KEV catalog — small (~1.5k rows), refreshed daily by CISA.
   enrichKev:
     enabled: true
-    initialRun: true            # seed KEV on install
     schedule: "15 3 * * *"      # daily 03:15 UTC
     command: ["python", "manage.py", "enrich_fetch", "--source", "kev"]
     resources:
@@ -398,7 +399,6 @@ cronJobs:
   # peak memory is one chunk, not the feed.
   enrichEpss:
     enabled: true
-    initialRun: true            # seed EPSS on install
     schedule: "30 3 * * *"      # daily 03:30 UTC (after KEV)
     command: ["python", "manage.py", "enrich_fetch", "--source", "epss"]
     resources:

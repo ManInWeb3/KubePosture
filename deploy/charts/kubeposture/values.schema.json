@@ -12,7 +12,7 @@
     },
     "cronJob": {
       "additionalProperties": false,
-      "description": "One batch CronJob. Rendered by templates/cronjobs.yaml (+ a one-shot Job on install/upgrade when initialRun is true).",
+      "description": "One batch CronJob. Rendered by templates/cronjobs.yaml.",
       "properties": {
         "activeDeadlineSeconds": {
           "default": 300,
@@ -25,11 +25,6 @@
         },
         "enabled": {
           "default": true,
-          "type": "boolean"
-        },
-        "initialRun": {
-          "default": false,
-          "description": "Also run once as a post-install/upgrade Job.",
           "type": "boolean"
         },
         "resources": {
@@ -190,7 +185,7 @@
       "additionalProperties": {
         "$ref": "#/definitions/cronJob"
       },
-      "description": "Batch CronJobs, keyed by name (kebab-cased into the resource name).\nExtra entries may be added; each one follows the `cronJob` definition.\n\nCrons with initialRun: true also run once as a post-install/upgrade Job —\nused for seeding EPSS/KEV data immediately instead of waiting for the next tick.\nCrons without initialRun only run on their schedule.\n\nBatch jobs run with requests == limits (Guaranteed QoS): a job is then\nnever evicted or OOM-killed because a *neighbour* spiked, only when it\nexceeds its own limit. Every command logs `command.finished ...\npeak_rss_mb=` on exit — size `memory` from those lines, not by guess\n(EPSS/KEV are sized already; the rest still carry their old 2Gi limit\nas the request until a few runs have been read), and keep /tmp on the\ndisk-backed emptyDir (`tmp.sizeLimit`), never `medium: Memory`, so a\nrunaway download evicts the pod instead of counting against its memory\nlimit.",
+      "description": "Batch CronJobs, keyed by name (kebab-cased into the resource name).\nExtra entries may be added; each one follows the `cronJob` definition.\n\nCrons only run on their schedule. To run one now — e.g. to seed KEV / EPSS /\nOSV right after the first install instead of waiting for the next tick —\nstart a Job from it by hand:\n  kubectl -n \u003cns\u003e create job --from=cronjob/\u003cfullname\u003e-\u003ckebab-cased key\u003e \u003cjob-name\u003e\ne.g. `--from=cronjob/kubeposture-enrich-kev seed-kev`\n(see `kubectl -n \u003cns\u003e get cronjob` for the exact names).\n\nBatch jobs run with requests == limits (Guaranteed QoS): a job is then\nnever evicted or OOM-killed because a *neighbour* spiked, only when it\nexceeds its own limit. Every command logs `command.finished ...\npeak_rss_mb=` on exit — size `memory` from those lines, not by guess\n(EPSS/KEV are sized already; the rest still carry their old 2Gi limit\nas the request until a few runs have been read), and keep /tmp on the\ndisk-backed emptyDir (`tmp.sizeLimit`), never `medium: Memory`, so a\nrunaway download evicts the pod instead of counting against its memory\nlimit.",
       "properties": {
         "enrichEpss": {
           "$ref": "#/definitions/cronJob",
