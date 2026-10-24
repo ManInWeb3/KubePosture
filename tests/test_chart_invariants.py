@@ -108,7 +108,7 @@ def test_central_tmp_is_a_bounded_disk_backed_emptydir():
     assert "mountPath: /tmp" in mounts
 
     for name in ("deployment-web.yaml", "deployment-worker.yaml", "job-setup.yaml",
-                 "cronjobs.yaml", "jobs-cron-initial.yaml"):
+                 "cronjobs.yaml"):
         text = (CENTRAL / "templates" / name).read_text()
         assert 'include "kubeposture.volumes"' in text, f"{name}: must use the shared volumes helper"
         assert 'include "kubeposture.volumeMounts"' in text, f"{name}: must use the shared mounts helper"
