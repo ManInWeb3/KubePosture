@@ -70,8 +70,15 @@ naming line up), else the OSV id. `pkg_name` / `installed_version` as
 the SBOM component, `fixed_version` from the matching interval,
 severity from GHSA's `database_specific.severity` (Go vulndb / RustSec
 entries carry none → `unknown`), CVSS vector kept, no CVSS score.
-`details`: `osv_ids`, `aliases`, `references`, `primary_link`
-(osv.dev). Priority: the normal tree, no short-circuit.
+`details`: `purl`, `osv_ids`, `aliases`, `references`, `primary_link`
+(osv.dev), `affected_ranges` (`>= 2.3.0, < 2.31.0`) and — only when the
+advisory has no ranges — `affected_versions` (capped at 50). Priority: the
+normal tree, no short-circuit.
+
+The finding panel (`/findings/<pk>/panel/`) shows the package URL, the
+affected versions, the aliases and the references of any finding. A Trivy
+finding records no purl, so the panel looks it up in the image's SBOM (same
+package name and version).
 
 ## Operations
 

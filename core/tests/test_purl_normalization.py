@@ -21,6 +21,7 @@ from core.purl import (
     normalize_purl,
     parse_purl_name_version,
     purl_ecosystem,
+    strip_version,
 )
 from core.services.components import component_detail, search_by_purls
 from core.services.supply_chain_matcher import match_iocs_to_components
@@ -206,3 +207,18 @@ def test_matcher_normalises_touched_purls(deployed_lodash):
     )
     assert n == 1
     assert Finding.objects.filter(source="supply_chain_ioc").count() == 1
+
+
+# ── strip_version ─────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("purl,expected", [
+    ("pkg:npm/lodash@4.17.21", "pkg:npm/lodash"),
+    ("pkg:npm/@types/node@20.0.0", "pkg:npm/@types/node"),
+    ("pkg:npm/@types/node", "pkg:npm/@types/node"),   # the scope's `@` is not a version
+    ("pkg:npm/lodash", "pkg:npm/lodash"),
+    ("pkg:deb/debian/libc6@2.36-9", "pkg:deb/debian/libc6"),
+    ("", ""),
+])
+def test_strip_version(purl, expected):
+    assert strip_version(purl) == expected

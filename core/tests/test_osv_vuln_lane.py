@@ -17,7 +17,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from django.contrib.auth.models import User
+from django.urls import reverse
 from django.utils import timezone
+from django.utils.html import escape
 
 from core.constants import Category, Environment, PriorityBand, Severity, Source
 from core.models import (
@@ -302,3 +305,34 @@ def test_sbom_ingest_runs_the_matcher_for_that_image(loaded):
     with patch.object(ingest, "match_osv_vulns") as m:
         ingest._after_sbom_upsert(loaded["image"])
     m.assert_called_once_with(image=loaded["image"])
+
+
+def test_finding_details_carry_the_affected_ranges(loaded):
+    """What the finding panel shows as "Affected versions". An interval says
+    it all, so PyPI's 66 enumerated `requests` releases are not stored next
+    to it."""
+    match_osv_vulns()
+
+    lodash = _osv_findings(pkg_name="lodash").get().details
+    assert (lodash["affected_ranges"], lodash["affected_versions"]) == (["< 4.17.21"], [])
+    requests = _osv_findings(pkg_name="requests").get().details
+    assert requests["affected_ranges"] == [">= 2.3.0, < 2.31.0"]
+    assert requests["affected_versions"] == []
+    stdlib = _osv_findings(pkg_name="stdlib").get().details
+    assert stdlib["affected_ranges"] == ["< 1.19.6", ">= 1.20.0-0, < 1.20.1"]
+
+
+def test_finding_panel_shows_purl_affected_versions_aliases_and_links(client, loaded):
+    match_osv_vulns()
+    f = _osv_findings(pkg_name="lodash").get()
+    client.force_login(User.objects.create_user(username="osv-panel", password="x"))
+
+    body = client.get(reverse("findings-detail-panel", args=[f.pk])).content.decode()
+
+    assert "Package URL" in body and "pkg:npm/lodash@4.17.20" in body
+    assert "Affected versions" in body and "&lt; 4.17.21" in body
+    assert "Also known as" in body and "GHSA-35jh-r3h4-6jhm" in body
+    # The advisory's references are listed, next to the osv.dev link.
+    assert f'href="{f.details["primary_link"]}"' in body
+    assert f.details["references"]
+    assert f'href="{escape(f.details["references"][0])}"' in body

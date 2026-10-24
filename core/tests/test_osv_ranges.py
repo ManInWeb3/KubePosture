@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from core.osv_ranges import evaluate
+from core.osv_ranges import covers_version, describe_blocks, evaluate, ioc_purls
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "osv" / "advisories"
 
@@ -172,3 +172,84 @@ def test_unparsable_version_is_unsupported_not_affected():
     ranges = [{"type": "SEMVER", "events": [{"introduced": "0"}]}]
     res = evaluate("not-a-version", versions=[], ranges=ranges)
     assert not res.affected and res.unsupported
+
+
+# ── malicious-package blocks (IoC lane) ─────────────────────────
+
+
+def _mal_block(**kw) -> dict:
+    return {"package": {"name": "@tanstack/x", "ecosystem": "npm", "purl": "pkg:npm/%40tanstack/x"},
+            **kw}
+
+
+def test_ioc_purls_scoped_package_with_versions_is_one_purl_per_version():
+    """The scope's own `@` is not a version separator."""
+    block = _mal_block(versions=["1.167.9", "1.167.6", "1.167.9"])
+    assert ioc_purls(block, "npm") == ["pkg:npm/@tanstack/x@1.167.9", "pkg:npm/@tanstack/x@1.167.6"]
+
+
+def test_ioc_purls_ranges_only_block_is_name_only_scoped_or_not():
+    ranges = [{"type": "SEMVER", "events": [{"introduced": "0"}]}]
+    assert ioc_purls(_mal_block(ranges=ranges), "npm") == ["pkg:npm/@tanstack/x"]
+    plain = {"package": {"name": "evil-pkg"}, "ranges": ranges}
+    assert ioc_purls(plain, "npm") == ["pkg:npm/evil-pkg"]
+
+
+def test_ioc_purls_explicit_versioned_purl_wins_over_versions():
+    block = {"package": {"name": "lodash", "purl": "pkg:npm/lodash@4.17.21"},
+             "versions": ["4.17.20"]}
+    assert ioc_purls(block, "npm") == ["pkg:npm/lodash@4.17.21"]
+    scoped = {"package": {"name": "@s/p", "purl": "pkg:npm/%40s/p@1.0.0"}}
+    assert ioc_purls(scoped, "npm") == ["pkg:npm/@s/p@1.0.0"]
+
+
+def test_ioc_purls_block_without_a_package_name_yields_nothing():
+    assert ioc_purls({"versions": ["1.0.0"]}, "npm") == []
+    assert ioc_purls({"package": {"name": "x"}, "versions": ["1.0.0"]}, "") == []
+
+
+@pytest.mark.parametrize("version,expected", [
+    ("1.95.5", False), ("1.95.6", True), ("1.95.7", True), ("1.95.8", False), ("1.98.4", False),
+])
+def test_covers_version_bounded_semver_range(version, expected):
+    events = [{"introduced": "1.95.6"}, {"fixed": "1.95.8"}]
+    block = {"ranges": [{"type": "SEMVER", "events": events}]}
+    assert covers_version(version, block) is expected
+
+
+def test_covers_version_enumerated_versions():
+    block = {"versions": ["1.167.6", "1.167.9"]}
+    assert covers_version("1.167.9", block) and not covers_version("1.168.1", block)
+
+
+@pytest.mark.parametrize("block", [
+    {"ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}]}]},   # the whole package
+    {"ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}]}]},  # not interpreted
+    {"ranges": [{"type": "GIT", "events": [{"introduced": "deadbeef"}]}]},
+    {},
+])
+def test_covers_version_fails_open_for_what_it_cannot_interpret(block):
+    assert covers_version("3.1.4", block)
+
+
+def test_covers_version_unparsable_version_counts_as_covered():
+    events = [{"introduced": "1.0.0"}, {"fixed": "2.0.0"}]
+    block = {"ranges": [{"type": "SEMVER", "events": events}]}
+    assert covers_version("not-a-version", block)
+
+
+def test_describe_blocks_orders_versions_and_words_the_ranges():
+    versions, ranges = describe_blocks([
+        {"versions": ["1.10.0", "1.2.0", "weird"]},
+        {"versions": ["1.2.0"], "ranges": [
+            {"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "0.5.0"},
+                                          {"introduced": "1.95.6"}, {"fixed": "1.95.8"},
+                                          {"introduced": "3.0.0"}, {"last_affected": "3.2.0"},
+                                          {"introduced": "4.0.0"}]},
+            {"type": "SEMVER", "events": [{"introduced": "0"}]},
+            {"type": "GIT", "events": [{"introduced": "deadbeef"}]},
+        ]},
+    ])
+    assert versions == ["1.2.0", "1.10.0", "weird"]
+    assert ranges == ["< 0.5.0", ">= 1.95.6, < 1.95.8", ">= 3.0.0, <= 3.2.0", ">= 4.0.0",
+                      "all versions"]

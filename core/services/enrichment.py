@@ -38,7 +38,7 @@ from core.models import (
     SbomComponent,
     SupplyChainIoc,
 )
-from core.purl import normalize_purl
+from core.osv_ranges import ioc_purls
 from core.urgency import finding_ids, recompute_ids
 
 log = logging.getLogger("core.enrichment")
@@ -555,27 +555,6 @@ def _is_malicious_advisory(advisory: dict) -> bool:
     return False
 
 
-def _affected_versions(affected: dict) -> list[str]:
-    """Pull explicit versions from an OSV `affected[]` block.
-
-    Walks `versions[]` if present; otherwise walks `ranges[].events[]`
-    for `introduced` entries. Returns a deduped list. Empty when only
-    a SEMVER range is given (we don't expand ranges in v1).
-    """
-    versions: list[str] = []
-    for v in affected.get("versions") or []:
-        if v and v not in versions:
-            versions.append(v)
-    if versions:
-        return versions
-    for rng in affected.get("ranges") or []:
-        for ev in rng.get("events") or []:
-            v = ev.get("introduced")
-            if v and v != "0" and v not in versions:
-                versions.append(v)
-    return versions
-
-
 def _upsert_ioc_rows(advisory: dict, osv_eco: str, touched_purls: set[str]) -> int:
     """One malicious-package advisory → `SupplyChainIoc` rows (one per
     affected purl). Returns the number of rows touched."""
@@ -593,27 +572,11 @@ def _upsert_ioc_rows(advisory: dict, osv_eco: str, touched_purls: set[str]) -> i
 
     n = 0
     for affected in advisory.get("affected") or []:
-        pkg = affected.get("package") or {}
-        name_ = pkg.get("name") or ""
-        explicit_purl = normalize_purl(pkg.get("purl") or "")
-        versions = _affected_versions(affected)
-        if explicit_purl and "@" in explicit_purl:
-            purls = [explicit_purl]
-        elif purl_eco and name_ and versions:
-            purls = [f"pkg:{purl_eco}/{name_}@{v}" for v in versions]
-        elif purl_eco and name_:
-            # No explicit version (typically a ranges-only
-            # `introduced: "0"` block: every version is
-            # malicious) → store the name-only purl as a
-            # sentinel; the matcher matches it against
-            # every version of that package (see
-            # supply_chain_matcher's name-purl match).
-            purls = [f"pkg:{purl_eco}/{name_}"]
-        else:
-            continue
-
+        # One purl per enumerated version, or a name-only purl when the
+        # block only has ranges (`core.osv_ranges.ioc_purls`); the
+        # matcher resolves a name-only IoC against the block's ranges.
+        purls = ioc_purls(affected, purl_eco or "")
         for purl in purls:
-            purl = normalize_purl(purl)
             SupplyChainIoc.objects.update_or_create(
                 feed_source="osv",
                 advisory_id=advisory_id,

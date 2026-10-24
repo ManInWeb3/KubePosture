@@ -28,7 +28,7 @@ from django.utils import timezone
 
 from core.constants import Category, Severity, Source
 from core.models import Finding, Image, OsvAffected, SbomComponent, WorkloadImageObservation
-from core.osv_ranges import evaluate
+from core.osv_ranges import describe_blocks, evaluate
 from core.purl import normalize_purl, parse_purl_name_version
 from core.services.dedup import upsert_findings
 
@@ -41,6 +41,10 @@ SUPPORTED_PURL_TYPES = frozenset({
 })
 
 _COMPONENT_CHUNK = 2000
+# Enumerated affected versions kept on a finding when the advisory has no
+# ranges: PyPI / Maven list every affected release, and the list is stored
+# once per finding.
+_MAX_AFFECTED_VERSIONS = 50
 _SEVERITY_RANK = {
     Severity.CRITICAL.value: 4, Severity.HIGH.value: 3, Severity.MEDIUM.value: 2,
     Severity.LOW.value: 1, Severity.INFO.value: 0, Severity.UNKNOWN.value: -1, "": -1,
@@ -143,7 +147,7 @@ def _matches_for_image(components: list[SbomComponent], affected: dict) -> list[
             key = _vuln_id(ids)
             m = by_vuln.setdefault(key, {
                 "ids": set(), "osv_ids": set(), "fixed": "", "severity": "",
-                "cvss_vector": "", "summary": "", "references": [],
+                "cvss_vector": "", "summary": "", "references": [], "blocks": [],
             })
             m["ids"] |= ids
             m["osv_ids"].add(adv.osv_id)
@@ -153,8 +157,14 @@ def _matches_for_image(components: list[SbomComponent], affected: dict) -> list[
             m["cvss_vector"] = m["cvss_vector"] or adv.cvss_vector
             m["summary"] = m["summary"] or adv.summary
             m["references"] = m["references"] or list(adv.references or [])
+            m["blocks"].append({"versions": row.versions or [], "ranges": row.ranges or []})
         for vuln_id, m in by_vuln.items():
             severity = m["severity"] or Severity.UNKNOWN.value
+            affected_versions, affected_ranges = describe_blocks(m["blocks"])
+            if affected_ranges:
+                # The intervals say it all; PyPI / Maven also enumerate
+                # every release inside them.
+                affected_versions = []
             title = f"{vuln_id}: {m['summary']}" if m["summary"] else f"{vuln_id} in {comp.name}"
             out.append({
                 "source": Source.OSV.value,
@@ -173,6 +183,8 @@ def _matches_for_image(components: list[SbomComponent], affected: dict) -> list[
                     "osv_ids": sorted(m["osv_ids"]),
                     "aliases": sorted(m["ids"] - {vuln_id}),
                     "references": m["references"][:5],
+                    "affected_versions": affected_versions[:_MAX_AFFECTED_VERSIONS],
+                    "affected_ranges": affected_ranges,
                     "summary": m["summary"],
                     "primary_link": f"https://osv.dev/vulnerability/{sorted(m['osv_ids'])[0]}",
                 },

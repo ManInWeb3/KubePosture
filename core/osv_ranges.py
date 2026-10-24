@@ -19,9 +19,12 @@ reported as unsupported instead.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import semver
+
+from core.purl import normalize_purl, parse_purl_name_version
 
 
 @dataclass(frozen=True)
@@ -129,3 +132,87 @@ def evaluate(version: str, *, versions: list[str], ranges: list[dict]) -> Evalua
     if not versions and any(r.get("type") == "ECOSYSTEM" for r in ranges):
         unsupported = True
     return Evaluation(False, "", unsupported) if unsupported else NOT_AFFECTED
+
+
+# ── Malicious-package blocks (the IoC lane) ─────────────────────────
+#
+# Malicious-package advisories (MAL-*) use the same `affected[]` shape,
+# but the IoC lane matches purls, not ranges: a block is first turned into
+# `SupplyChainIoc` purls (`ioc_purls`), and a block that only has ranges
+# is stored as a name-only purl whose version is checked at match time
+# (`covers_version`).
+
+
+def ioc_purls(affected: dict, purl_type: str) -> list[str]:
+    """`SupplyChainIoc` purls for one `affected[]` block of a malicious
+    advisory:
+
+    - a `package.purl` that carries a version → that purl;
+    - an enumerated `versions[]` → one exact purl per version;
+    - otherwise (ranges only, typically `introduced: "0"`) → the name-only
+      purl, meaning "some versions of this package": the matcher decides
+      per component with `covers_version`.
+
+    "Carries a version" is decided by parsing the purl, never by looking
+    for an `@`: a scoped npm name (`pkg:npm/@scope/pkg`, which is how OSV
+    publishes `%40scope`) has one, and mistaking it for a version
+    separator stored the name-only purl for advisories that list their
+    compromised versions — flagging every version of the package.
+
+    Empty when the block names no package.
+    """
+    pkg = affected.get("package") or {}
+    name = pkg.get("name") or ""
+    explicit = normalize_purl(pkg.get("purl") or "")
+    if explicit and parse_purl_name_version(explicit)[1]:
+        return [explicit]
+    if not (purl_type and name):
+        return []
+    versions = [v for v in affected.get("versions") or [] if isinstance(v, str) and v]
+    if versions:
+        return [normalize_purl(f"pkg:{purl_type}/{name}@{v}") for v in dict.fromkeys(versions)]
+    return [normalize_purl(f"pkg:{purl_type}/{name}")]
+
+
+def covers_version(version: str, affected: dict) -> bool:
+    """Is `version` inside a malicious-package block? Fails open: a block
+    with nothing this module can interpret (no `versions[]`, no SEMVER
+    range — ECOSYSTEM/GIT only), or a version that doesn't parse, counts
+    as covered, because for malware the cost of a miss outweighs a false
+    alarm, and the name-only IoC always meant "every version"."""
+    versions = [v for v in affected.get("versions") or [] if isinstance(v, str)]
+    ranges = [r for r in affected.get("ranges") or [] if isinstance(r, dict)]
+    if not versions and not any(r.get("type") == "SEMVER" for r in ranges):
+        return True
+    res = evaluate(version, versions=versions, ranges=ranges)
+    return res.affected or res.unsupported
+
+
+def _interval_text(lo: str, hi: str | None, inclusive: bool) -> str:
+    if lo == "0":
+        return "all versions" if hi is None else f"{'<=' if inclusive else '<'} {hi}"
+    if hi is None:
+        return f">= {lo}"
+    return f">= {lo}, {'<=' if inclusive else '<'} {hi}"
+
+
+def _version_sort_key(version: str):
+    parsed = parse_version(version)
+    return (0, parsed, version) if parsed is not None else (1, semver.Version(0), version)
+
+
+def describe_blocks(blocks: Iterable[dict]) -> tuple[list[str], list[str]]:
+    """`(versions, ranges)` of the blocks as a person reads them: the
+    enumerated versions (semver order, unparsable ones last) and one text
+    per interval (`>= 1.95.6, < 1.95.8`, `all versions`)."""
+    versions: dict[str, None] = {}
+    ranges: dict[str, None] = {}
+    for block in blocks:
+        for v in block.get("versions") or []:
+            if isinstance(v, str) and v:
+                versions[v] = None
+        for r in block.get("ranges") or []:
+            if isinstance(r, dict) and r.get("type") in ("SEMVER", "ECOSYSTEM"):
+                for lo, hi, inclusive in _intervals(r.get("events") or []):
+                    ranges[_interval_text(lo, hi, inclusive)] = None
+    return sorted(versions, key=_version_sort_key), list(ranges)

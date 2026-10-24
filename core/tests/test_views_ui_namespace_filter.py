@@ -120,3 +120,38 @@ def test_partial_without_cluster_lists_every_namespace(authed, two_clusters):
     assert {"ns-alpha", "ns-beta"} <= set(_options(select))
     assert re.search(r'value="ns-beta"[^>]*selected', select)
     assert "api-cb" in body and "api-ca" not in body
+
+
+# ── response shape (what the browser's HTML parser sees) ───────────
+
+
+@pytest.mark.parametrize("url_name,target", [
+    ("workloads-list", "workload-rows"),
+    ("images-list", "image-rows"),
+])
+def test_partial_puts_rows_before_the_oob_select(authed, two_clusters, url_name, target):
+    """htmx parses the partial inside a `<template>`, and the parser picks
+    the template's insertion mode from the first start tag: a leading
+    `<select>` means "in body", which drops every `<tr>`/`<td>` after it and
+    renders the table as one flat run of text. The partial must therefore
+    open with a `<tr>` and carry the OOB `<select>` after the last row."""
+    body = authed.get(reverse(url_name), {"cluster": "ca"},
+                      HTTP_HX_REQUEST="true", HTTP_HX_TARGET=target).content.decode()
+    assert body.lstrip().startswith("<tr"), body[:200]
+    assert body.rindex("</tr>") < body.index('<select name="namespace"')
+
+
+@pytest.mark.parametrize("url_name,target", [
+    ("workloads-list", "workload-rows"),
+    ("images-list", "image-rows"),
+])
+def test_namespace_select_template_comment_does_not_leak(authed, two_clusters, url_name, target):
+    """Django's `{# #}` is single-line only; a multi-line one renders its
+    text verbatim — into the filter bar on the full page and into the swapped
+    rows on the partial."""
+    full = authed.get(reverse(url_name)).content.decode()
+    partial = authed.get(reverse(url_name), {"cluster": "ca"},
+                         HTTP_HX_REQUEST="true", HTTP_HX_TARGET=target).content.decode()
+    for body in (full, partial):
+        assert "{#" not in body and "#}" not in body
+        assert "Namespace filter dropdown" not in body

@@ -52,6 +52,20 @@ def parse_purl_name_version(purl: str) -> tuple[str, str]:
     return name_part, ""
 
 
+def strip_version(purl: str) -> str:
+    """The purl without its trailing `@<version>`:
+        pkg:npm/@types/node@20.0.0 → pkg:npm/@types/node
+        pkg:npm/lodash             → pkg:npm/lodash          # nothing to strip
+
+    Python twin of `core.models.sbom_component.name_purl_expr`. Meant for
+    plain `pkg:type/name[@version]` purls such as IoC purls — qualifiers
+    and subpaths are not handled.
+    """
+    _name, version = parse_purl_name_version(purl)
+    suffix = f"@{version}"
+    return purl[: -len(suffix)] if version and purl.endswith(suffix) else purl
+
+
 def normalize_purl(purl: str) -> str:
     """Normalise a purl received from external sources.
 
