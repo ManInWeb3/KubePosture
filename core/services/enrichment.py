@@ -28,6 +28,7 @@ from django.db import OperationalError, connection, transaction
 from django.utils import timezone
 
 from core.constants import Severity
+from core.iterutils import chunked
 from core.models import (
     EpssScore,
     FeedFetchState,
@@ -355,17 +356,6 @@ def _refresh_finding_kev_cache() -> list[int]:
 _UPSERT_CHUNK_SIZE = 5000
 
 
-def _chunked(items: Iterable, size: int) -> Iterator[list]:
-    chunk: list = []
-    for item in items:
-        chunk.append(item)
-        if len(chunk) >= size:
-            yield chunk
-            chunk = []
-    if chunk:
-        yield chunk
-
-
 def _parse_epss_rows(lines: Iterable[str]) -> Iterator[tuple[str, float, float]]:
     """FIRST.org CSV (`cve,epss,percentile`): skip blank rows, the
     `#model_version` preamble and the header; drop unparsable rows."""
@@ -392,7 +382,7 @@ def _load_epss_rows(lines: Iterable[str], *, source: str) -> int:
     """
     run_started = timezone.now()
     n = 0
-    for chunk in _chunked(_parse_epss_rows(lines), _UPSERT_CHUNK_SIZE):
+    for chunk in chunked(_parse_epss_rows(lines), _UPSERT_CHUNK_SIZE):
         EpssScore.objects.bulk_create(
             [EpssScore(vuln_id=cve, score=score, percentile=pct) for cve, score, pct in chunk],
             update_conflicts=True,
@@ -459,7 +449,7 @@ def load_kev_from_file(path: str) -> int:
 
     run_started = timezone.now()
     n = 0
-    for chunk in _chunked(vulns, _UPSERT_CHUNK_SIZE):
+    for chunk in chunked(vulns, _UPSERT_CHUNK_SIZE):
         KevEntry.objects.bulk_create(
             [
                 KevEntry(

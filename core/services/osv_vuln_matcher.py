@@ -22,15 +22,15 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from collections.abc import Iterable, Iterator
 
 from django.utils import timezone
 
 from core.constants import Category, Severity, Source
-from core.models import Finding, Image, OsvAffected, SbomComponent, WorkloadImageObservation
+from core.iterutils import chunked
+from core.models import Finding, Image, OsvAffected, SbomComponent
 from core.osv_ranges import describe_blocks, evaluate
 from core.purl import normalize_purl, parse_purl_name_version
-from core.services.dedup import upsert_findings
+from core.services.matching import emit_for_image
 
 log = logging.getLogger("core.osv_matcher")
 
@@ -72,17 +72,6 @@ def _component_key(comp: SbomComponent) -> tuple[str, str, str]:
     purl = normalize_purl(comp.purl)
     name, version = parse_purl_name_version(purl)
     return comp.ecosystem, package_name(comp.ecosystem, name), version or comp.version
-
-
-def _chunked(items: Iterable, size: int) -> Iterator[list]:
-    chunk: list = []
-    for item in items:
-        chunk.append(item)
-        if len(chunk) >= size:
-            yield chunk
-            chunk = []
-    if chunk:
-        yield chunk
 
 
 def _affected_rows(keys: set[tuple[str, str]]) -> dict[tuple[str, str], list[OsvAffected]]:
@@ -193,31 +182,18 @@ def _matches_for_image(components: list[SbomComponent], affected: dict) -> list[
     return out
 
 
-def _emit(image: Image, matches: list[dict], now) -> int:
-    observations = list(
-        WorkloadImageObservation.objects
-        .filter(image=image, currently_deployed=True)
-        .select_related("workload", "workload__cluster")
-    )
-    if not observations:
-        return 0
-    total = 0
-    for obs in observations:
-        workload = obs.workload
+def _without_trivy_covered(image: Image):
+    """`emit_for_image` filter: per workload, drop the matches Trivy
+    already reports there under any of the advisory's ids, and the matcher's
+    private `_ids` key."""
+    def for_workload(workload, matches):
         covered = _trivy_coverage(workload.id, image.id)
-        dicts = []
-        for m in matches:
-            if any((i, m["pkg_name"], m["installed_version"]) in covered for i in m["_ids"]):
-                continue
-            dicts.append({k: v for k, v in m.items() if k != "_ids"})
-        if not dicts:
-            continue
-        created, updated = upsert_findings(
-            cluster=workload.cluster, workload=workload, image=image,
-            findings=dicts, observation_time=now,
-        )
-        total += created + updated
-    return total
+        return [
+            {k: v for k, v in m.items() if k != "_ids"}
+            for m in matches
+            if not any((i, m["pkg_name"], m["installed_version"]) in covered for i in m["_ids"])
+        ]
+    return for_workload
 
 
 def match_osv_vulns(*, image: Image | None = None) -> int:
@@ -233,7 +209,7 @@ def match_osv_vulns(*, image: Image | None = None) -> int:
 
     now = timezone.now()
     total = 0
-    for chunk in _chunked(comps.iterator(chunk_size=_COMPONENT_CHUNK), _COMPONENT_CHUNK):
+    for chunk in chunked(comps.iterator(chunk_size=_COMPONENT_CHUNK), _COMPONENT_CHUNK):
         # One lookup of the advisory tables per chunk, then per-image emission.
         affected = _affected_rows({_component_key(c)[:2] for c in chunk})
         if not affected:
@@ -244,7 +220,10 @@ def match_osv_vulns(*, image: Image | None = None) -> int:
         for image_id, components in by_image.items():
             matches = _matches_for_image(components, affected)
             if matches:
-                total += _emit(components[0].image, matches, now)
+                scanned = components[0].image
+                total += emit_for_image(
+                    scanned, matches, now, for_workload=_without_trivy_covered(scanned),
+                )
     log.info(
         "osv_matcher.done",
         extra={"image": image.digest if image else "all", "findings_touched": total},

@@ -218,6 +218,24 @@ hits the `Category.SUPPLY_CHAIN` short-circuit and lands as
 `PriorityBand.IMMEDIATE` regardless of severity / exposure / env /
 EPSS / KEV.
 
+### When it runs
+
+| Trigger | Scope | Why |
+|---|---|---|
+| Feed fetch (`enrich_fetch --source osv`, hourly) | the purls the zips touched | a newly published IoC reaches already-stored SBOMs |
+| SBOM ingest (`core.services.ingest`, every inventory cycle) | that image (`image=`) | re-observe the image's findings so `last_seen` stays ahead of `last_complete_inventory_at` |
+| `manage.py match_supply_chain` | everything, or `--purl` | manual re-scan after a logic change |
+
+The second row is what keeps a still-deployed malicious package in the
+default views. They show a finding only while
+`last_seen >= cluster.last_complete_inventory_at`, and a finding nothing
+re-observes falls behind with the next completed inventory. Matching only on
+the feed tick hid it for up to an hour after every cycle. The OSV
+vulnerability matcher runs at the same two points; both go through
+[`core.services.matching.emit_for_image`](../core/services/matching.py)
+and are listed in `ingest._image_matchers` — a new image-scoped matcher is
+one entry there.
+
 ### Lifecycle interactions
 
 - **Workload undeployed.** The matcher's join requires

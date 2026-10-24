@@ -26,6 +26,7 @@ from core.parsers import kyverno as kyverno_parser
 from core.parsers import trivy as trivy_parser
 from core.services.dedup import upsert_findings
 from core.services.osv_vuln_matcher import match_osv_vulns
+from core.services.supply_chain_matcher import match_iocs_to_components
 from core.signals import SIGNALS
 
 log = logging.getLogger("core.ingest")
@@ -354,17 +355,33 @@ def _process_sbom(item: IngestQueue, parser_func) -> dict:
     return {"components": len(components), "created": created, "updated": updated}
 
 
+def _image_matchers():
+    """The matchers that run per image at SBOM ingest, as (log label,
+    callable): each takes `image=` and bumps `last_seen` on its findings
+    (see `core.services.matching`). A new image-scoped matcher belongs
+    here. Resolved on call, so tests can patch a matcher by name."""
+    return (
+        ("osv", match_osv_vulns),
+        ("supply_chain", match_iocs_to_components),
+    )
+
+
 def _after_sbom_upsert(image: Image) -> None:
-    """Match this image's fresh component set against the OSV advisory
-    tables. Every inventory cycle re-posts the SbomReport, so running the
-    matcher here keeps OSV findings' `last_seen` in step with the cycle
-    the same way Trivy's own VulnerabilityReports do for theirs. A matcher
-    failure is logged, not raised: the SBOM upsert above is the item's
-    job and has already happened."""
-    try:
-        match_osv_vulns(image=image)
-    except Exception:  # noqa: BLE001 — never fail the queue item for the side lane
-        log.exception("ingest.sbom.osv_match_failed", extra={"image_digest": image.digest})
+    """Match this image's fresh component set against every feed.
+
+    Every inventory cycle re-posts the SbomReport, so matching here keeps
+    the matchers' findings' `last_seen` in step with the cycle the same way
+    Trivy's own VulnerabilityReports do for theirs — a finding nothing
+    re-observes falls behind `last_complete_inventory_at` and leaves the
+    default views. One matcher failing is logged, not raised, and doesn't
+    stop the others: the SBOM upsert above is the item's job and has
+    already happened."""
+    for label, matcher in _image_matchers():
+        try:
+            matcher(image=image)
+        except Exception:  # noqa: BLE001 — never fail the queue item for a side lane
+            log.exception(f"ingest.sbom.{label}_match_failed",
+                          extra={"image_digest": image.digest})
 
 
 # ── Top-level dispatch --------------------------------------------
