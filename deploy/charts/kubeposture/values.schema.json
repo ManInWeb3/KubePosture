@@ -575,7 +575,9 @@
           "required": []
         }
       },
-      "required": [],
+      "required": [
+        "nameSuffixOverride"
+      ],
       "title": "setupJob",
       "type": "object"
     },
