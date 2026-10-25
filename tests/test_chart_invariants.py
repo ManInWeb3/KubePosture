@@ -93,6 +93,50 @@ def test_every_cronjob_runs_with_guaranteed_qos():
     assert res["requests"] == res["limits"], "wait-for-db init container"
 
 
+def test_migrations_are_applied_once_per_release_by_the_setup_job():
+    """`manage.py migrate` has no cross-process lock: two web replicas
+    rolling out together (or a replica and the setup Job) race on the same
+    DDL and one of them fails on `relation already exists`. Only the setup
+    Job applies migrations; web and worker pods block on `migrate --check`
+    instead, so a new image never serves on an old schema and the Job is
+    the single writer."""
+    templates = CENTRAL / "templates"
+    appliers = sorted(p.name for p in templates.iterdir()
+                      if "manage.py migrate --noinput" in p.read_text())
+    assert appliers == ["job-setup.yaml"], appliers
+
+    helpers = (templates / "_helpers.tpl").read_text()
+    block = helpers.split('define "kubeposture.waitForMigrations"')[1].split("{{- end }}")[0]
+    assert "manage.py migrate --check" in block
+    assert "setup_rbac" not in block and "createsuperuser" not in block
+    assert "toYaml .Values.migration.resources" in block
+
+    for name in ("deployment-web.yaml", "deployment-worker.yaml"):
+        text = (templates / name).read_text()
+        assert 'include "kubeposture.waitForMigrations"' in text, name
+        assert text.index('include "kubeposture.waitForDb"') < text.index('include "kubeposture.waitForMigrations"'), (
+            f"{name}: wait for the DB before asking it about migrations"
+        )
+
+    # The worker is a CronJob; its pod QoS is decided by every container.
+    res = _values(CENTRAL)["migration"]["resources"]
+    assert res["requests"] == res["limits"], "wait-for-migrations must keep the worker pod Guaranteed"
+
+
+def test_setup_job_needs_no_deploy_tool_specific_settings():
+    """The Job is named after its content (see tests/test_chart_render.py),
+    so it is a plain resource under Helm, ArgoCD and Flux alike: no hook,
+    no `Replace=true`, no sync-wave in the chart or its defaults."""
+    templates = CENTRAL / "templates"
+    job = (templates / "job-setup.yaml").read_text()
+    assert 'name: {{ include "kubeposture.setupJobName" . }}' in job
+    assert "helm.sh/hook" not in job and "argocd" not in job.replace("ArgoCD", "")
+    helpers = (templates / "_helpers.tpl").read_text()
+    suffix = helpers.split('define "kubeposture.setupJobSuffix"')[1].split("{{- end }}\n\n")[0]
+    assert "sha256sum" in suffix and ".Values" in suffix and ".Chart.AppVersion" in suffix
+    assert _values(CENTRAL)["setupJob"]["annotations"] == {}
+
+
 def test_central_tmp_is_a_bounded_disk_backed_emptydir():
     """Every central pod gets its volumes from the shared
     `kubeposture.volumes` helper, and that helper's /tmp is a bounded,

@@ -24,6 +24,30 @@ If release name contains chart name it will be used as a full name.
 {{- end }}
 
 {{/*
+Suffix of the setup Job's name: a hash of the chart version, the app
+version and every value, so a changed Job is a new object. A Job's pod
+template is immutable; with a fixed name every release would need
+`helm upgrade --force`, Argo's `Replace=true` or a hook. With this one
+Helm creates the new Job and deletes the old, and ArgoCD prunes it.
+`setupJob.nameSuffixOverride` pins it.
+*/}}
+{{- define "kubeposture.setupJobSuffix" -}}
+{{- if .Values.setupJob.nameSuffixOverride -}}
+{{- .Values.setupJob.nameSuffixOverride -}}
+{{- else -}}
+{{- printf "%s-%s-%s" .Chart.Version .Chart.AppVersion (.Values | toYaml | b64enc) | sha256sum | trunc 7 -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+`<fullname>-setup-<suffix>`, at most 63 characters (a Job name is a label value).
+*/}}
+{{- define "kubeposture.setupJobName" -}}
+{{- $name := include "kubeposture.fullname" . | trunc 49 | trimSuffix "-" -}}
+{{- printf "%s-setup-%s" $name (include "kubeposture.setupJobSuffix" .) | trunc 63 | trimSuffix "-" -}}
+{{- end }}
+
+{{/*
 Create chart name and version as used by the chart label.
 */}}
 {{- define "kubeposture.chart" -}}
@@ -172,4 +196,35 @@ Pass the root context (.) — needs .Values.image and the env helper.
     limits:
       cpu: 100m
       memory: 128Mi
+{{- end }}
+
+{{/*
+Block until the setup Job has applied every migration. `migrate --check`
+exits non-zero while unapplied migrations exist and never applies them, so
+the Job stays the only writer (two `migrate` runs race on the same DDL) and
+a new image cannot serve on an old schema. If the Job fails, the rollout
+stalls here and the previous pods keep serving. Run after waitForDb.
+*/}}
+{{- define "kubeposture.waitForMigrations" -}}
+- name: wait-for-migrations
+  image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+  imagePullPolicy: {{ .Values.image.pullPolicy }}
+  command:
+    - /bin/sh
+    - -c
+    - |
+      echo "Waiting for migrations (applied by the setup Job)..."
+      until python manage.py migrate --check --noinput >/dev/null 2>&1; do
+        echo "  unapplied migrations remain, retrying in 5s..."
+        sleep 5
+      done
+      echo "Migrations applied."
+  env:
+    {{- include "kubeposture.env" . | nindent 4 }}
+  volumeMounts:
+    {{- include "kubeposture.volumeMounts" . | nindent 4 }}
+  securityContext:
+    {{- include "kubeposture.securityContext" . | nindent 4 }}
+  resources:
+    {{- toYaml .Values.migration.resources | nindent 4 }}
 {{- end }}
