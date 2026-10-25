@@ -26,6 +26,14 @@ from core.services.inventory import (
 from core.urgency import finding_ids, recompute_ids
 
 
+def _live_findings(cluster=None):
+    """The findings the findings and workloads pages list: default-filtered,
+    on currently-deployed images (plus image-less rows). Every scope counts
+    this one set, so a finding on an image the workload rolled away from
+    drops out of the trend with the pages, not a cycle or two later."""
+    return restrict_to_currently_deployed_images(default_finding_qs(cluster=cluster))
+
+
 def grouped_counts(qs, key: str) -> tuple[dict, dict]:
     """`(severity_counts_by_key, priority_counts_by_key)` for the findings
     in `qs`, in two GROUP BY queries. `key` is the column the targets are
@@ -88,10 +96,10 @@ def _namespace_rows(namespaces: Iterable[Namespace], *, findings) -> list[Snapsh
 
 
 def _workload_heartbeat_rows(workloads: Iterable[Workload], *, findings) -> list[Snapshot]:
-    """Continuity rows for deployed workloads, counting findings on their
-    currently-deployed images (plus image-less rows) — the same scope the
-    reap's event path and the workload-detail page use."""
-    severity, priority = grouped_counts(restrict_to_currently_deployed_images(findings), "workload_id")
+    """Continuity rows for deployed workloads, counted from `findings`
+    (the live set: see `_live_findings`) — the same scope the reap's event
+    path and the workload-detail page use."""
+    severity, priority = grouped_counts(findings, "workload_id")
     return [
         snapshot_row(
             SnapshotScope.WORKLOAD.value, cluster_id=w.cluster_id, namespace_id=w.namespace_id, workload=w,
@@ -109,7 +117,7 @@ def capture_cluster_snapshot(cluster: Cluster) -> Snapshot:
     around a priority recompute) to bracket flag transitions on the
     trend.
     """
-    [row] = _cluster_rows([cluster], *grouped_counts(default_finding_qs(cluster=cluster), "cluster_id"))
+    [row] = _cluster_rows([cluster], *grouped_counts(_live_findings(cluster), "cluster_id"))
     row.save()
     return row
 
@@ -123,7 +131,7 @@ def capture_namespace_snapshot(namespace: Namespace) -> Snapshot:
     """
     [row] = _namespace_rows(
         [namespace],
-        findings=default_finding_qs(cluster=namespace.cluster).filter(workload__namespace=namespace),
+        findings=_live_findings(namespace.cluster).filter(workload__namespace=namespace),
     )
     row.save()
     return row
@@ -161,7 +169,7 @@ def capture_cluster_heartbeat(cluster: Cluster) -> int:
     the daily heartbeat (`none` continuity rows). Skips the global row
     — that's the daily heartbeat's job.
     """
-    findings = default_finding_qs(cluster=cluster)
+    findings = _live_findings(cluster)
     rows = _cluster_rows([cluster], *grouped_counts(findings, "cluster_id"))
     rows += _namespace_rows(Namespace.objects.filter(cluster=cluster, active=True), findings=findings)
     Snapshot.objects.bulk_create(rows)
@@ -173,7 +181,7 @@ def capture_daily_heartbeat() -> int:
     """Write today's heartbeat snapshots — one global, one per cluster,
     one per active namespace, one per deployed workload, in that order.
     Returns row count written."""
-    findings = default_finding_qs()
+    findings = _live_findings()
     # Every finding belongs to exactly one cluster, so the global tally
     # is the per-cluster tally summed — no separate fleet-wide query.
     by_cluster_severity, by_cluster_priority = grouped_counts(findings, "cluster_id")

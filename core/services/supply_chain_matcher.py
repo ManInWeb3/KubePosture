@@ -201,7 +201,20 @@ def match_iocs_to_components(
     # list("purl").distinct())` pulled every distinct purl of a multi-GB
     # table into Python strings on each hourly run, which was the largest
     # allocation of the OSV job.
-    if touched_purls is not None:
+    if touched_purls is None and image is None:
+        # Full re-scan: ask the component table about every stored IoC
+        # purl one chunk at a time, on its indexes — what the hourly feed
+        # run does. Joining the two tables in one statement
+        # (`purl IN (SELECT …)` OR-ed with its name-purl twin) ran for
+        # over an hour against ~1.9M stored components.
+        deployed: set[str] = set()
+        all_iocs = SupplyChainIoc.objects.order_by("purl").values_list("purl", flat=True).distinct()
+        for chunk in chunked(all_iocs.iterator(chunk_size=_PURL_CHUNK_SIZE), _PURL_CHUNK_SIZE):
+            deployed |= _deployed_among(set(chunk), components)
+        if not deployed:
+            return 0
+        ioc_qs = SupplyChainIoc.objects.filter(purl__in=deployed)
+    elif touched_purls is not None:
         touched = {normalize_purl(p) for p in touched_purls if p}
         if not touched:
             return 0
@@ -210,8 +223,9 @@ def match_iocs_to_components(
             return 0
         ioc_qs = SupplyChainIoc.objects.filter(purl__in=deployed)
     else:
-        # Semi-joins: versioned IoCs against component purls, sentinels
-        # against the components' name purls.
+        # One image: its own few components, so the semi-joins are cheap —
+        # versioned IoCs against component purls, sentinels against the
+        # components' name purls.
         ioc_qs = SupplyChainIoc.objects.filter(
             Q(purl__in=components.values("purl"))
             | Q(purl__in=components.values("name_purl"))

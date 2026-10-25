@@ -1,17 +1,18 @@
 {{/*
-Not a Helm hook by design: under ArgoCD, hooks rerun on every sync and
-gate sync completion. As a regular resource with a stable name the Job
-is created once on install and only recreated when its spec changes.
-Set setupJob.annotations in values.yaml to add ArgoCD-specific behavior
-— see the comment there.
+A plain resource, not a Helm hook: hooks rerun on every ArgoCD sync and
+gate it. Its name carries a hash of the chart and values
+(kubeposture.setupJobName), so a changed Job is a new object and no deploy
+tool needs `--force`, `Replace=true` or a sync-wave.
 
-Migrations are handled independently by the web deployment's `migrate`
-init container, so this Job no longer gates app startup.
+This Job is the only place migrations are applied: `migrate` has no
+cross-process lock, so one serialized run per release. Web and worker pods
+block on `migrate --check` (kubeposture.waitForMigrations) until it has
+finished.
 */}}
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "kubeposture.fullname" . }}-setup
+  name: {{ include "kubeposture.setupJobName" . }}
   labels:
     {{- include "kubeposture.labels" . | nindent 4 }}
     app.kubernetes.io/component: setup

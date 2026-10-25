@@ -32,6 +32,7 @@ spec:
           restartPolicy: Never
           initContainers:
             {{- include "kubeposture.waitForDb" . | nindent 12 }}
+            {{- include "kubeposture.waitForMigrations" . | nindent 12 }}
           containers:
             - name: worker
               image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"

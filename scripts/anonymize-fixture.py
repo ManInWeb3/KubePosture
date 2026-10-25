@@ -757,15 +757,21 @@ class Anonymizer:
             path = out / (key + ".gz")
             path.parent.mkdir(parents=True, exist_ok=True)
             text = json.dumps({"apiVersion": "v1", "kind": f"{kind}List", "items": self.scrub(items)}, separators=(",", ":"))
-            with gzip.open(path, "wt", encoding="utf-8", compresslevel=9) as fh:
-                fh.write(self.sweep_digests(text))
+            _write_gz(path, self.sweep_digests(text))
         if self.version_doc is not None:
             (out / "kubeapi").mkdir(parents=True, exist_ok=True)
             gv = ""
             if isinstance(self.version_doc, dict):
                 gv = self.version_doc.get("gitVersion") or (self.version_doc.get("serverVersion") or {}).get("gitVersion") or ""
-            with gzip.open(out / "kubeapi/version.json.gz", "wt", encoding="utf-8") as fh:
-                json.dump({"gitVersion": gv}, fh)
+            _write_gz(out / "kubeapi/version.json.gz", json.dumps({"gitVersion": gv}))
+
+
+def _write_gz(path: Path, text: str) -> None:
+    """Byte-reproducible gzip: `gzip.open` stamps the current time into the
+    header, so two runs that straddle a second differ by a few bytes.
+    mtime=0 and no embedded filename keep same-input → same-bytes."""
+    with path.open("wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", compresslevel=9, mtime=0) as fh:
+        fh.write(text.encode("utf-8"))
 
 
 # ── verification / golden ──────────────────────────────────────────

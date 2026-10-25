@@ -19,14 +19,22 @@ from core.models import (
     SbomComponent,
     Workload,
 )
-from core.services.inventory import default_finding_qs
+from core.services.inventory import default_finding_qs, restrict_to_currently_deployed_images
 
 from .registry import cached, queue_ttl_seconds
 
 
+def _findings_live():
+    """What the findings page lists: open findings on currently-deployed
+    images (plus image-less ones). A finding on an image the workload has
+    rolled away from is not open any more, even while its `last_seen` is
+    still ahead of the cluster's inventory anchor."""
+    return restrict_to_currently_deployed_images(default_finding_qs(include_muted=False))
+
+
 def _findings_open():
     rows = (
-        default_finding_qs(include_muted=False)
+        _findings_live()
         .values("cluster__name", "workload__namespace__name", "effective_priority")
         .annotate(n=Count("id"))
     )
@@ -43,7 +51,7 @@ def _findings_open():
 
 def _findings_by_category():
     rows = (
-        default_finding_qs(include_muted=False)
+        _findings_live()
         .values("cluster__name", "category", "source")
         .annotate(n=Count("id"))
     )

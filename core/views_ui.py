@@ -27,7 +27,14 @@ from django.views import View
 from django.views.generic import RedirectView
 
 from core.api.auth import generate_token
-from core.constants import Environment, ImportMarkState, PriorityBand, Source, WorkloadKind
+from core.constants import (
+    Category,
+    Environment,
+    ImportMarkState,
+    PriorityBand,
+    Source,
+    WorkloadKind,
+)
 from core.models import (
     Cluster,
     Finding,
@@ -604,6 +611,7 @@ _PRESETS = {
     "kev":        {"kev": "1"},
     "high_epss":  {"epss": "50"},
     "new_week":   {"age": "7"},
+    "vulns":      {"category": "vulnerability"},
     "policy":     {"source": "kyverno", "priority": "immediate"},
 }
 
@@ -635,8 +643,8 @@ def _active_preset(filters: dict) -> str:
 class FindingsListView(LoginRequiredMixin, View):
     """`/findings/` — fleet-wide triage list.
 
-    Filters slice by triage signals (priority, source, exposure, KEV,
-    EPSS, name) — not topology. For "findings on cluster X / workload Y"
+    Filters slice by triage signals (priority, category, source, exposure,
+    KEV, EPSS, name) — not topology. For "findings on cluster X / workload Y"
     use `/workloads/`. Click a row to open the existing
     `#finding-detail-offcanvas`.
     """
@@ -648,6 +656,7 @@ class FindingsListView(LoginRequiredMixin, View):
         filters = {
             "name":      params.get("name", ""),
             "priority":  params.get("priority", ""),
+            "category":  params.get("category", ""),
             "source":    params.get("source", ""),
             "internet":  "1" if params.get("internet") == "1" else "",
             "sensitive": "1" if params.get("sensitive") == "1" else "",
@@ -657,6 +666,8 @@ class FindingsListView(LoginRequiredMixin, View):
             "sort":      params.get("sort", ""),
             "dir":       params.get("dir") or "desc",
         }
+        if filters["category"] not in {"", *Category.values}:
+            filters["category"] = ""
         if filters["epss"] not in {"", *_EPSS_THRESHOLDS}:
             filters["epss"] = ""
         if filters["age"] not in {"", *_AGE_DAYS}:
@@ -665,6 +676,7 @@ class FindingsListView(LoginRequiredMixin, View):
         common = dict(
             name_contains=filters["name"] or None,
             priority=filters["priority"] or None,
+            category=filters["category"] or None,
             source=filters["source"] or None,
             exposure=_exposure_arg(bool(filters["internet"]), bool(filters["sensitive"])),
             kev=bool(filters["kev"]),
@@ -702,6 +714,7 @@ class FindingsListView(LoginRequiredMixin, View):
                 "tiles": tiles,
                 "active_preset": _active_preset(filters),
                 "priority_choices": PriorityBand.choices,
+                "category_choices": Category.choices,
                 "source_choices": Source.choices,
             }
 

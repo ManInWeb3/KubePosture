@@ -336,3 +336,63 @@ def test_finding_panel_shows_purl_affected_versions_aliases_and_links(client, lo
     assert f'href="{f.details["primary_link"]}"' in body
     assert f.details["references"]
     assert f'href="{escape(f.details["references"][0])}"' in body
+
+
+# ── one compromised release (CVE-2026-33634) ─────────────────────
+
+# Trimmed real records. Go vulndb can only say `introduced 0.69.4` for the
+# one compromised Trivy release, which reads as "every later release"; the
+# GHSA for the same CVE names the version.
+_TRIVY = "github.com/aquasecurity/trivy"
+_GO_4919 = {
+    "id": "GO-2026-4919", "aliases": ["CVE-2026-33634", "GHSA-69fq-xp46-6x23"],
+    "summary": "Trivy ecosystem supply chain briefly compromised",
+    "modified": "2026-06-16T13:29:16Z",
+    "affected": [{
+        "package": {"name": _TRIVY, "ecosystem": "Go"},
+        "ranges": [{"type": "SEMVER", "events": [{"introduced": "0.69.4"}]}],
+    }],
+}
+_GHSA_69FQ = {
+    "id": "GHSA-69fq-xp46-6x23", "aliases": ["CVE-2026-33634", "GO-2026-4919"],
+    "summary": "Trivy ecosystem supply chain briefly compromised",
+    "modified": "2026-09-10T03:50:59Z", "database_specific": {"severity": "CRITICAL"},
+    "affected": [
+        {"package": {"name": _TRIVY, "ecosystem": "Go"}, "versions": ["0.69.4"]},
+        {"package": {"name": "aquasecurity/trivy-action", "ecosystem": "GitHub Actions"},
+         "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "0.35.0"}]}]},
+    ],
+}
+
+
+def _deploy_trivy(scene, version, *advisories):
+    enrichment._upsert_advisories([(a, "Go") for a in advisories])
+    SbomComponent.objects.create(
+        image=scene["image"], name=_TRIVY, version=version, ecosystem="golang",
+        purl=f"pkg:golang/{_TRIVY}@{version.replace('+', '%2B')}",
+    )
+    match_osv_vulns()
+    return _osv_findings(pkg_name=_TRIVY)
+
+
+@pytest.mark.parametrize("version", ["v0.75.0+dirty", "v0.69.5", "v0.69.3"])
+def test_later_release_is_not_flagged_by_an_open_range_the_ghsa_contradicts(scene, version):
+    assert not _deploy_trivy(scene, version, _GO_4919, _GHSA_69FQ).exists()
+
+
+def test_the_compromised_release_itself_is_flagged_with_the_exact_version(scene):
+    f = _deploy_trivy(scene, "v0.69.4", _GO_4919, _GHSA_69FQ).get()
+
+    assert (f.vuln_id, f.severity) == ("CVE-2026-33634", Severity.CRITICAL.value)
+    assert f.details["affected_versions"] == ["0.69.4"]
+    assert f.details["affected_ranges"] == []
+    assert set(f.details["osv_ids"]) == {"GHSA-69fq-xp46-6x23"}
+
+
+def test_open_range_stands_when_no_advisory_pins_the_versions(scene):
+    """"No fix yet" is what an open range normally means: without a
+    sibling listing exact versions it is trusted."""
+    f = _deploy_trivy(scene, "v0.75.0+dirty", _GO_4919).get()
+
+    assert f.vuln_id == "CVE-2026-33634"
+    assert f.details["affected_ranges"] == [">= 0.69.4"]

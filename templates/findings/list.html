@@ -14,8 +14,10 @@
   every cluster, ranked by <em>effective priority</em>. Use this page to
   answer "what should I act on right now?" — not "what's on cluster X?"
   (for that, use Workloads).</p>
-  <p><strong>Filters are triage signals only:</strong> priority, source,
-  exposure (namespace internet-exposed / sensitive), KEV, EPSS, name.
+  <p><strong>Filters are triage signals only:</strong> priority, category,
+  detector, exposure (namespace internet-exposed / sensitive), KEV, EPSS, name.
+  Category is what the finding is about; detector is who reported it — Trivy
+  and OSV both report vulnerabilities, so filter by category to see them together.
   Cluster / namespace / workload appear as columns; click the workload cell
   to drill into the per-workload view.</p>
   <p><strong>Default sort:</strong> Immediate → Out-of-Band → Scheduled
@@ -73,12 +75,14 @@
      href="?epss=50">High EPSS</a>
   <a class="btn btn-sm btn-outline-primary{% if active_preset == 'new_week' %} active{% endif %}"
      href="?age=7">New this week</a>
+  <a class="btn btn-sm btn-outline-primary{% if active_preset == 'vulns' %} active{% endif %}"
+     href="?category=vulnerability">Vulnerabilities</a>
   <a class="btn btn-sm btn-outline-primary{% if active_preset == 'policy' %} active{% endif %}"
      href="?source=kyverno&priority=immediate">Policy violations</a>
   <a class="btn btn-sm btn-link" href="{% url 'findings-list' %}">Reset</a>
 </div>
 
-<!-- Filter form: 6 triage-signal filters -->
+<!-- Filter form: triage-signal filters -->
 <form id="findings-filters" method="get" class="card mb-3"
       hx-get="{% url 'findings-list' %}"
       hx-target="#finding-rows"
@@ -100,8 +104,16 @@
         </select>
       </div>
       <div class="col-auto">
-        <select name="source" class="form-select form-select-sm">
-          <option value="">Any source</option>
+        <select name="category" class="form-select form-select-sm" title="What the finding is about">
+          <option value="">Any category</option>
+          {% for value, label in category_choices %}
+            <option value="{{ value }}"{% if filters.category == value %} selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-auto">
+        <select name="source" class="form-select form-select-sm" title="Which detector reported it">
+          <option value="">Any detector</option>
           {% for value, label in source_choices %}
             <option value="{{ value }}"{% if filters.source == value %} selected{% endif %}>{{ label }}</option>
           {% endfor %}
@@ -160,7 +172,7 @@
           {% include "workloads/_sort_header.html" with col="severity" label="Severity" align="" %}
           {% include "workloads/_sort_header.html" with col="epss" label="EPSS" align="text-end" %}
           <th>KEV</th>
-          <th>Source</th>
+          <th>Detected by</th>
           {% include "workloads/_sort_header.html" with col="last_seen" label="Last seen" align="" %}
         </tr>
       </thead>

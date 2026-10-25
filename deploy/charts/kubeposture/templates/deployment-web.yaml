@@ -35,27 +35,7 @@ spec:
         {{- include "kubeposture.podSecurityContext" . | nindent 8 }}
       initContainers:
         {{- include "kubeposture.waitForDb" . | nindent 8 }}
-        - name: migrate
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command:
-            - /bin/sh
-            - -c
-            - |
-              set -e
-              echo "==> Migrating..."
-              python manage.py migrate --noinput
-              echo "==> Seeding RBAC groups..."
-              python manage.py setup_rbac
-              echo "==> Init complete."
-          env:
-            {{- include "kubeposture.env" . | nindent 12 }}
-          securityContext:
-            {{- include "kubeposture.securityContext" . | nindent 12 }}
-          resources:
-            {{- toYaml .Values.migration.resources | nindent 12 }}
-          volumeMounts:
-            {{- include "kubeposture.volumeMounts" . | nindent 12 }}
+        {{- include "kubeposture.waitForMigrations" . | nindent 8 }}
       containers:
         - name: web
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"

@@ -8,8 +8,8 @@
       {% severity_badge f.severity %}
       {% priority_badge f.effective_priority %}
       {% if f.kev_listed %}<span class="badge bg-danger-lt text-danger" title="CISA Known Exploited Vulnerability">KEV</span>{% endif %}
-      <span class="badge bg-azure-lt text-azure">{{ f.source }}</span>
-      <span class="badge bg-secondary-lt text-secondary">{{ f.category }}</span>
+      <span class="badge bg-azure-lt text-azure" title="Detected by">{{ f.get_source_display }}</span>
+      <span class="badge bg-secondary-lt text-secondary">{{ f.get_category_display }}</span>
     </div>
   </div>
   <button type="button" class="btn-close ms-auto" data-bs-dismiss="offcanvas" aria-label="Close"></button>

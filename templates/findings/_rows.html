@@ -37,7 +37,7 @@
   <td>{% severity_badge f.severity %}</td>
   <td class="text-end">{% epss_badge f.epss_score %}</td>
   <td>{% kev_badge f.kev_listed %}</td>
-  <td><span class="badge bg-secondary-lt text-secondary">{{ f.source }}</span></td>
+  <td><span class="badge bg-secondary-lt text-secondary">{{ f.get_source_display }}</span></td>
   <td class="text-muted small">{{ f.last_seen|date:"Y-m-d H:i" }}</td>
 </tr>
 {% empty %}

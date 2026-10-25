@@ -408,7 +408,7 @@
     },
     "migration": {
       "additionalProperties": false,
-      "description": "The migrate init container of the setup Job.",
+      "description": "The wait-for-migrations init container of the web and worker pods (polls `migrate --check`; the setup Job applies migrations).",
       "properties": {
         "resources": {
           "$ref": "#/definitions/resources",
@@ -558,18 +558,26 @@
     },
     "setupJob": {
       "additionalProperties": false,
-      "description": "Post-install/upgrade setup Job: migrate, setup_rbac, createsuperuser\n(all idempotent — the superuser step uses `|| true` so a re-run after\nthe user exists is a no-op).",
+      "description": "Post-install/upgrade setup Job: migrate, setup_rbac, createsuperuser\n(all idempotent — the superuser step uses `|| true` so a re-run after\nthe user exists is a no-op). The only place migrations are applied: web\nand worker pods wait for it (see `migration`). Its name ends in a hash\nof the chart and values, so every change creates a new Job and works\nunder Helm, ArgoCD and Flux without `--force`, `Replace=true` or hooks.",
       "properties": {
         "annotations": {
           "$ref": "#/definitions/stringMap",
           "required": []
+        },
+        "nameSuffixOverride": {
+          "default": "",
+          "description": "Pins the Job name suffix (default: a hash of the chart version, app version and all values).",
+          "title": "nameSuffixOverride",
+          "type": "string"
         },
         "resources": {
           "$ref": "#/definitions/resources",
           "required": []
         }
       },
-      "required": [],
+      "required": [
+        "nameSuffixOverride"
+      ],
       "title": "setupJob",
       "type": "object"
     },

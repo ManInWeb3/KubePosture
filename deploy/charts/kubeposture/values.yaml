@@ -332,20 +332,22 @@ worker:
       cpu: 500m
       memory: 1Gi
 
-# ── Init: DB migrations ────────────────────────────────────────
+# ── Init: wait for DB migrations ───────────────────────────────
 
-# -- The migrate init container of the setup Job.
+# -- The wait-for-migrations init container of the web and worker pods (polls `migrate --check`; the setup Job applies migrations).
 migration:
   # @schema
   # $ref: "#/definitions/resources"
   # @schema
+  # requests == limits: the worker is a CronJob and its pod QoS is decided
+  # by every container, so a Burstable init container would demote it.
   resources:
     requests:
       cpu: 100m
       memory: 256Mi
     limits:
-      cpu: 500m
-      memory: 512Mi
+      cpu: 100m
+      memory: 256Mi
 
 # ── CronJobs ───────────────────────────────────────────────────
 
@@ -553,7 +555,10 @@ adminUser:
 
 # -- Post-install/upgrade setup Job: migrate, setup_rbac, createsuperuser
 # (all idempotent — the superuser step uses `|| true` so a re-run after
-# the user exists is a no-op).
+# the user exists is a no-op). The only place migrations are applied: web
+# and worker pods wait for it (see `migration`). Its name ends in a hash
+# of the chart and values, so every change creates a new Job and works
+# under Helm, ArgoCD and Flux without `--force`, `Replace=true` or hooks.
 setupJob:
   # @schema
   # $ref: "#/definitions/resources"
@@ -569,14 +574,9 @@ setupJob:
   # $ref: "#/definitions/stringMap"
   # @schema
   # -- Extra annotations on the setup Job.
-  # The Job is rendered as a regular resource (no helm.sh/hook), so under
-  # plain Helm or ArgoCD it's only created/replaced when its spec changes.
-  # Under ArgoCD, uncomment the entry below: hooks would otherwise rerun
-  # on every sync and gate sync completion. Force=true,Replace=true is
-  # needed because Jobs are immutable — without it, ArgoCD can't update
-  # the Job spec on chart upgrades (e.g. new image tag).
   annotations: {}
-    # argocd.argoproj.io/sync-options: Force=true,Replace=true
+  # -- Pins the Job name suffix (default: a hash of the chart version, app version and all values).
+  nameSuffixOverride: ""
 
 # ── Image ──────────────────────────────────────────────────────
 

@@ -48,6 +48,7 @@ def _finding(
     workload: Workload | None = None,
     cluster: Cluster | None = None,
     source: str = Source.TRIVY.value,
+    category: str = Category.VULNERABILITY.value,
     severity: str = Severity.HIGH.value,
     priority: str = PriorityBand.SCHEDULED.value,
     title: str = "test finding",
@@ -65,7 +66,7 @@ def _finding(
         cluster=cluster,
         workload=workload,
         source=source,
-        category=Category.VULNERABILITY.value,
+        category=category,
         vuln_id=vuln_id,
         title=title,
         severity=severity,
@@ -134,6 +135,26 @@ def test_source_filter():
     rows = list(list_findings(source=Source.TRIVY.value))
 
     assert [f.pk for f in rows] == [trivy.pk]
+
+
+@pytest.mark.django_db
+def test_category_filter_spans_detectors():
+    """Trivy and OSV both report vulnerabilities: `category` returns both
+    and leaves out other categories, `source` narrows to one detector."""
+    c = _cluster()
+    ns = _ns(c, "default")
+    w = _workload(c, ns)
+    trivy_vuln = _finding(workload=w, hash_code="h1", source=Source.TRIVY.value)
+    osv_vuln = _finding(workload=w, hash_code="h2", source=Source.OSV.value)
+    _finding(workload=w, hash_code="h3", source=Source.TRIVY.value,
+             category=Category.CONFIG.value)
+
+    both = {f.pk for f in list_findings(category=Category.VULNERABILITY.value)}
+    only_osv = [f.pk for f in list_findings(
+        category=Category.VULNERABILITY.value, source=Source.OSV.value)]
+
+    assert both == {trivy_vuln.pk, osv_vuln.pk}
+    assert only_osv == [osv_vuln.pk]
 
 
 @pytest.mark.django_db

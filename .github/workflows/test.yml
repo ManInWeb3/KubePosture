@@ -70,6 +70,8 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - run: pip install -r requirements-dev.txt
+      # tests/test_chart_render.py renders the chart (skipped without helm).
+      - uses: azure/setup-helm@v4
       - run: python manage.py makemigrations --check --dry-run
       - run: pytest -m "not e2e and not realdata" -p no:cacheprovider --junitxml=junit-unit.xml
       - uses: actions/upload-artifact@v4

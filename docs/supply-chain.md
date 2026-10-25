@@ -154,10 +154,11 @@ The matcher is intentionally:
   restricted to purls a deployed component carries, and that
   intersection is computed by Postgres: incremental mode sends
   `touched_purls` in chunks of 5,000 `IN (...)` lookups
-  (`_deployed_among`), a full re-scan uses a semi-join
-  (`purl__in=SbomComponent.objects.values("purl")`). It used to load
-  every distinct purl of the SBOM table into a Python set each hourly
-  run — the largest allocation of the OSV job. Then: load matching
+  (`_deployed_among`), and a full re-scan feeds every stored IoC purl
+  through the same lookups. A single semi-join of the IoC table against
+  the whole SBOM table ran for over an hour at ~1.9M components, and
+  loading every distinct SBOM purl into Python was the largest
+  allocation of the OSV job; neither is used. Then: load matching
   IoCs grouped by purl (`raw` deferred), load SbomComponents for those
   purls, load deployed observations per image.
 - **Workload-fanned.** A bad purl present in one image deployed to N
@@ -241,9 +242,12 @@ one entry there.
 - **Workload undeployed.** The matcher's join requires
   `WorkloadImageObservation.currently_deployed=True`. A workload that
   scales to zero or is deleted will fail this gate on the next match;
-  the existing finding row is **left in place** — the inventory reaper
-  auto-resolves it on the next complete cycle, just like any other
-  finding.
+  the existing finding row is **left in place**, neither refreshed nor
+  deleted. The reaper only flips the observation flags: the findings
+  page, workloads, images and the `kubeposture_findings_*` gauges stop
+  counting it once its image pair is no longer deployed, and
+  `prune_stale_data` deletes it after 180 days (accept / false-positive
+  overlays go with it).
 - **Workload re-deployed.** The next match run picks it up and either
   re-creates the finding (if previously hard-resolved) or bumps
   `last_seen` on the existing row.
