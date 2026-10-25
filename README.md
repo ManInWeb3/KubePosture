@@ -296,7 +296,8 @@ the box with no configuration.
 IoC matches become `Finding` rows with `source=supply_chain_ioc`,
 `category=supply_chain`, `effective_priority=immediate`
 (`/findings/?source=supply_chain_ioc`); vulnerability matches are
-`source=osv`, scored by the normal tree (`/findings/?source=osv`).
+`source=osv`, scored by the normal tree (`/findings/?source=osv`;
+`?category=vulnerability` shows Trivy and OSV together).
 
 ### End-to-end smoke test
 

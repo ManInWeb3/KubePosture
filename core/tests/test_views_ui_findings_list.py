@@ -123,16 +123,41 @@ def test_kev_filter_narrows(client, viewer, workload):
 
 
 def test_invalid_filter_values_are_dropped(client, viewer, workload):
-    """Garbage `epss` / `age` values are coerced to empty so the
-    queryset isn't filtered by gibberish."""
+    """Garbage `epss` / `age` / `category` values are coerced to empty so
+    the queryset isn't filtered by gibberish."""
     _make_finding(workload, hash_code="h1", vuln_id="CVE-Z")
     client.force_login(viewer)
     resp = client.get(reverse("findings-list"), {
-        "epss": "lolnope", "age": "garbage",
+        "epss": "lolnope", "age": "garbage", "category": "nope",
     })
     assert resp.status_code == 200
     assert "CVE-Z" in resp.content.decode()
-    assert (resp.context["filters"]["epss"], resp.context["filters"]["age"]) == ("", "")
+    filters = resp.context["filters"]
+    assert (filters["epss"], filters["age"], filters["category"]) == ("", "", "")
+
+
+def test_category_filter_shows_every_detector_with_readable_label(client, viewer, workload):
+    """`?category=vulnerability` lists Trivy and OSV findings together,
+    each row naming its detector; other categories drop out."""
+    _make_finding(workload, hash_code="h1", vuln_id="CVE-TRIVY", source=Source.TRIVY.value)
+    _make_finding(workload, hash_code="h2", vuln_id="CVE-OSV", source=Source.OSV.value)
+    _make_finding(workload, hash_code="h3", vuln_id="KSV-CFG", source=Source.TRIVY.value,
+                  category=Category.CONFIG.value)
+    client.force_login(viewer)
+    resp = client.get(reverse("findings-list"), {"category": "vulnerability"})
+    body = resp.content.decode()
+    assert "CVE-TRIVY" in body
+    assert "CVE-OSV" in body
+    assert "KSV-CFG" not in body
+    assert ">Trivy</span>" in body
+    assert ">OSV</span>" in body
+
+
+def test_vulnerabilities_preset_highlights(client, viewer, workload):
+    _make_finding(workload, hash_code="h1")
+    client.force_login(viewer)
+    resp = client.get(reverse("findings-list"), {"category": "vulnerability"})
+    assert resp.context["active_preset"] == "vulns"
 
 
 def test_internet_checkbox_filters_to_exposed_namespace(client, viewer, cluster):

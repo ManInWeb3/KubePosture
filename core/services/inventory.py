@@ -455,6 +455,7 @@ def list_findings(
     *,
     name_contains: str | None = None,
     priority: str | None = None,
+    category: str | None = None,
     source: str | None = None,
     exposure: str | None = None,
     kev: bool = False,
@@ -464,6 +465,10 @@ def list_findings(
     sort_dir: str = "desc",
 ):
     """Return a Finding queryset for the `/findings/` triage page.
+
+    `category` is what a finding is about (vulnerability, config, …) and
+    spans every detector; `source` narrows to one detector — Trivy and OSV
+    both report vulnerabilities.
 
     Triage-signal filters only — topology (cluster / namespace / workload)
     is NOT exposed here; that drill-down lives on `/workloads/`. Severity
@@ -486,6 +491,8 @@ def list_findings(
         )
     if priority:
         qs = qs.filter(effective_priority=priority)
+    if category:
+        qs = qs.filter(category=category)
     if source:
         qs = qs.filter(source=source)
     if exposure:
