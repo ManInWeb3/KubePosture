@@ -427,24 +427,73 @@ def test_matcher_intersects_touched_purls_with_sbom_in_sql_chunks(monkeypatch):
 
 
 @pytest.mark.django_db
-def test_matcher_full_scan_uses_semi_join_not_purl_set():
+def test_matcher_full_scan_walks_ioc_purls_in_indexed_chunks(monkeypatch):
+    """A full re-scan looks the IoC purls up in the component table one
+    chunk at a time, as the hourly feed run does. It must never join the
+    two tables with `purl IN (SELECT …)`: that, OR-ed with its name-purl
+    twin, ran for over an hour against ~1.9M stored components."""
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
 
+    from core.services import supply_chain_matcher as scm
+
+    monkeypatch.setattr(scm, "_PURL_CHUNK_SIZE", 2)
     c = _cluster("c1")
     ns = _ns(c)
     w = _workload(c, ns, "api")
     img = _image("sha256:" + "a" * 64)
     _observation(w, img, deployed=True)
     _component(img, "pkg:npm/lodash@4.17.21")
+    _component(img, "pkg:npm/evil-pkg@1.2.3")
     _ioc("pkg:npm/lodash@4.17.21", advisory_id="MAL-1")
-    _ioc("pkg:npm/not-deployed@1.0", advisory_id="MAL-2")
+    _ioc("pkg:npm/evil-pkg", advisory_id="MAL-sentinel")   # name-only: every version
+    for i in range(3):
+        _ioc(f"pkg:npm/not-deployed{i}@1.0", advisory_id=f"MAL-nd{i}")
 
     with CaptureQueriesContext(connection) as ctx:
-        assert match_iocs_to_components() == 1
+        assert match_iocs_to_components() == 2
 
-    ioc_queries = [q["sql"] for q in ctx.captured_queries if "core_supplychainioc" in q["sql"]]
-    assert any("IN (SELECT" in q and "core_sbomcomponent" in q for q in ioc_queries), ioc_queries
+    assert set(Finding.objects.values_list("vuln_id", flat=True)) == {"MAL-1", "MAL-sentinel"}
+    table_queries = [
+        q["sql"] for q in ctx.captured_queries
+        if "core_supplychainioc" in q["sql"] or "core_sbomcomponent" in q["sql"]
+    ]
+    assert not any("IN (SELECT" in sql for sql in table_queries), table_queries
+    # 5 IoC purls / chunk 2: the component table is asked about them in chunks.
+    chunk_lookups = [sql for sql in table_queries if '"core_sbomcomponent"."purl" IN' in sql]
+    assert len(chunk_lookups) >= 2, table_queries
+
+
+@pytest.mark.django_db
+def test_full_rescan_finds_exactly_what_the_incremental_run_finds():
+    """The full re-scan and the feed-driven run over every IoC purl are
+    the same match: exact and name-only IoCs, other versions of the same
+    package, IoCs nobody runs, and images no longer deployed."""
+    c = _cluster("c1")
+    ns = _ns(c)
+    live = _image("sha256:" + "a" * 64)
+    gone = _image("sha256:" + "b" * 64)
+    _observation(_workload(c, ns, "api"), live, deployed=True)
+    _observation(_workload(c, ns, "old"), gone, deployed=False)
+    for img in (live, gone):
+        _component(img, "pkg:npm/lodash@4.17.21", version="4.17.21")
+        _component(img, "pkg:npm/evil-pkg@1.2.3", version="1.2.3")
+    _component(live, "pkg:npm/lodash@4.17.20", version="4.17.20")   # another version: not on the IoC
+    _ioc("pkg:npm/lodash@4.17.21", advisory_id="MAL-exact")
+    _ioc("pkg:npm/evil-pkg", advisory_id="MAL-sentinel")
+    _ioc("pkg:npm/nobody-runs-this@9.9.9", advisory_id="MAL-unused")
+
+    def found():
+        return {(f.vuln_id, f.installed_version, f.workload.name) for f in Finding.objects.select_related("workload")}
+
+    assert match_iocs_to_components() == 2
+    full = found()
+    Finding.objects.all().delete()
+
+    every_purl = set(SupplyChainIoc.objects.values_list("purl", flat=True))
+    assert match_iocs_to_components(touched_purls=every_purl) == 2
+
+    assert found() == full == {("MAL-exact", "4.17.21", "api"), ("MAL-sentinel", "1.2.3", "api")}
 
 
 # ── name-only (every-version) IoC purls ─────────────────────────────

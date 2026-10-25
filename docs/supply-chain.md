@@ -154,10 +154,11 @@ The matcher is intentionally:
   restricted to purls a deployed component carries, and that
   intersection is computed by Postgres: incremental mode sends
   `touched_purls` in chunks of 5,000 `IN (...)` lookups
-  (`_deployed_among`), a full re-scan uses a semi-join
-  (`purl__in=SbomComponent.objects.values("purl")`). It used to load
-  every distinct purl of the SBOM table into a Python set each hourly
-  run — the largest allocation of the OSV job. Then: load matching
+  (`_deployed_among`), and a full re-scan feeds every stored IoC purl
+  through the same lookups. A single semi-join of the IoC table against
+  the whole SBOM table ran for over an hour at ~1.9M components, and
+  loading every distinct SBOM purl into Python was the largest
+  allocation of the OSV job; neither is used. Then: load matching
   IoCs grouped by purl (`raw` deferred), load SbomComponents for those
   purls, load deployed observations per image.
 - **Workload-fanned.** A bad purl present in one image deployed to N
