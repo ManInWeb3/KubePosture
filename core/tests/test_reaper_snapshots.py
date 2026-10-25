@@ -30,7 +30,12 @@ from core.services.reaper import (
     maybe_reap,
     reap_all_drainable,
 )
-from core.services.snapshot import capture_cluster_heartbeat, capture_daily_heartbeat
+from core.services.snapshot import (
+    capture_cluster_heartbeat,
+    capture_cluster_snapshot,
+    capture_daily_heartbeat,
+    capture_namespace_snapshot,
+)
 
 
 def _cluster(name="c-snap"):
@@ -290,10 +295,10 @@ def test_event_snapshot_query_count_does_not_grow_with_workload_count():
 @pytest.mark.django_db
 def test_daily_heartbeat_counts_every_scope_from_its_own_visible_findings():
     """Two clusters. Scope rows: one global, one per cluster (including the
-    empty one), one per ACTIVE namespace, one per DEPLOYED workload. Cluster
-    and namespace rows count every visible finding; workload rows are
-    narrowed to currently-deployed images; cluster-scoped findings count
-    only at cluster and global level."""
+    empty one), one per ACTIVE namespace, one per DEPLOYED workload. Every
+    scope counts visible findings on currently-deployed images (plus
+    image-less ones), the same set the findings and workloads pages list;
+    cluster-scoped findings count only at cluster and global level."""
     a = _cluster("c-a")
     ns = Namespace.objects.create(cluster=a, name="live")
     inactive = Namespace.objects.create(cluster=a, name="old", active=False)
@@ -301,7 +306,7 @@ def test_daily_heartbeat_counts_every_scope_from_its_own_visible_findings():
     w2 = _deployed_workload(a, inactive, "w2", images=["x"], deployed=False)
     img_x, img_y = (Image.objects.get(digest=_digest(ch)) for ch in "xy")
     _finding(w1, severity="critical", hash_code="1", image=img_x)
-    _finding(w1, severity="high", hash_code="2", image=img_y)      # stale image: visible, but not for the workload row
+    _finding(w1, severity="high", hash_code="2", image=img_y)      # rolled-out image: counted nowhere
     _finding(w1, severity="low", hash_code="3")                     # image-less
     _finding(w2, severity="critical", hash_code="4")                # undeployed workload: invisible
     _finding(None, severity="critical", hash_code="5", cluster=a)   # cluster-scoped
@@ -313,18 +318,39 @@ def test_daily_heartbeat_counts_every_scope_from_its_own_visible_findings():
     for s in Snapshot.objects.all():
         by_scope.setdefault(s.scope_kind, []).append(s)
     g = by_scope["global"][0]
-    assert (g.severity_counts, g.total_active) == ({"critical": 2, "high": 1, "low": 1}, 4)
+    assert (g.severity_counts, g.total_active) == ({"critical": 2, "low": 1}, 3)
     clusters = {s.cluster.name: s for s in by_scope["cluster"]}
     assert set(clusters) == {"c-a", "c-b"}
-    assert (clusters["c-a"].severity_counts, clusters["c-a"].total_active) == ({"critical": 2, "high": 1, "low": 1}, 4)
+    assert (clusters["c-a"].severity_counts, clusters["c-a"].total_active) == ({"critical": 2, "low": 1}, 3)
     assert (clusters["c-b"].severity_counts, clusters["c-b"].priority_counts, clusters["c-b"].total_active) == ({}, {}, 0)
     [n] = by_scope["namespace"]
     assert n.namespace_id == ns.id and n.cluster_id == a.id
-    assert (n.severity_counts, n.total_active) == ({"critical": 1, "high": 1, "low": 1}, 3)
+    assert (n.severity_counts, n.total_active) == ({"critical": 1, "low": 1}, 2)
     [wl] = by_scope["workload"]
     assert wl.workload_id == w1.id and wl.namespace_id == ns.id and wl.cluster_id == a.id
     assert (wl.severity_counts, wl.priority_counts, wl.total_active) == ({"critical": 1, "low": 1}, {"scheduled": 2}, 2)
     assert wl.change_kind == ImageSetChangeKind.NONE.value and wl.image_digest_set == []
+
+
+@pytest.mark.django_db
+def test_cluster_and_namespace_snapshots_skip_findings_on_rolled_out_images():
+    """The snapshots that bracket a flag edit, and the heartbeat that closes
+    an import, use the same scope as the daily one: a finding on an image
+    the workload no longer runs is not in the trend."""
+    c = _cluster("c-roll")
+    ns = Namespace.objects.create(cluster=c, name="live")
+    w = _deployed_workload(c, ns, "w", images=["x"], stale_images=["y"])
+    _finding(w, severity="critical", hash_code="1", image=Image.objects.get(digest=_digest("x")))
+    _finding(w, severity="high", hash_code="2", image=Image.objects.get(digest=_digest("y")))
+
+    cluster_row = capture_cluster_snapshot(c)
+    namespace_row = capture_namespace_snapshot(ns)
+    capture_cluster_heartbeat(c)
+
+    assert (cluster_row.severity_counts, cluster_row.total_active) == ({"critical": 1}, 1)
+    assert (namespace_row.severity_counts, namespace_row.total_active) == ({"critical": 1}, 1)
+    closing = Snapshot.objects.filter(cluster=c, scope_kind=SnapshotScope.CLUSTER.value).order_by("-id").first()
+    assert (closing.severity_counts, closing.total_active) == ({"critical": 1}, 1)
 
 
 @pytest.mark.django_db

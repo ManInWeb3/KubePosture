@@ -6,7 +6,7 @@ import sys
 import pytest
 
 from core.metrics import registry as metrics_registry
-from core.models import Cluster, Finding, Namespace, Workload
+from core.models import Cluster, Finding, Image, Namespace, Workload, WorkloadImageObservation
 
 
 @pytest.fixture(autouse=True)
@@ -97,6 +97,48 @@ def test_findings_open_grouped_by_priority(
     assert 'effective_priority="scheduled"' in body
     assert 'cluster="prod-east"' in body
     assert 'namespace="payments"' in body
+
+
+def _series_total(body: str, name: str, cluster: str) -> float:
+    lines = [
+        ln for ln in body.splitlines()
+        if ln.startswith(f"{name}{{") and f'cluster="{cluster}"' in ln
+    ]
+    return sum(float(ln.rsplit(" ", 1)[1]) for ln in lines)
+
+
+def test_findings_gauges_skip_findings_on_rolled_out_images(
+    client, cluster_prod, workload_api,
+):
+    """The gauges count what the findings page lists: a finding on an image
+    the workload no longer runs is gone, even while the workload itself is
+    deployed and the finding's `last_seen` is still current."""
+    old = Image.objects.create(digest="sha256:" + "a" * 64, ref="reg/api:old")
+    new = Image.objects.create(digest="sha256:" + "b" * 64, ref="reg/api:new")
+    WorkloadImageObservation.objects.create(
+        workload=workload_api, image=old, container_name="app", currently_deployed=False,
+    )
+    WorkloadImageObservation.objects.create(
+        workload=workload_api, image=new, container_name="app", currently_deployed=True,
+    )
+    for image, hash_code in ((old, "h-old"), (new, "h-new")):
+        Finding.objects.create(
+            cluster=cluster_prod, workload=workload_api, image=image,
+            source="supply_chain_ioc", category="supply_chain", vuln_id="MAL-1",
+            title="malicious package", severity="critical",
+            effective_priority="immediate", hash_code=hash_code,
+        )
+    # An image-less finding (config audit, RBAC, cluster-scoped) is always counted.
+    Finding.objects.create(
+        cluster=cluster_prod, workload=workload_api, source="kyverno", category="config",
+        vuln_id="POL-1", title="policy", severity="low",
+        effective_priority="scheduled", hash_code="h-policy",
+    )
+
+    body = client.get("/metrics").content.decode()
+
+    assert _series_total(body, "kubeposture_findings_open", "prod-east") == 2.0
+    assert _series_total(body, "kubeposture_findings_open_by_category", "prod-east") == 2.0
 
 
 def test_workloads_total_filters_to_deployed(

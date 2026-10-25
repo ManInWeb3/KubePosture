@@ -242,9 +242,12 @@ one entry there.
 - **Workload undeployed.** The matcher's join requires
   `WorkloadImageObservation.currently_deployed=True`. A workload that
   scales to zero or is deleted will fail this gate on the next match;
-  the existing finding row is **left in place** — the inventory reaper
-  auto-resolves it on the next complete cycle, just like any other
-  finding.
+  the existing finding row is **left in place**, neither refreshed nor
+  deleted. The reaper only flips the observation flags: the findings
+  page, workloads, images and the `kubeposture_findings_*` gauges stop
+  counting it once its image pair is no longer deployed, and
+  `prune_stale_data` deletes it after 180 days (accept / false-positive
+  overlays go with it).
 - **Workload re-deployed.** The next match run picks it up and either
   re-creates the finding (if previously hard-resolved) or bumps
   `last_seen` on the existing row.

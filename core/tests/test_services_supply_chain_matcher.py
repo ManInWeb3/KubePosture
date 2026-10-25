@@ -290,8 +290,10 @@ def test_matcher_propagates_title_and_details_changes():
 @pytest.mark.django_db
 def test_matcher_skips_when_workload_undeployed_between_match_runs():
     """Workload flipped to undeployed after first match — second match
-    is a no-op (the existing finding is left for the inventory reaper
-    to auto-resolve, which is a separate code path).
+    is a no-op. The finding is neither deleted nor refreshed: the views
+    stop showing it once its `last_seen` falls behind the cluster's
+    inventory anchor or its image pair is no longer deployed, and
+    `prune_stale_data` deletes it after the retention window.
     """
     c = _cluster("c1")
     ns = _ns(c)
@@ -310,8 +312,7 @@ def test_matcher_skips_when_workload_undeployed_between_match_runs():
 
     n = match_iocs_to_components()
     assert n == 0
-    # Finding row is still there — matcher doesn't delete; the
-    # inventory reaper auto-resolves on the next complete cycle.
+    # Finding row is still there: the matcher never deletes.
     assert Finding.objects.count() == 1
 
 
