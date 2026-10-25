@@ -13,7 +13,14 @@ from pathlib import Path
 
 import pytest
 
-from core.osv_ranges import covers_version, describe_blocks, evaluate, ioc_purls
+from core.osv_ranges import (
+    covers_version,
+    describe_blocks,
+    evaluate,
+    ioc_purls,
+    is_open_ended,
+    is_pinned,
+)
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "osv" / "advisories"
 
@@ -253,3 +260,29 @@ def test_describe_blocks_orders_versions_and_words_the_ranges():
     assert versions == ["1.2.0", "1.10.0", "weird"]
     assert ranges == ["< 0.5.0", ">= 1.95.6, < 1.95.8", ">= 3.0.0, <= 3.2.0", ">= 4.0.0",
                       "all versions"]
+
+
+def _semver(*events):
+    return [{"type": "SEMVER", "events": list(events)}]
+
+
+@pytest.mark.parametrize("versions, ranges, pinned, open_ended", [
+    # GHSA for a single compromised release: exact list, no range.
+    (["0.69.4"], [], True, False),
+    # Go vulndb for the same: one `introduced`, nothing closes it.
+    ([], _semver({"introduced": "0.69.4"}), False, True),
+    # Any interval that closes is not open-ended; a later one that doesn't is.
+    ([], _semver({"introduced": "1.0.0"}, {"fixed": "1.5.0"}), False, False),
+    ([], _semver({"introduced": "1.0.0"}, {"fixed": "1.5.0"}, {"introduced": "2.0.0"}),
+     False, True),
+    ([], _semver({"introduced": "0"}, {"last_affected": "1.5.0"}), False, False),
+    # PyPI / Maven carry both: neither pinned nor open-ended (the list is
+    # the OSV-enumerated expansion of the range, not a statement of its own).
+    (["1.0", "1.1"], [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}]}], False, False),
+    # ECOSYSTEM / GIT ranges are not interpreted.
+    ([], [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}]}], False, False),
+    ([], [], False, False),
+])
+def test_pinned_and_open_ended_blocks(versions, ranges, pinned, open_ended):
+    assert is_pinned(versions, ranges) is pinned
+    assert is_open_ended(versions, ranges) is open_ended

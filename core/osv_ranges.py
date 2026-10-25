@@ -134,6 +134,23 @@ def evaluate(version: str, *, versions: list[str], ranges: list[dict]) -> Evalua
     return Evaluation(False, "", unsupported) if unsupported else NOT_AFFECTED
 
 
+def is_pinned(versions: list[str], ranges: list[dict]) -> bool:
+    """The block names the affected releases one by one and has no range —
+    a deliberate "only these", e.g. a single compromised release."""
+    return bool(versions) and not ranges
+
+
+def is_open_ended(versions: list[str], ranges: list[dict]) -> bool:
+    """The block is SEMVER intervals only and one of them has no upper
+    bound (`introduced` without `fixed` / `last_affected`): "no fix known",
+    which every later release falls into."""
+    return not versions and any(
+        hi is None
+        for r in ranges if r.get("type") == "SEMVER"
+        for _lo, hi, _inclusive in _intervals(r.get("events") or [])
+    )
+
+
 # ── Malicious-package blocks (the IoC lane) ─────────────────────────
 #
 # Malicious-package advisories (MAL-*) use the same `affected[]` shape,

@@ -28,7 +28,7 @@ from django.utils import timezone
 from core.constants import Category, Severity, Source
 from core.iterutils import chunked
 from core.models import Finding, Image, OsvAffected, SbomComponent
-from core.osv_ranges import describe_blocks, evaluate
+from core.osv_ranges import describe_blocks, evaluate, is_open_ended, is_pinned
 from core.purl import normalize_purl, parse_purl_name_version
 from core.services.matching import emit_for_image
 
@@ -99,6 +99,29 @@ def _vuln_id(ids: set[str]) -> str:
     return cves[0] if cves else min(ids)
 
 
+def _trust_pinned_versions(rows: list[OsvAffected]) -> list[OsvAffected]:
+    """Drop open-ended ranges that a sibling advisory of the same vuln
+    contradicts with an exact version list.
+
+    Go vulndb has no way to say "this one release was compromised": for
+    GO-2026-4919 it publishes `introduced 0.69.4` and nothing else, so every
+    later Trivy release looks affected, while the GHSA for the same CVE
+    lists `versions: ["0.69.4"]`. Where the two disagree the exact list wins;
+    an open-ended range with no such sibling is kept, "no fix yet" being
+    its normal meaning.
+    """
+    pinned = {
+        _vuln_id(r.advisory.ids) for r in rows if is_pinned(r.versions or [], r.ranges or [])
+    }
+    if not pinned:
+        return rows
+    return [
+        r for r in rows
+        if not (is_open_ended(r.versions or [], r.ranges or [])
+                and _vuln_id(r.advisory.ids) in pinned)
+    ]
+
+
 def _trivy_coverage(workload_id: int, image_id: int) -> set[tuple[str, str, str]]:
     """`{(vuln_id, pkg_name, installed_version)}` Trivy already reports for
     this workload / image."""
@@ -124,7 +147,7 @@ def _matches_for_image(components: list[SbomComponent], affected: dict) -> list[
         if not rows:
             continue
         by_vuln: dict[str, dict] = {}
-        for row in rows:
+        for row in _trust_pinned_versions(rows):
             res = evaluate(version, versions=row.versions or [], ranges=row.ranges or [])
             if res.unsupported:
                 log.debug("osv_matcher.unsupported",

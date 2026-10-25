@@ -53,6 +53,10 @@ bumps `last_seen` past the cluster's next complete inventory.
   version, `+incompatible` is build metadata, a leading `v` is dropped.
 - ECOSYSTEM ranges without `versions[]` are reported `unsupported`, not
   guessed (≈1.7k Maven blocks).
+- An open-ended SEMVER range (`introduced`, no fix) is ignored when another
+  advisory of the same CVE lists exact `versions[]` and no range: Go vulndb
+  GO-2026-4919 says `>= 0.69.4` for the one compromised Trivy release, its
+  GHSA says `["0.69.4"]`. Without such a sibling the open range stands.
 - Names are compared in OSV's convention: Maven `group:artifact`, PyPI
   PEP 503, **Go lower-cased** (Trivy writes `github.com/datadog/…` in the
   purl, OSV keeps `DataDog`). Trivy's `%2B` in Go purls is decoded by
